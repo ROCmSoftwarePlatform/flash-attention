@@ -167,6 +167,7 @@ ext_modules.append(
                 [
                     "-O3",
                     "-std=c++20",
+                    "--offload-arch=gfx90a",
                     "-U__CUDA_NO_HALF_OPERATORS__",
                     "-U__CUDA_NO_HALF_CONVERSIONS__",
 
