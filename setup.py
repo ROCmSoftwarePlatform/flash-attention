@@ -17,6 +17,7 @@ import subprocess
 
 import torch
 from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, ROCM_HOME, CUDA_HOME
+import flash_attn
 
 
 with open("README.md", "r", encoding="utf-8") as fh:
@@ -196,7 +197,7 @@ ext_modules.append(
 
 setup(
     name="flash_attn",
-    version="0.2.0",
+    version=flash_attn.__version__,
     packages=find_packages(
         exclude=("build", "csrc", "include", "tests", "dist", "docs", "benchmarks", "flash_attn.egg-info",)
     ),
