@@ -19,3 +19,15 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/settings.
+
+# Generated files
+csrc/flash_attn_rocm/src/*_hip.*
+csrc/flash_attn_rocm/src/*.cu
+csrc/flash_attn_rocm/src/*.hip
+csrc/flash_attn_rocm/*.cu
+csrc/flash_attn_rocm/*.hip
+
+
