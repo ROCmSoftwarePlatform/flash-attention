@@ -515,7 +515,8 @@ void launch_parallel_residual_(LaunchParams<BwdParams> &launch_params, const boo
                     dim3 grid(Kernel_traits::CTAS_PER_ROW * ctas_per_col);
                     dim3 block(Kernel_traits::THREADS_PER_CTA);
                     void *params_ = (void *)&launch_params.params;
-                    cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES, stream);
+                    //cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES, stream);
+                    hipLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES, stream);
                 }
 
                 using Kernel_traits_f = layer_norm::Kernel_traits_finalize<HIDDEN_SIZE,

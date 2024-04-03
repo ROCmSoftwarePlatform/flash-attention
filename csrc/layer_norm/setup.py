@@ -2,10 +2,12 @@
 import sys
 import warnings
 import os
+import glob
+import shutil
 from packaging.version import parse, Version
 
 import torch
-from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME, IS_HIP_EXTENSION
 from setuptools import setup, find_packages
 import subprocess
 
@@ -91,26 +93,23 @@ ext_modules = []
 
 # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
 # See https://github.com/pytorch/pytorch/pull/70650
-generator_flag = []
-torch_dir = torch.__path__[0]
-if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
-    generator_flag = ["-DOLD_GENERATOR_PATH"]
-
-raise_if_cuda_home_none("--fast_layer_norm")
+def build_for_cuda():
+    raise_if_cuda_home_none("flash_attn")
+    # Check, if CUDA11 is installed for compute capability 8.0
 # Check, if CUDA11 is installed for compute capability 8.0
-cc_flag = []
-_, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-if bare_metal_version < Version("11.0"):
-    raise RuntimeError("dropout_layer_norm is only supported on CUDA 11 and above")
-cc_flag.append("-gencode")
-cc_flag.append("arch=compute_70,code=sm_70")
-cc_flag.append("-gencode")
-cc_flag.append("arch=compute_80,code=sm_80")
-if bare_metal_version >= Version("11.8"):
+    cc_flag = []
+    _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
+    if bare_metal_version < Version("11.0"):
+        raise RuntimeError("rotary_emb is only supported on CUDA 11 and above")
     cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_90,code=sm_90")
+    cc_flag.append("arch=compute_70,code=sm_70")
+    cc_flag.append("-gencode")
+    cc_flag.append("arch=compute_80,code=sm_80")
+    if bare_metal_version >= Version("11.8"):
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_90,code=sm_90")
 
-ext_modules.append(
+    ext_modules.append(
     CUDAExtension(
         name="dropout_layer_norm",
         sources=[
@@ -195,6 +194,92 @@ ext_modules.append(
     )
 )
 
+def rename_cpp_to_hip(cpp_files):
+    for entry in cpp_files:
+        shutil.copy(entry, os.path.splitext(entry)[0] + ".hip")
+def validate_and_update_archs(archs):
+    # List of allowed architectures
+    allowed_archs = ["native", "gfx90a", "gfx940", "gfx941", "gfx942"]
+    # Validate if each element in archs is in allowed_archs
+    assert all(
+        arch in allowed_archs for arch in archs
+    ), f"One of GPU archs of {archs} is invalid or not supported by Flash-Attention"
+def build_for_rocm():
+    """build for ROCm platform"""
+    archs = os.getenv("GPU_ARCHS", "native").split(";")
+    validate_and_update_archs(archs)
+    cc_flag = [f"--offload-arch={arch}" for arch in archs]
+    if int(os.environ.get("FLASH_ATTENTION_INTERNAL_USE_RTN", 0)):
+        print("RTN IS USED")
+        cc_flag.append("-DUSE_RTN_BF16_CONVERT")
+    else:
+        print("RTZ IS USED")
+    fa_sources = ["ln_api.cpp","ln_fwd_256.cpp","ln_bwd_256.cpp", "ln_fwd_512.cpp","ln_bwd_512.cpp","ln_fwd_768.cpp",
+            "ln_bwd_768.cpp","ln_fwd_1024.cpp","ln_bwd_1024.cpp","ln_fwd_1280.cpp","ln_bwd_1280.cpp","ln_fwd_1536.cpp",
+            "ln_bwd_1536.cpp","ln_fwd_2048.cpp","ln_bwd_2048.cpp","ln_fwd_2560.cpp","ln_bwd_2560.cpp","ln_fwd_3072.cpp",
+            "ln_bwd_3072.cpp","ln_fwd_4096.cpp","ln_bwd_4096.cpp","ln_fwd_5120.cpp","ln_bwd_5120.cpp","ln_fwd_6144.cpp",
+            "ln_bwd_6144.cpp","ln_fwd_7168.cpp","ln_bwd_7168.cpp","ln_fwd_8192.cpp","ln_bwd_8192.cpp","ln_parallel_fwd_256.cpp",
+            "ln_parallel_bwd_256.cpp","ln_parallel_fwd_512.cpp","ln_parallel_bwd_512.cpp","ln_parallel_fwd_768.cpp",
+            "ln_parallel_bwd_768.cpp","ln_parallel_fwd_1024.cpp","ln_parallel_bwd_1024.cpp","ln_parallel_fwd_1280.cpp",
+            "ln_parallel_bwd_1280.cpp", "ln_parallel_fwd_1536.cpp","ln_parallel_bwd_1536.cpp","ln_parallel_fwd_2048.cpp",
+            "ln_parallel_bwd_2048.cpp","ln_parallel_fwd_2560.cpp","ln_parallel_bwd_2560.cpp","ln_parallel_fwd_3072.cpp",
+            "ln_parallel_bwd_3072.cpp","ln_parallel_fwd_4096.cpp","ln_parallel_bwd_4096.cpp","ln_parallel_fwd_5120.cpp",
+            "ln_parallel_bwd_5120.cpp","ln_parallel_fwd_6144.cpp","ln_parallel_bwd_6144.cpp","ln_parallel_fwd_7168.cpp",
+            "ln_parallel_bwd_7168.cpp","ln_parallel_fwd_8192.cpp","ln_parallel_bwd_8192.cpp",] #+ glob.glob("src/*.cpp")
+    rename_cpp_to_hip(fa_sources)
+    ext_modules.append(
+        CUDAExtension(
+            'dropout_layer_norm', ["ln_api.hip","ln_fwd_256.hip","ln_bwd_256.hip", "ln_fwd_512.hip","ln_bwd_512.hip","ln_fwd_768.hip",
+            "ln_bwd_768.hip","ln_fwd_1024.hip","ln_bwd_1024.hip","ln_fwd_1280.hip","ln_bwd_1280.hip","ln_fwd_1536.hip",
+            "ln_bwd_1536.hip","ln_fwd_2048.hip","ln_bwd_2048.hip","ln_fwd_2560.hip","ln_bwd_2560.hip","ln_fwd_3072.hip",
+            "ln_bwd_3072.hip","ln_fwd_4096.hip","ln_bwd_4096.hip","ln_fwd_5120.hip","ln_bwd_5120.hip","ln_fwd_6144.hip",
+            "ln_bwd_6144.hip","ln_fwd_7168.hip","ln_bwd_7168.hip","ln_fwd_8192.hip","ln_bwd_8192.hip","ln_parallel_fwd_256.hip",
+            "ln_parallel_bwd_256.hip","ln_parallel_fwd_512.hip","ln_parallel_bwd_512.hip","ln_parallel_fwd_768.hip",
+            "ln_parallel_bwd_768.hip","ln_parallel_fwd_1024.hip","ln_parallel_bwd_1024.hip","ln_parallel_fwd_1280.hip",
+            "ln_parallel_bwd_1280.hip", "ln_parallel_fwd_1536.hip","ln_parallel_bwd_1536.hip","ln_parallel_fwd_2048.hip",
+            "ln_parallel_bwd_2048.hip","ln_parallel_fwd_2560.hip","ln_parallel_bwd_2560.hip","ln_parallel_fwd_3072.hip",
+            "ln_parallel_bwd_3072.hip","ln_parallel_fwd_4096.hip","ln_parallel_bwd_4096.hip","ln_parallel_fwd_5120.hip",
+            "ln_parallel_bwd_5120.hip","ln_parallel_fwd_6144.hip","ln_parallel_bwd_6144.hip","ln_parallel_fwd_7168.hip",
+            "ln_parallel_bwd_7168.hip","ln_parallel_fwd_8192.hip","ln_parallel_bwd_8192.hip",], #+ glob.glob("src/*.cpp")
+            extra_compile_args={'cxx': ['-g', '-march=native', '-funroll-loops',"-DNDEBUG"],
+                                'nvcc': 
+                                    [
+                                        "-O3",
+                                        "-U__HIP_NO_HALF_OPERATORS__",
+                                        "-U__HIP_NO_HALF_CONVERSIONS__",
+                                        "-U__HIP_NO_BFLOAT16_OPERATORS__",
+                                        "-U__HIP_NO_BFLOAT16_CONVERSIONS__",
+                                        "-U__HIP_NO_BFLOAT162_OPERATORS__",
+                                        "-U__HIP_NO_BFLOAT162_CONVERSIONS__",
+                                        "-U__HIPCC_RTC__",
+                                        "-I/opt/rocm/include/hip/nvidia_detail"
+                                    ]+
+                                    [
+                                        '-O3', "-DNDEBUG"
+                                    ] + cc_flag
+                               }
+        )
+    )
+BUILD_TARGET = os.environ.get("BUILD_TARGET", "auto")
+def get_package_version():
+    with open(Path(this_dir) / "flash_attn" / "__init__.py", "r") as f:
+        version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
+    public_version = ast.literal_eval(version_match.group(1))
+    local_version = os.environ.get("FLASH_ATTN_LOCAL_VERSION")
+    if local_version:
+        return f"{public_version}+{local_version}"
+    else:
+        return str(public_version)
+if BUILD_TARGET == "auto":
+    if IS_HIP_EXTENSION:
+        build_for_rocm()
+    else:
+        build_for_cuda()
+else:
+    if BUILD_TARGET == "cuda":
+        build_for_cuda()
+    elif BUILD_TARGET == "rocm":
+        build_for_rocm()
 setup(
     name="dropout_layer_norm",
     version="0.1",

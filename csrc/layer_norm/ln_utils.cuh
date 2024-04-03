@@ -2,20 +2,24 @@
 
 #include <cassert>
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+//include <cuda_bf16.h> //
+//include <cuda_fp16.h> //
+#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
+//#include "ln.h"
+#include "ln_hip.h"
 
-#include "ln.h"
-
+typedef __hip_bfloat162 nv_bfloat162;
+typedef __hip_bfloat16 nv_bfloat16;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 constexpr uint32_t THREADS_PER_WARP = 32;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline void check_cuda_(cudaError_t status, const char *file, int line) {
-    if( status != cudaSuccess ) {
-        fprintf(stderr, "CUDA Error: %s %s %d\n", cudaGetErrorString(status), file, line);
+inline void check_cuda_(/*cudaError_t*/hipError_t status, const char *file, int line) {
+    if( status != hipSuccess ) {
+        fprintf(stderr, "hip Error: %s %s %d\n", /*cudaGetErrorString*/hipGetErrorString(status), file, line);
         exit(status);
     }
 }
@@ -122,7 +126,8 @@ struct Sum {
 
 template<typename T>
 inline __device__ T warp_shuffle_xor(const T & x, uint32_t idx){
-    return __shfl_xor_sync(uint32_t(-1), x, idx);
+    // return __shfl_xor_sync(uint32_t(-1), x, idx); //这里需要修改吗//先暂且用_shrfl_xor代替
+    return  __shfl_xor(uint32_t(-1), x, idx);
 }
 
 template<>
@@ -132,7 +137,8 @@ inline __device__ float2 warp_shuffle_xor<float2>(const float2 & x, uint32_t idx
 
 template<typename T>
 inline __device__ T warp_shuffle_down(const T & x, uint32_t idx){
-    return __shfl_down_sync(uint32_t(-1), x, idx);
+    // return __shfl_down_sync(uint32_t(-1), x, idx); //这里需要修改吗///先暂且用_shrfl_down代替
+    return __shfl_down(uint32_t(-1), x, idx);
 }
 
 template<>
@@ -223,9 +229,12 @@ struct TypeToVec2<half> {
 };
 
 template<>
-struct TypeToVec2<nv_bfloat16> {
+struct TypeToVec2<hip_bfloat16>{
     using Type = nv_bfloat162;
 };
+// struct TypeToVec2<nv_bfloat16> {
+//     using Type = nv_bfloat162;
+// };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -275,21 +284,28 @@ struct Converter<float2, half2>{
     }
 };
 
+//template<>
+// struct Converter<float2, nv_bfloat162>{
+//     static inline __device__ nv_bfloat162 convert(const float2 &x) {
 template<>
 struct Converter<float2, nv_bfloat162>{
     static inline __device__ nv_bfloat162 convert(const float2 &x) {
-#if __CUDA_ARCH__ >= 800
-        return __float22bfloat162_rn(x);
-#else
-        union {
-            nv_bfloat162 raw;
-            nv_bfloat16 x;
-            nv_bfloat16 y;
-        } tmp;
-        tmp.x = __float2bfloat16_rn(x.x);
-        tmp.y = __float2bfloat16_rn(x.y);
-        return tmp.raw;
-#endif
+//  #if __CUDA_ARCH__ >= 800   //这里修改
+//         return __float22bfloat162_rn(x);
+// #else
+//         union {
+//             //nv_bfloat162 raw;
+//             //nv_bfloat16 x;
+//             //nv_bfloat16 y;
+//             nv_bfloat162 raw;
+//             hip_bfloat16 x;
+//             hip_bfloat16 y;
+//         } tmp;
+//         tmp.x = __float2bfloat16_rn(x.x);
+//         tmp.y = __float2bfloat16_rn(x.y);
+//         return tmp.raw;
+// #endif
+            return __float22bfloat162_rn(x);
     }
 };
 
@@ -372,9 +388,13 @@ struct InterCTASync {
     }
 
     inline __device__ void spin_wait_(int *barrier, int step, int expected) {
-        asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(barrier), "r"(step));
+        // asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(barrier), "r"(step));
+        //*barrier=*barrier+step;
+        atomicAdd(barrier,step);
         for( int found = -1; found != expected; ) {
-            asm volatile("ld.global.acquire.gpu.b32 %0, [%1];" : "=r"(found) : "l"(barrier));
+            // asm volatile("ld.global.acquire.gpu.b32 %0, [%1];" : "=r"(found) : "l"(barrier));
+            found=__hip_atomic_load(barrier, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+            //found=*barrier;
         }
     }
 
@@ -394,7 +414,7 @@ struct InterCTASync {
             spin_wait_(barrier, step, expected);
         }
         // CTA waits for thread 0
-        __syncthreads();
+        __syncthreads(); //这里是build in hip中的
     }
 
     int phase_counter_;
@@ -594,8 +614,10 @@ inline __device__ void warp_chan_upd_dynamic(T &m_a, T &m2_a, int_t &n_a, int nu
         m2_a = m2_ab;
     }
     // Intra-warp broadcast (only lane 0 has valid stats).
-    m_a = __shfl_sync(uint32_t(-1), m_a, 0);
-    m2_a = __shfl_sync(uint32_t(-1), m2_a, 0);
+    // m_a = __shfl_sync(uint32_t(-1), m_a, 0);// 用shfl代替，如今先只能这样
+    // m2_a = __shfl_sync(uint32_t(-1), m2_a, 0);
+    m_a = __shfl(uint32_t(-1), m_a, 0);// 用shfl代替，如今先只能这样
+    m2_a = __shfl(uint32_t(-1), m2_a, 0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

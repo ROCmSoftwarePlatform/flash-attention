@@ -1,8 +1,9 @@
 #pragma once
 
 #include <unordered_map>
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
+//include <cuda_bf16.h>
 
 #ifdef OLD_GENERATOR_PATH
 #include <ATen/CUDAGeneratorImpl.h>
@@ -21,9 +22,9 @@ struct LaunchParams{
     size_t workspace_bytes;
     size_t barrier_size;
 
-    cudaDeviceProp * props;
+    hipDeviceProp_t* props;
 
-    cudaStream_t stream;
+    hipStream_t stream;
 
     Params params;
 
@@ -179,8 +180,8 @@ extern BwdRegistry BWD_FUNCS, PARALLEL_BWD_FUNCS;
 
 using fp32 = float;
 using fp16 = half;
-using bf16 = nv_bfloat16;
-
+//using bf16 = nv_bfloat16;
+using bf16 = hip_bfloat16;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T>

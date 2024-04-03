@@ -1,5 +1,5 @@
 #pragma once
-
+#include "hip/hip_runtime.h"
 #include "ln.h"
 #include "ln_utils.cuh"
 #include "ln_kernel_traits.h"
@@ -501,6 +501,7 @@ void launch_(LaunchParams<BwdParams> &launch_params, const bool configure_params
 
                     if( Kernel_traits::SMEM_BYTES >= 48 * 1024 ) {
                         CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::SMEM_BYTES));
+                        //CHECK_CUDA(hipFuncSetAttribute(kernel, hipFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::SMEM_BYTES_FWD));
                     }
                     auto stream = launch_params.stream;
                     auto ctas_per_col = launch_params.params.ctas_per_col;
@@ -511,7 +512,8 @@ void launch_(LaunchParams<BwdParams> &launch_params, const bool configure_params
                         dim3 grid(Kernel_traits::CTAS_PER_ROW * ctas_per_col);
                         dim3 block(Kernel_traits::THREADS_PER_CTA);
                         void *params_ = (void *)&launch_params.params;
-                        cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES, stream);
+                        //((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES, stream);
+                        hipLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES_FWD, stream);
                     }
 
                     using Kernel_traits_f = layer_norm::Kernel_traits_finalize<HIDDEN_SIZE,
