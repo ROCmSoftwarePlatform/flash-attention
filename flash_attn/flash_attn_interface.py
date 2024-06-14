@@ -13,7 +13,7 @@ def is_hip():
 # isort: off
 # We need to import the CUDA kernels after importing torch
 if is_hip():
-    from . import flash_attn_triton_amd as flash_attn_gpu
+    from . import flash_attn_triton_interface_amd as flash_attn_gpu
 else:
     import flash_attn_2_cuda as flash_attn_gpu
 
