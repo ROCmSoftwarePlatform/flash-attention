@@ -70,7 +70,11 @@ repeats = 30
 device = 'cuda'
 dtype = torch.float16
 
-bs_seqlen_vals = [(1, 16384)]
+bs_seqlen_vals = [( 8 , 16384),
+                  (16 , 16384),
+                  (32 , 16384),
+                  (64 , 16384),
+                  (128, 16384)]
 causal_vals = [False]
 headdim_vals = [128]
 dim = 2048
@@ -78,7 +82,7 @@ dropout_p = 0.0
 seqlen_q=1
 nhead_q=8
 nhead_k=1
-methods = (["fmha_fwd", "Pytorch"])
+methods = (["fmha_fwd"])
 
 time_f = {}
 time_b = {}
@@ -112,7 +116,7 @@ for causal in causal_vals:
                 # fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                 # print(exc_type, fname, exc_tb.tb_lineno)
                 f, b = float('nan'), float('nan')
-            time_f[config, "Pytorch"] = f
+            # time_f[config, "Pytorch"] = f
 
             print(f"### causal={causal}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen_k} ###")
             for method in methods:
