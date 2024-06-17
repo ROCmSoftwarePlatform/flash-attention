@@ -10,7 +10,7 @@ from einops import rearrange, repeat
 
 from flash_attn.utils.benchmark import benchmark_forward
 
-from flash_attn import flash_attn_qkvpacked_func
+from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
 
 try:
     from triton.ops.flash_attention import attention as attention_triton
@@ -70,12 +70,14 @@ repeats = 30
 device = 'cuda'
 dtype = torch.float16
 
-bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 16384)]
-causal_vals = [False, True]
-headdim_vals = [64, 128]
+bs_seqlen_vals = [(1, 16384)]
+causal_vals = [False]
+headdim_vals = [128]
 dim = 2048
 dropout_p = 0.0
-
+seqlen_q=1
+nhead_q=8
+nhead_k=1
 methods = (["fmha_fwd", "Pytorch"])
 
 time_f = {}
@@ -86,29 +88,36 @@ speed_b = {}
 speed_f_b = {}
 for causal in causal_vals:
     for headdim in headdim_vals:
-        for batch_size, seqlen in bs_seqlen_vals:
-            config = (causal, headdim, batch_size, seqlen)
-            nheads = dim // headdim
-            qkv = torch.randn(batch_size, seqlen, 3, nheads, headdim, device=device, dtype=dtype,
-                              requires_grad=True)
+        for batch_size, seqlen_k in bs_seqlen_vals:
+            config = (causal, headdim, batch_size, seqlen_k)
+            q = torch.randn(batch_size, seqlen_q, nhead_q, headdim, device=device, dtype=dtype, requires_grad=True)
+            k = torch.randn(batch_size, seqlen_k, nhead_k, headdim, device=device, dtype=dtype, requires_grad=True)
+            v = torch.randn(batch_size, seqlen_k, nhead_k, headdim, device=device, dtype=dtype, requires_grad=True)
+
             f = time_fwd(
-                flash_attn_qkvpacked_func, qkv, dropout_p, causal=causal, repeats=repeats, verbose=False
+                flash_attn_func, q, k, v, dropout_p, causal=causal, repeats=repeats, verbose=False
             )
             time_f[config, "fmha_fwd"] = f
 
             try:
-                qkv = qkv.detach().requires_grad_(True)
+                q = q.detach().requires_grad_(True)
+                k = k.detach().requires_grad_(True)
+                v = v.detach().requires_grad_(True)
+
                 f = time_fwd(
-                    attention_pytorch, qkv, dropout_p, causal=causal, repeats=repeats, verbose=False
+                    attention_pytorch, q, k, v, dropout_p, causal=causal, repeats=repeats, verbose=False
                 )
             except:  # Skip if OOM
+                # exc_type, exc_obj, exc_tb = sys.exc_info()
+                # fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                # print(exc_type, fname, exc_tb.tb_lineno)
                 f, b = float('nan'), float('nan')
             time_f[config, "Pytorch"] = f
 
-            print(f"### causal={causal}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen} ###")
+            print(f"### causal={causal}, headdim={headdim}, batch_size={batch_size}, seqlen={seqlen_k} ###")
             for method in methods:
                 speed_f[config, method] = efficiency(
-                    flops(batch_size, seqlen, headdim, nheads, causal, mode="fwd"),
+                    flops(batch_size, seqlen_k, headdim, nhead_q, causal, mode="fwd"),
                     time_f[config, method]
                 )
 
