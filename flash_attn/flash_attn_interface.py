@@ -5,9 +5,17 @@ from typing import Optional, Sequence, Tuple, Union
 import torch
 import torch.nn as nn
 
+def is_hip():
+    if torch.version.hip is not None:
+        return True
+    return False
+
 # isort: off
 # We need to import the CUDA kernels after importing torch
-import flash_attn_2_cuda as flash_attn_cuda
+if is_hip():
+    from . import flash_attn_triton_interface_amd as flash_attn_gpu
+else:
+    import flash_attn_2_cuda as flash_attn_gpu
 
 # isort: on
 
@@ -88,7 +96,7 @@ def _flash_attn_forward(
     return_softmax: bool
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, softmax_lse, S_dmask, rng_state = flash_attn_cuda.fwd(
+    out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.fwd(
         q,
         k,
         v,
@@ -161,7 +169,7 @@ def _flash_attn_varlen_forward(
     seqused_k: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, softmax_lse, S_dmask, rng_state = flash_attn_cuda.varlen_fwd(
+    out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
         q,
         k,
         v,
@@ -255,12 +263,7 @@ def _flash_attn_backward(
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
-    (
-        dq,
-        dk,
-        dv,
-        softmax_d,
-    ) = flash_attn_cuda.bwd(
+    dq, dk, dv, softmax_d, = flash_attn_gpu.bwd(
         dout,
         q,
         k,
@@ -351,12 +354,7 @@ def _flash_attn_varlen_backward(
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
-    (
-        dq,
-        dk,
-        dv,
-        softmax_d,
-    ) = flash_attn_cuda.varlen_bwd(
+    dq, dk, dv, softmax_d, = flash_attn_gpu.varlen_bwd(
         dout,
         q,
         k,
@@ -1544,7 +1542,7 @@ def flash_attn_with_kvcache(
         cache_seqlens = maybe_contiguous(cache_seqlens)
     cache_batch_idx = maybe_contiguous(cache_batch_idx)
     block_table = maybe_contiguous(block_table)
-    out, softmax_lse = flash_attn_cuda.fwd_kvcache(
+    out, softmax_lse = flash_attn_gpu.fwd_kvcache(
         q,
         k_cache,
         v_cache,
