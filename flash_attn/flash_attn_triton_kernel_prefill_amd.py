@@ -28,7 +28,7 @@ import torch
 import triton
 import triton.language as tl
 
-DEBUG = True
+DEBUG = False
 
 
 class MetaData():

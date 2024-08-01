@@ -17,7 +17,7 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
-DEBUG = True
+DEBUG = False
 
 MAX_HEADDIM_SM8x = 192
 
@@ -50,7 +50,8 @@ def attn_bias_from_alibi_slopes(
             else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
         )
         relative_pos = torch.abs(row_idx + sk - sq - col_idx)
-        print("relative_pos:", relative_pos)
+        if DEBUG:
+            print("relative_pos:", relative_pos)
         return -slopes * relative_pos.to(dtype=slopes.dtype)
 
 
@@ -1916,59 +1917,37 @@ def test_flash_attn_splitkv(
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 @pytest.mark.parametrize("dtype", [torch.float16])
-# @pytest.mark.parametrize("num_splits", [1, 0])
-@pytest.mark.parametrize("num_splits", [0])
+@pytest.mark.parametrize("num_splits", [1, 0])
+# @pytest.mark.parametrize("num_splits", [1])
 @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha", "mqa"])
 # @pytest.mark.parametrize("mha_type", ["mha"])
-# @pytest.mark.parametrize("mha_type", ["mqa"])
-# @pytest.mark.parametrize("mha_type", ["gqa"])
 @pytest.mark.parametrize("new_kv", [False, True])
 # @pytest.mark.parametrize("new_kv", [False])
-# @pytest.mark.parametrize("new_kv", [True])
 @pytest.mark.parametrize("alibi", [False, True])
 # @pytest.mark.parametrize("alibi", [False])
-# @pytest.mark.parametrize("alibi", [True])
-# @pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("local", [False])
+@pytest.mark.parametrize("local", [False, True])
+# @pytest.mark.parametrize("local", [False])
 @pytest.mark.parametrize("causal", [False, True])
 # @pytest.mark.parametrize("causal", [False])
-# @pytest.mark.parametrize("causal", [True])
-# @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
-@pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [False])
-# @pytest.mark.parametrize("rotary_interleaved", [False, True])
-@pytest.mark.parametrize("rotary_interleaved", [False])
-# @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
-@pytest.mark.parametrize("rotary_fraction", [0.0])
-# @pytest.mark.parametrize("paged_kv_block_size", [None, 256])
+@pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False])
+# @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
+@pytest.mark.parametrize("rotary_interleaved", [False, True])
+# @pytest.mark.parametrize("rotary_interleaved", [False])
+@pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0])
+# @pytest.mark.parametrize("rotary_fraction", [0.0])
+@pytest.mark.parametrize("paged_kv_block_size", [None, 256])
 # @pytest.mark.parametrize("paged_kv_block_size", [256, 512])
-@pytest.mark.parametrize("paged_kv_block_size", [None])
+# @pytest.mark.parametrize("paged_kv_block_size", [256])
 @pytest.mark.parametrize("has_batch_idx", [False, True])
 # @pytest.mark.parametrize("has_batch_idx", [False])
-# @pytest.mark.parametrize("has_batch_idx", [True])
 @pytest.mark.parametrize("d", [32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [128])
-# @pytest.mark.parametrize("d", [16])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
-    [  
-        # (1, 1),
-        # (1, 2),
-        # (2, 2),
-        # (2, 4),
-        # (4, 2),
-        # (4, 4),
-        # (4, 8),
-        # (1, 4),
-        # (16, 64),
-        # (1, 4),
-        # (1, 8),
-        # (1, 16),
-        # (1, 32),
-        # (1, 64),
+    [
         (1, 128),
         (1, 339),
         (3, 1024),
@@ -2020,6 +1999,9 @@ def test_flash_attn_kvcache(
         print("dtype:",  dtype)
 
     if is_hip():
+        if paged_kv_block_size is not None:
+            pytest.skip("paged attention not supported on AMD yet")
+
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
         
@@ -2039,25 +2021,25 @@ def test_flash_attn_kvcache(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 2 # 2
+    batch_size = 2
     batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
-    nheads_q = 6 # 6
+    nheads = 6
     
     if DEBUG:
-        print("nheads_q:", nheads_q)
+        print("nheads_q:", nheads)
         print("batch_size:", batch_size)
 
     # rotary_dim must be a multiple of 16, and must be <= d
     rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
-    nheads_k = nheads_q if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
-    assert nheads_q % nheads_k == 0
+    nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
+    assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
     if False:
         q = torch.zeros(batch_size_cache, seqlen_q, nheads_k, d, device=device, dtype=dtype)    
         for i in range(seqlen_q):
             q[:, i, :, :] = torch.full((batch_size_cache, nheads_k, d), i + 1, device=device, dtype=dtype)
     else:
-        q = torch.randn(batch_size, seqlen_q, nheads_q, d, device=device, dtype=dtype)
+        q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
         k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
@@ -2142,7 +2124,7 @@ def test_flash_attn_kvcache(
         print("cache_batch_idx:", cache_batch_idx)
 
     if alibi:
-        alibi_slopes = torch.rand(batch_size, nheads_q, device=device, dtype=torch.float32) * 0.3
+        alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
         attn_bias = attn_bias_from_alibi_slopes(
             alibi_slopes, seqlen_q, seqlen_k, None, key_padding_mask, causal=causal
         )
@@ -2197,8 +2179,8 @@ def test_flash_attn_kvcache(
         )
         k_cache_ref[update_mask] = rearrange(k_ro, "b s ... -> (b s) ...")
         v_cache_ref[update_mask] = rearrange(v, "b s ... -> (b s) ...")
-    k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads_q // nheads_k)
-    v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads_q // nheads_k)
+    k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
+    v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
     out = flash_attn_with_kvcache(
         q,
         k_cache if paged_kv_block_size is None else k_cache_paged,
@@ -2226,7 +2208,6 @@ def test_flash_attn_kvcache(
     # o1 = torch.einsum('bhst,bthd->bshd', s_tmp, v_cache_ref)
     # lse_ref = torch.logsumexp(qk / math.sqrt(d), -1)
     # probs = torch.softmax(qk, dim=-1)
-    # key_padding_mask = None # Used to confirm that need to implement key masking in decode kernel
     out_ref, _ = attention_ref(
         q_ro,
         k_cache_rep,
@@ -2303,15 +2284,6 @@ def test_flash_attn_kvcache(
         if DEBUG:
             print("v_cache_select:", v_cache, v_cache.shape)
             print("v_cache_ref:", v_cache_ref, v_cache_ref.shape)
-
-    if not torch.allclose(out, out_ref, rtol=1e-3, atol=1e-3):
-        print("Mismatch between FlashAttention and reference implementation")
-        print("Max absolute difference:", (out - out_ref).abs().max().item())
-        print("Mean absolute difference:", (out - out_ref).abs().mean().item())
-        print("Positions of large differences:")
-        large_diff_mask = (out - out_ref).abs() > 1e-3
-        print(large_diff_mask.nonzero())
-    
 
     mult = 3 if not alibi else 5
     assert (out - out_ref).abs().max().item() <= mult * (out_pt - out_ref).abs().max().item() + 1e-5

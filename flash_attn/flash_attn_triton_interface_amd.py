@@ -3,7 +3,7 @@ import triton
 from .flash_attn_triton_kernel_prefill_amd import MetaData, attention_prefill, get_shape_from_layout, _attn_bwd_preprocess, _attn_bwd
 from .flash_attn_triton_kernel_decode_amd import attention_decode
 
-DEBUG = True
+DEBUG = False
 
 def fwd(q,
         k,
@@ -145,138 +145,6 @@ def varlen_fwd(
 
     return tri_out, q , k , v, o, softmax_lse, softmax_p, torch.get_rng_state()
 
-def unpage(paged_cache, block_table, seqlen_k):
-    if DEBUG:
-        print("paged_cache:", paged_cache, paged_cache.shape)
-        print("block_table:", block_table, block_table.shape)
-    
-    # Extract dimensions
-    num_blocks, block_size, nheads_k, d = paged_cache.shape
-    batch_size, num_blocks_per_batch = block_table.shape
-    seqlen_k_inferred = num_blocks_per_batch * block_size
-
-    # Initialize the unpaged cache
-    unpaged_cache = torch.zeros((batch_size, seqlen_k_inferred, nheads_k, d), 
-                                dtype=paged_cache.dtype, 
-                                device=paged_cache.device)
-
-    # Reconstruct the unpaged cache
-    for i in range(batch_size):
-        for j, block_idx in enumerate(block_table[i]):
-            if block_idx != -1:
-                start = j * block_size
-                end = min((j + 1) * block_size, seqlen_k_inferred)
-                unpaged_cache[i, start:end] = paged_cache[block_idx, :end-start]
-
-    if DEBUG:
-        print("unpaged_cache:", unpaged_cache, unpaged_cache.shape)
-    return unpaged_cache[:, :seqlen_k, :, :]
-
-def update_cache_inplace(cache, new_seq, cache_seqlens, print=False):
-    if DEBUG and print:
-        print("cache before:", cache)
-        print("new_seq:", new_seq)
-        print("cache_seqlens:", cache_seqlens)
-
-    # Ensure cache and new_seq are 4D tensors
-    assert cache.dim() == 4 and new_seq.dim() == 4, "cache and new_seq should be 4D tensors (B, S, H, D)"
-    
-    # Ensure cache and new_seq have compatible dimensions
-    assert cache.shape[0] == new_seq.shape[0], "Batch sizes don't match"
-    assert cache.shape[2] == new_seq.shape[2], "Number of heads don't match"
-    assert cache.shape[3] == new_seq.shape[3], "Head dimensions don't match"
-    
-    batch_size_cache, seqlen_k, nheads, d = cache.shape
-    batch_size_new, seqlen_new, _, _ = new_seq.shape
-    
-    # Create a mask for updating
-    arange = torch.arange(seqlen_k, device=cache.device).unsqueeze(0)
-    cache_seqlens_expanded = cache_seqlens.unsqueeze(1)
-    update_mask = torch.logical_and(
-        cache_seqlens_expanded <= arange,
-        arange < cache_seqlens_expanded + seqlen_new
-    )
-    
-    # Update the cache in-place with new_seq where the mask is True
-    cache[update_mask] = new_seq.view(-1, nheads, d)
-
-    if DEBUG and print:
-        print("cache after:", cache)
-    
-    return
-
-def update_cache_slice_inplace(cache, new_seq, cache_seqlens, cache_batch_idx, print=False):
-    if DEBUG and print:
-        print("cache before:", cache)
-        print("new_seq:", new_seq)
-        print("cache_seqlens:", cache_seqlens)
-        print("cache_batch_idx:", cache_batch_idx)
-
-    # Ensure cache and new_seq are 4D tensors
-    assert cache.dim() == 4 and new_seq.dim() == 4, "cache and new_seq should be 4D tensors (B, S, H, D)"
-    
-    # Ensure cache and new_seq have compatible dimensions
-    assert cache.shape[2:] == new_seq.shape[2:], "Number of heads and head dimensions don't match"
-    
-    batch_size, seqlen_new, nheads, d = new_seq.shape
-    
-    # Create a mask for updating
-    arange = torch.arange(cache.shape[1], device=cache.device).unsqueeze(0)
-    cache_seqlens_expanded = cache_seqlens.unsqueeze(1)
-    update_mask = torch.logical_and(
-        cache_seqlens_expanded <= arange,
-        arange < cache_seqlens_expanded + seqlen_new
-    )
-    
-    # Update the cache in-place with new_seq where the mask is True
-    for i in range(batch_size):
-        cache_idx = cache_batch_idx[i]
-        cache[cache_idx][update_mask[i]] = new_seq[i][:(update_mask[i].sum())]
-
-    if DEBUG and print:
-        print("cache after:", cache)
-
-    return
-
-def updated_paged_cache_inplace(paged_cache, new_seqs, cache_seqlens, block_table, debug_print=False):
-    debug_print = DEBUG and debug_print
-    
-    if debug_print:
-        print("paged_cache before:", paged_cache, paged_cache.shape)
-        print("new_seqs:", new_seqs, new_seqs.shape)
-        print("cache_seqlens:", cache_seqlens, cache_seqlens.shape)
-        print("block_table:", block_table, block_table.shape)
-
-    # Extract dimensions
-    num_blocks, block_size, nheads, d = paged_cache.shape
-    batch_size, seqlen_new, nheads, d = new_seqs.shape
-    batch_size, num_blocks_per_batch = block_table.shape
-
-    # Iterate through the batch and update the cache
-    for i in range(batch_size):
-        seq_blocks = block_table[i]
-        valid_blocks = seq_blocks[seq_blocks != -1]
-        new_seq = new_seqs[i]
-        start_idx = cache_seqlens[i]
-
-        for j, block_idx in enumerate(valid_blocks):
-            block_start = j * block_size
-            block_end = min((j + 1) * block_size, start_idx + seqlen_new)
-            
-            # Calculate the range of indices to update in this block
-            update_start = max(start_idx - block_start, 0)
-            update_end = min(block_end - block_start, block_size)
-
-            if update_end > update_start:
-                # Update the cache for this block
-                paged_cache[block_idx, update_start:update_end] = new_seq[block_start + update_start - start_idx:block_start + update_end - start_idx]
-
-    if debug_print:
-        print("paged_cache after:", paged_cache)
-
-    return paged_cache
-
-
 def fwd_kvcache(
         q,
         k_cache,
@@ -322,111 +190,29 @@ def fwd_kvcache(
     if out is None:
         out = torch.empty_like(q)
 
+    # fill metadata
+    input_metadata = MetaData(sm_scale=softmax_scale)
+    input_metadata.layout = "bshd"
+    input_metadata.max_seqlens_q = q.shape[1]
+    input_metadata.max_seqlens_k = k_cache.shape[1]
+    input_metadata.cache_seqlens = cache_seqlens
+    input_metadata.cache_batch_idx = cache_batch_idx
 
-    BASELINE_IMPL = False
-    if BASELINE_IMPL:
-        q_input = q
-        input_metadata = MetaData(sm_scale=softmax_scale)
+    if k is not None and v is not None:
+        input_metadata.new_kv = True
+        input_metadata.seqlen_new = k.shape[1]
+        input_metadata.k_new = k
+        input_metadata.v_new = v
 
-        # paged attention
-        if block_table is not None:
-            # new kv
-            if k is not None and v is not None:
-                # update metadata
-                input_metadata.new_kv = True
-                input_metadata.seqlen_new = k.shape[1]
-
-                updated_paged_cache_inplace(k_cache, k, cache_seqlens, block_table)
-                updated_paged_cache_inplace(v_cache, v, cache_seqlens, block_table)
-
-            # unpage so that it can run in a regular attention kernel
-            unpage_seqlen_k = max(cache_seqlens) + 1 # infer the seqlen_k if paged cache
-            k_cache = unpage(k_cache, block_table, unpage_seqlen_k)
-            v_cache = unpage(v_cache, block_table, unpage_seqlen_k)
-
-            # set input k and v
-            k_input = k_cache
-            v_input = v_cache 
-        else:
-            # normal attention
-
-            # new kv
-            if k is not None and v is not None:
-                # update metadata
-                input_metadata.new_kv = True
-                input_metadata.seqlen_new = k.shape[1] 
-
-                # check if updating subcache
-                if cache_batch_idx is not None:
-                    update_cache_slice_inplace(k_cache, k, cache_seqlens, cache_batch_idx)
-                    update_cache_slice_inplace(v_cache, v, cache_seqlens, cache_batch_idx)
-                    
-                    # set input k and v
-                    k_input = k_cache[cache_batch_idx,:,:,:]
-                    v_input = v_cache[cache_batch_idx,:,:,:]
-                else:
-                    update_cache_inplace(k_cache, k, cache_seqlens)
-                    update_cache_inplace(v_cache, v, cache_seqlens)
-                    # set input k and v
-                    k_input = k_cache
-                    v_input = v_cache             
-            else:
-                # set input k and v
-                if cache_batch_idx is not None:
-                    k_input = k_cache[cache_batch_idx,:,:,:]
-                    v_input = v_cache[cache_batch_idx,:,:,:]
-                else:
-                    k_input = k_cache
-                    v_input = v_cache
-
-        # update metadata
-        seqlen_q = q_input.shape[1]
-        seqlen_k = k_input.shape[1]
-        input_metadata.max_seqlens_q = seqlen_q
-        input_metadata.max_seqlens_k = seqlen_k
-        input_metadata.layout = "bshd"    
-        input_metadata.cache_seqlens = cache_seqlens # cache seqlens (seqlens in kvcache) (b x 1)
-        
-        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q_input, k_input, input_metadata)
-        
-        if causal:
-            input_metadata.need_causal()
-        
-        if alibi_slopes is not None:
-            input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
+    if causal:
+        input_metadata.need_causal()
     
-        # Check arguments
-        input_metadata.check_args(q_input, k_input, v_input, out)
-
-        # Perform the forward attention computation
-        tri_out, encoded_softmax = attention_prefill(q_input, k_input, v_input, out, input_metadata)
-
-        softmax_lse = encoded_softmax
-        softmax_p = encoded_softmax
-    else:
-        # fill metadata
-        input_metadata = MetaData(sm_scale=softmax_scale)
-        input_metadata.layout = "bshd"
-        input_metadata.max_seqlens_q = q.shape[1]
-        input_metadata.max_seqlens_k = k_cache.shape[1]
-        input_metadata.cache_seqlens = cache_seqlens
-        input_metadata.cache_batch_idx = cache_batch_idx
-
-        if k is not None and v is not None:
-            input_metadata.new_kv = True
-            input_metadata.seqlen_new = k.shape[1]
-            input_metadata.k_new = k
-            input_metadata.v_new = v
-
-        if causal:
-            input_metadata.need_causal()
-        
-        if alibi_slopes is not None:
-            batch, _ , nheads_q, _= q.shape
-            input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
-        
-        # launch kernel
-        tri_out = attention_decode(q, k_cache, v_cache, input_metadata)
+    if alibi_slopes is not None:
+        batch, _ , nheads_q, _= q.shape
+        input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
+    
+    # launch kernel
+    tri_out = attention_decode(q, k_cache, v_cache, input_metadata)
 
     if DEBUG:
         print()

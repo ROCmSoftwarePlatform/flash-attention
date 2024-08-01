@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 from flash_attn.flash_attn_triton_kernel_prefill_amd import MetaData
 
-DEBUG = True
+DEBUG = False
 
 def _strides(x: torch.Tensor, *stride_names: str):
     if x is None:
