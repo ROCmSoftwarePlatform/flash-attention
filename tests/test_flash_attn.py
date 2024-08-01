@@ -2006,7 +2006,7 @@ def test_flash_attn_kvcache(
             pytest.skip("local sliding window attention not supported on AMD yet")
         
         if rotary_interleaved == True or rotary_fraction > 0.0:
-            pytest.skip("rotatary embedding not supported on AMD yet")
+            pytest.skip("rotary embedding not supported on AMD yet")
 
         # skip all cases where seqlen_q, seqlen_k, or d are not powers of 2
         if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
