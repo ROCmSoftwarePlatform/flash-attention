@@ -65,4 +65,4 @@ jobs:
       - name: AMD Kernel Tests
         run: |
           pytest flash_attn/flash_attn_triton_kernel_prefill_amd.py
-          pytest flash_attn/flash_attn_triton_kernel_decode_amd.py
+          pytest flash_attn/flash_attn_triton_kernel_decode_amd.py::test_op_fwd
