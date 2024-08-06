@@ -28,6 +28,8 @@ import torch
 import triton
 import triton.language as tl
 
+DEBUG = False
+
 
 class MetaData():
     cu_seqlens_q = None
@@ -40,10 +42,17 @@ class MetaData():
     num_contexts = 0
     varlen = False
     layout = None
+    cache_seqlens = None
+    cache_batch_idx = None
+    new_kv = False
+    seqlen_new = None
+    k_new = None
+    v_new = None
     dropout_p, return_encoded_softmax = 0.0, False
 
     def __repr__(self) -> str:
         return (f"MetaData(\n"
+                f"  sm_scale={self.sm_scale},\n"
                 f"  cu_seqlens_q={self.cu_seqlens_q},\n"
                 f"  cu_seqlens_k={self.cu_seqlens_k},\n"
                 f"  max_seqlens_q={self.max_seqlens_q},\n"
@@ -54,6 +63,12 @@ class MetaData():
                 f"  num_contexts={self.num_contexts},\n"
                 f"  varlen={self.varlen},\n"
                 f"  layout={self.layout},\n"
+                f"  cache_seqlens={self.cache_seqlens},\n"
+                f"  cache_batch_idx={self.cache_batch_idx},\n"
+                f"  new_kv={self.new_kv},\n"
+                f"  seqlen_new={self.seqlen_new},\n"
+                f"  k_new={self.k_new},\n"
+                f"  v_new={self.v_new},\n"
                 f"  dropout_p={self.dropout_p},\n"
                 f"  return_encoded_softmax={self.return_encoded_softmax}\n"
                 f")")
@@ -259,12 +274,14 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 size_n = start_n + OFFS_N[None, :]
                 mask = size_n < boundary_m[:, None]
                 qk = tl.where(mask, qk, float("-inf"))
+        
+        # -- compute qk ----
+        qk += tl.dot(q, k)
+
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
             qk = tl.where(causal_mask, qk, float("-inf"))
-        # -- compute qk ----
-        qk += tl.dot(q, k)
         if bias_ptrs is not None:
             bias_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
             bias = load_fn(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q, actual_seqlen_k)
@@ -842,10 +859,6 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     dq *= LN2
     tl.store(DQ_block_ptr, dq.to(q.dtype))
 
-
-empty = torch.empty(128, device="cuda")
-
-
 def get_shape_from_layout(q, k, metadata):
     if metadata.layout == 'thd':
         nheads_q, nheads_k = q.shape[1], k.shape[1]
@@ -888,6 +901,15 @@ class _attention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
+        if DEBUG:
+            print()
+            print("_attention.forward")
+            print("q:", q, q.shape)
+            print("k:", k, k.shape)
+            print("v:", v, v.shape)
+            print("o:", o, o.shape)
+            print("metadata:", metadata)
+
         # NOTE: a large bias tensor leads to overflow during pointer arithmetic
         if (metadata.bias is not None):
             assert (metadata.bias.numel() < 2**31)
@@ -1031,7 +1053,7 @@ class _attention(torch.autograd.Function):
         return dq, dk, dv, None, None
 
 
-attention = _attention.apply
+attention_prefill = _attention.apply
 
 
 def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
@@ -1126,7 +1148,7 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _ = attention(q, k, v, o, input_metadata)
+    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
 
     # Transpose here if layout is bshd so we have same reference code for all layouts
     if layout == 'bshd':
@@ -1197,7 +1219,7 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=tor
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _ = attention(q, k, v, o, input_metadata)
+    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
     # reference implementation:171
 
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
@@ -1236,7 +1258,7 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
         scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q], k[start_k:end_k]).float()
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v[start_k:end_k])
-    attention(q, k, v, tri_out, input_metadata)
+    attention_prefill(q, k, v, tri_out, input_metadata)
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
 
 
@@ -1264,7 +1286,7 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
         scores = torch.einsum('qhd,khd->qhk', q[start_q:end_q], k_curr).float()
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
-    attention(q, k, v, tri_out, input_metadata)
+    attention_prefill(q, k, v, tri_out, input_metadata)
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
 
 
@@ -1341,7 +1363,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         ref_dq, q.grad = q.grad.clone(), None
 
     # # triton implementation
-    tri_out, _ = attention(q, k, v, o, input_metadata)
+    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
     tri_out.backward(dout)
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -1473,7 +1495,7 @@ def run_benchmark(custom, args):
         if causal:
             input_metadata.need_causal()
         o = torch.empty_like(q)
-        fn = lambda: attention(q, k, v, o, input_metadata)
+        fn = lambda: attention_prefill(q, k, v, o, input_metadata)
         if mode == 'bwd':
             o, _ = fn()
             do = torch.randn_like(o)

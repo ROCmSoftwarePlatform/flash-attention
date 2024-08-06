@@ -26,9 +26,10 @@ var/
 # Dev
 venv
 
-# Other
+# AMD
 .eggs
 .vscode
 core
 scripts
 log*
+*csv

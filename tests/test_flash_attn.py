@@ -17,6 +17,8 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
+DEBUG = False
+
 MAX_HEADDIM_SM8x = 192
 
 
@@ -52,6 +54,8 @@ def attn_bias_from_alibi_slopes(
             else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
         )
         relative_pos = torch.abs(row_idx + sk - sq - col_idx)
+        if DEBUG:
+            print("relative_pos:", relative_pos)
         return -slopes * relative_pos.to(dtype=slopes.dtype)
 
 
@@ -251,6 +255,24 @@ def attention_ref(
         output: (batch_size, seqlen_q, nheads, head_dim)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
     """
+    PRINT_DEBUG = DEBUG and upcast==True
+
+    if PRINT_DEBUG:
+        print()
+        print("attention_ref")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("query_padding_mask:",query_padding_mask)
+        print("key_padding_mask:",key_padding_mask)
+        print("attn_bias:",attn_bias)
+        print("dropout_p:",dropout_p)
+        print("dropout_mask:",dropout_mask)
+        print("causal:",causal)
+        print("window_size:",window_size)
+        print("upcast:",upcast)
+        print("reorder_ops:",reorder_ops)
+
     if causal:
         window_size = (window_size[0], 0)
     dtype_og = q.dtype
@@ -260,8 +282,11 @@ def attention_ref(
     k = repeat(k, "b s h d -> b s (h g) d", g=q.shape[2] // k.shape[2])
     v = repeat(v, "b s h d -> b s (h g) d", g=q.shape[2] // v.shape[2])
     d = q.shape[-1]
-    if not reorder_ops:
-        scores = torch.einsum("bthd,bshd->bhts", q / math.sqrt(d), k)
+    if False:
+        if not reorder_ops:
+                scores = torch.einsum("bthd,bshd->bhts", q, k)
+        else:
+            scores = torch.einsum("bthd,bshd->bhts", q, k)
     else:
         scores = torch.einsum("bthd,bshd->bhts", q, k / math.sqrt(d))
     if softcap > 0:
@@ -269,7 +294,11 @@ def attention_ref(
         scores = scores.tanh()
         scores = scores * softcap
     if key_padding_mask is not None:
+        if PRINT_DEBUG:
+            print("scores before key padding mask:", scores, scores.shape)
         scores.masked_fill_(rearrange(~key_padding_mask, "b s -> b 1 1 s"), float("-inf"))
+        if PRINT_DEBUG:
+            print("scores after key padding mask:", scores, scores.shape)
     if window_size[0] >= 0 or window_size[1] >= 0:
         local_mask = construct_local_mask(
             seqlen_q,
@@ -280,9 +309,18 @@ def attention_ref(
             q.device,
             key_leftpad=key_leftpad,
         )
+        if PRINT_DEBUG:
+            print("scores before causal:",scores)
         scores.masked_fill_(local_mask, float("-inf"))
+        if PRINT_DEBUG:
+            print("scores after causal:",scores)
     if attn_bias is not None:
+        if PRINT_DEBUG:
+            print("scores before attn_bias:", scores, scores.shape)
         scores = scores + attn_bias
+        if PRINT_DEBUG:
+            print("scores after attn_bias:", scores, scores.shape)
+    
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
@@ -869,8 +907,6 @@ def is_hip():
 def is_power_of_2(n):
     return n > 0 and (n & (n - 1)) == 0
 
-DEBUG=False
-
 @pytest.mark.parametrize("kvpacked", [True, False])
 # @pytest.mark.parametrize("kvpacked", [False])
 @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
@@ -915,7 +951,7 @@ def test_flash_attn_output(
 
     if is_hip():
         if dropout_p != 0.0:
-            pytest.skip("Dropout not supported in HIP")
+            pytest.skip("Dropout not supported on AMD yet")
         
         # skip all cases where seqlen_q, seqlen_k, or d are not powers of 2
         if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
@@ -1219,7 +1255,7 @@ def test_flash_attn_varlen_output(
 ):
     if is_hip():
         if dropout_p != 0.0:
-            pytest.skip("Dropout not supported in HIP")
+            pytest.skip("Dropout not supported on AMD yet")
         
         # skip all cases where seqlen_q, seqlen_k, or d are not powers of 2
         if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
@@ -1982,6 +2018,39 @@ def test_flash_attn_kvcache(
     num_splits,
     dtype,
 ):
+    if DEBUG:
+        print()
+        print("test_flash_attn_kvcache")
+        print("seqlen_q:", seqlen_q)
+        print("seqlen_k:", seqlen_k )
+        print("d:", d )
+        print("has_batch_idx:", has_batch_idx )
+        print("paged_kv_block_size:", paged_kv_block_size )
+        print("rotary_fraction:", rotary_fraction )
+        print("rotary_interleaved:", rotary_interleaved )
+        print("seqlen_new_eq_seqlen_q:", seqlen_new_eq_seqlen_q )
+        print("causal:", causal )
+        print("local:",  local)
+        print("alibi:",  alibi)
+        print("new_kv:", new_kv )
+        print("mha_type:", mha_type )
+        print("num_splits:", num_splits )
+        print("dtype:",  dtype)
+
+    if is_hip():
+        if paged_kv_block_size is not None:
+            pytest.skip("paged attention not supported on AMD yet")
+
+        if local == True:
+            pytest.skip("local sliding window attention not supported on AMD yet")
+        
+        if rotary_interleaved == True or rotary_fraction > 0.0:
+            pytest.skip("rotary embedding not supported on AMD yet")
+
+        # skip all cases where seqlen_q, seqlen_k, or d are not powers of 2
+        if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
+            pytest.skip("seqlen_q, seqlen_k, or d are not powers of 2")
+
     if seqlen_q > seqlen_k and new_kv:
         pytest.skip()
     if not new_kv and rotary_fraction > 0.0:
@@ -1996,12 +2065,22 @@ def test_flash_attn_kvcache(
     batch_size = 2
     batch_size_cache = batch_size if not has_batch_idx else batch_size * 2
     nheads = 6
+    
+    if DEBUG:
+        print("nheads_q:", nheads)
+        print("batch_size:", batch_size)
+
     # rotary_dim must be a multiple of 16, and must be <= d
     rotary_dim = math.floor(int(rotary_fraction * d) / 16) * 16
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 3)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
+    if False:
+        q = torch.zeros(batch_size_cache, seqlen_q, nheads_k, d, device=device, dtype=dtype)    
+        for i in range(seqlen_q):
+            q[:, i, :, :] = torch.full((batch_size_cache, nheads_k, d), i + 1, device=device, dtype=dtype)
+    else:
+        q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype)
     seqlen_new = seqlen_q if seqlen_new_eq_seqlen_q else torch.randint(1, seqlen_q + 1, (1,)).item()
     if new_kv:
         k = torch.randn(batch_size, seqlen_new, nheads_k, d, device=device, dtype=dtype)
@@ -2009,9 +2088,37 @@ def test_flash_attn_kvcache(
     else:
         k, v = None, None
     if paged_kv_block_size is None:
-        k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
-        v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+        # Increasing Cache
+        if False:
+            k_cache = torch.zeros(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.zeros(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            
+            for i in range(nheads_k):
+                k_cache[:, :, i, :] = torch.full((batch_size_cache, seqlen_k, d), i + 1, device=device, dtype=dtype)
+                v_cache[:, :, i, :] = torch.full((batch_size_cache, seqlen_k, d), i + 1, device=device, dtype=dtype)
+        elif False:
+            k_cache = torch.zeros(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.zeros(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            
+            for i in range(seqlen_k):
+                k_cache[:, i, :, :] = torch.full((batch_size_cache, nheads_k, d), i + 1, device=device, dtype=dtype)
+                v_cache[:, i, :, :] = torch.full((batch_size_cache, nheads_k, d), i + 1, device=device, dtype=dtype)
+        
+        elif False:
+            k_cache = torch.zeros(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.zeros(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            
+            values = torch.arange(1, d + 1, device=device, dtype=dtype).view(1, 1, 1, d)
+            k_cache[:, :, :, :] = values.expand(batch_size_cache, seqlen_k, nheads_k, d)
+            v_cache[:, :, :, :] = values.expand(batch_size_cache, seqlen_k, nheads_k, d)
+        else:
+            k_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
+            v_cache = torch.randn(batch_size_cache, seqlen_k, nheads_k, d, device=device, dtype=dtype)
         block_table = None
+        if DEBUG:
+            print("k_cache:", k_cache, k_cache.shape)
+            print("v_cache:", v_cache, v_cache.shape)
+            print("block_table:", block_table, block_table.shape if block_table is not None else None)
     else:
         (
             k_cache,
@@ -2023,6 +2130,13 @@ def test_flash_attn_kvcache(
         ) = _generate_block_kvcache(
             seqlen_k, paged_kv_block_size, batch_size, nheads_k, d, device, dtype
         )
+        if DEBUG:
+            print("k_cache_paged:", k_cache_paged, k_cache_paged.shape)
+            print("v_cache_paged:", v_cache_paged, v_cache_paged.shape)
+            print("block_table:", block_table, block_table.shape)
+            print("k_cache:", k_cache, k_cache.shape)
+            print("v_cache:", v_cache, v_cache.shape)
+            print("num_blocks:", num_blocks)
     cache_seqlens = torch.randint(
         0 if new_kv else 1,
         # If we don't use seqlen_q in the case of causal and rotary, cos/sin won't be long enough
@@ -2054,6 +2168,14 @@ def test_flash_attn_kvcache(
         ]
     else:
         cache_batch_idx = None
+    if DEBUG:
+        print("cache_seqlens:", cache_seqlens)
+        print("arange:", arange)
+        print("cache_seqlens_expanded:", cache_seqlens_expanded)
+        print("seqlen_new:", seqlen_new)
+        print("key_padding_mask:", key_padding_mask)
+        print("cache_batch_idx:", cache_batch_idx)
+
     if alibi:
         alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
         attn_bias = attn_bias_from_alibi_slopes(
@@ -2168,6 +2290,14 @@ def test_flash_attn_kvcache(
         reorder_ops=True,
         key_leftpad=cache_leftpad,
     )
+
+    if DEBUG:
+        print()
+        print("out:", out, out.shape)
+        print("out_ref:", out_ref, out_ref.shape)
+        print("out_pt:", out_pt, out_pt.shape)
+        print()
+        
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
@@ -2194,8 +2324,23 @@ def test_flash_attn_kvcache(
                 "(b nblocks) block_size ... -> b (nblocks block_size) ...",
                 b=batch_size,
             )[:, :seqlen_k]
+        
+        if DEBUG:
+            print("k_cache_select:", k_cache_select, k_cache_select.shape)
+            print("k_cache_ref:", k_cache_ref, k_cache_ref.shape)
         assert torch.allclose(k_cache_select, k_cache_ref, rtol=1e-3, atol=1e-3)
+        if DEBUG:
+            print("v_cache_select:", v_cache_select, v_cache_select.shape)
+            print("v_cache_ref:", v_cache_ref, v_cache_ref.shape)
         assert torch.equal(v_cache_select, v_cache_ref)
+    else:
+        if DEBUG:
+            print("k_cache_select:", k_cache, k_cache.shape)
+            print("k_cache_ref:", k_cache_ref, k_cache_ref.shape)
+        if DEBUG:
+            print("v_cache_select:", v_cache, v_cache.shape)
+            print("v_cache_ref:", v_cache_ref, v_cache_ref.shape)
+
     mult = 3 if not alibi else 5
     assert (out - out_ref).abs().max().item() <= mult * (out_pt - out_ref).abs().max().item() + 1e-5
 

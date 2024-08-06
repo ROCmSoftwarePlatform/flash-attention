@@ -57,7 +57,12 @@ jobs:
       - name: Build
         run: |
           python setup.py install
-      - name: Test
+      - name: AMD Kernel Tests
         run: |
+          pytest flash_attn/flash_attn_triton_kernel_decode_amd.py::test_op_fwd
+          pytest flash_attn/flash_attn_triton_kernel_prefill_amd.py
+      - name: Flash Attention Tests
+        run: |
+          pytest tests/test_flash_attn.py::test_flash_attn_kvcache
           pytest tests/test_flash_attn.py::test_flash_attn_output
           pytest tests/test_flash_attn.py::test_flash_attn_varlen_output
