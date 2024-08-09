@@ -15,6 +15,7 @@ def fwd(q,
         causal,
         window_size_left,
         window_size_right,
+        softcap,
         return_softmax,
         gen_):
     if DEBUG:
@@ -28,6 +29,7 @@ def fwd(q,
         print("causal:", causal)
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
+        print("softcap", softcap)
         print("return_softmax:", return_softmax)
         print("gen_:", gen_)
 
@@ -68,6 +70,30 @@ def fwd(q,
 
     return tri_out, q , k , v, o, softmax_lse, softmax_p, torch.get_rng_state()
 
+
+def bwd(
+    dout,
+    q,
+    k,
+    v,
+    out,
+    softmax_lse,
+    dq,
+    dk,
+    dv,
+    alibi_slopes,
+    dropout_p,
+    softmax_scale,
+    causal,
+    window_size_left,
+    window_size_right,
+    softcap,
+    deterministic,
+    gen_,
+    rng_state,
+):
+    raise ValueError("bwd is not supported on AMD yet")
+
 def varlen_fwd(
         q, 
         k, 
@@ -76,6 +102,7 @@ def varlen_fwd(
         cu_seqlens_q,
         cu_seqlens_k,
         seqused_k,
+        leftpad_k,
         block_table_,
         alibi_slopes,\
         max_seqlen_q,
@@ -86,6 +113,7 @@ def varlen_fwd(
         causal,
         window_size_left,
         window_size_right,
+        softcap,
         return_softmax,
         gen_):
     
@@ -96,6 +124,8 @@ def varlen_fwd(
         print("v:", v.shape)
         print("cu_seqlens_q:", cu_seqlens_q)
         print("cu_seqlens_k:", cu_seqlens_k)
+        print("seqused_k:", seqused_k)
+        print("leftpad_k:", leftpad_k)
         print("block_table_:", block_table_)
         print("alibi_slopes:", alibi_slopes)
         print("max_seqlen_q:", max_seqlen_q)
@@ -106,6 +136,7 @@ def varlen_fwd(
         print("causal:", causal)
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
+        print("softcap", softcap)
         print("return_softmax:", return_softmax)
         print("gen_:", gen_)
 
@@ -145,6 +176,34 @@ def varlen_fwd(
 
     return tri_out, q , k , v, o, softmax_lse, softmax_p, torch.get_rng_state()
 
+def varlen_bwd(
+    dout,
+    q,
+    k,
+    v,
+    out,
+    softmax_lse,
+    dq,
+    dk,
+    dv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    alibi_slopes,
+    max_seqlen_q,
+    max_seqlen_k,
+    dropout_p,
+    softmax_scale,
+    zero_tensors,
+    causal,
+    window_size_left,
+    window_size_right,
+    softcap,
+    deterministic,
+    gen_,
+    rng_state,
+):
+    raise ValueError("varlen_bwd is not supported on AMD yet")
+
 def fwd_kvcache(
         q,
         k_cache,
@@ -155,6 +214,7 @@ def fwd_kvcache(
         rotary_cos,
         rotary_sin,
         cache_batch_idx,
+        cache_leftpad,
         block_table,
         alibi_slopes,
         out,
@@ -162,6 +222,7 @@ def fwd_kvcache(
         causal,
         window_size_left,
         window_size_right,
+        softcap,
         rotary_interleaved,
         num_splits):
     
@@ -177,6 +238,7 @@ def fwd_kvcache(
         print("rotary_cos:", rotary_cos)
         print("rotary_sin:", rotary_sin)
         print("cache_batch_idx:", cache_batch_idx)
+        print("cache_leftpad", cache_leftpad)
         print("block_table:", block_table, block_table.shape if block_table is not None else None)
         print("alibi_slopes:", alibi_slopes)
         print("out:", out)
@@ -184,6 +246,7 @@ def fwd_kvcache(
         print("causal:", causal)
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
+        print("softcap", softcap)
         print("rotary_interleaved:", rotary_interleaved)
         print("num_splits:", num_splits)
     
@@ -219,12 +282,3 @@ def fwd_kvcache(
         print("tri_out:", tri_out, tri_out.shape)
 
     return tri_out, None
-
-
-def bwd(dout, q, k, v, out, softmax_lse, dq, dk, dv, alibi_slopes, dropout_p, softmax_scale,  causal, window_size_left,
-        window_size_right, deterministic, gen_, rng_state):
-    raise ValueError("bwd is not supported on AMD yet")
-
-
-def varlen_bwd(dout, q, k, v, out, softmax_lse, dq, dk, dv, *args, **kwargs):
-    raise ValueError("varlen_bwd is not supported on AMD yet")

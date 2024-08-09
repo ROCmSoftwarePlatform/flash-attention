@@ -282,11 +282,8 @@ def attention_ref(
     k = repeat(k, "b s h d -> b s (h g) d", g=q.shape[2] // k.shape[2])
     v = repeat(v, "b s h d -> b s (h g) d", g=q.shape[2] // v.shape[2])
     d = q.shape[-1]
-    if False:
-        if not reorder_ops:
-                scores = torch.einsum("bthd,bshd->bhts", q, k)
-        else:
-            scores = torch.einsum("bthd,bshd->bhts", q, k)
+    if not reorder_ops:
+        scores = torch.einsum("bthd,bshd->bhts", q / math.sqrt(d), k)
     else:
         scores = torch.einsum("bthd,bshd->bhts", q, k / math.sqrt(d))
     if softcap > 0:
@@ -947,12 +944,16 @@ def is_power_of_2(n):
 # @pytest.mark.parametrize("dropout_p", [0.0])
 @pytest.mark.parametrize("softcap", [0.0, 50.0])
 def test_flash_attn_output(
-    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, forward_only=True):
+    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap, forward_only=True
+):
 
     if is_hip():
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported on AMD yet")
-        
+
+        if softcap != 0.0:
+            pytest.skip("softcap not supported on AMD yet")
+
         # skip all cases where seqlen_q, seqlen_k, or d are not powers of 2
         if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
             pytest.skip("seqlen_q, seqlen_k, or d are not powers of 2")
@@ -1251,11 +1252,14 @@ def test_flash_attn_output(
 @pytest.mark.parametrize("softcap", [0.0, 50.0])
 # @pytest.mark.parametrize('dropout_p', [0.0])
 def test_flash_attn_varlen_output(
-    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, forward_only=True
+    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap, forward_only=True
 ):
     if is_hip():
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported on AMD yet")
+        
+        if softcap != 0.0:
+            pytest.skip("softcap not supported on AMD yet")
         
         # skip all cases where seqlen_q, seqlen_k, or d are not powers of 2
         if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
@@ -2046,6 +2050,9 @@ def test_flash_attn_kvcache(
         
         if rotary_interleaved == True or rotary_fraction > 0.0:
             pytest.skip("rotary embedding not supported on AMD yet")
+
+        if has_leftpad == True:
+            pytest.skip("cache_leftpad not supported on AMD yet")
 
         # skip all cases where seqlen_q, seqlen_k, or d are not powers of 2
         if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
