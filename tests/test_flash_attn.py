@@ -34,7 +34,7 @@ def is_amd():
         return True
     return False
 
-def skip_config(*args, reproducible=True, skip_pct = 0.99):
+def skip_config(*args, reproducible=True, skip_pct = 0.95):
     config_str = '_'.join(map(str, args))
     
     if reproducible:
