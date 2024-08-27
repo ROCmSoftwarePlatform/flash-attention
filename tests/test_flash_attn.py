@@ -21,6 +21,25 @@ from flash_attn.layers.rotary import apply_rotary_emb
 
 DEBUG = False
 
+# this ensures that the same config will always get the same result
+REPRODUCIBLE=True
+if REPRODUCIBLE:
+    skip_seed = 42
+else:
+    skip_seed = time.time()
+random.seed(skip_seed)
+
+if DEBUG:
+    print("skip_seed:", skip_seed)
+
+def skip_config(*args,  skip_pct = 0.95):
+    return random.random() >= (1.0 - skip_pct)
+
+def is_amd():
+    if torch.version.hip is not None:
+        return True
+    return False
+
 MAX_HEADDIM_SM8x = 192
 
 
@@ -28,27 +47,6 @@ is_sm75 = torch.cuda.get_device_capability("cuda") == (7, 5)
 is_sm8x = torch.cuda.get_device_capability("cuda")[0] == 8
 is_sm80 = torch.cuda.get_device_capability("cuda") == (8, 0)
 is_sm90 = torch.cuda.get_device_capability("cuda") == (9, 0)
-
-def is_amd():
-    if torch.version.hip is not None:
-        return True
-    return False
-
-def skip_config(*args, reproducible=True, skip_pct = 0.95):
-    config_str = '_'.join(map(str, args))
-    
-    if reproducible:
-        # this ensures that the same config will always get the same result
-        skip_seed = config_str
-    else:
-        skip_seed = time.time()
-    
-    if DEBUG:
-        print("skip_seed:", skip_seed)
-    random.seed(config_str)
-    
-    
-    return random.random() >= (1.0 - skip_pct)
 
 
 def attn_bias_from_alibi_slopes(
