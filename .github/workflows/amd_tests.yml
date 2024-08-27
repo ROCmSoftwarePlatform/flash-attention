@@ -89,5 +89,5 @@ jobs:
       #     pytest tests/test_flash_attn.py::test_flash_attn_varlen_deterministic
       - name: AMD Kernel Tests
         run: |
-          pytest flash_attn/flash_attn_triton_kernel_decode_amd.py::test_op_fwd
-          pytest flash_attn/flash_attn_triton_kernel_prefill_amd.py
+          pytest -v -s flash_attn/flash_attn_triton_kernel_decode_amd.py::test_op_fwd
+          pytest -v -s flash_attn/flash_attn_triton_kernel_prefill_amd.py

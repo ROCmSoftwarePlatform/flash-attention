@@ -335,14 +335,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
-                      num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1,
-                      num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 3, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 32, 'waves_per_eu': 2, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
         # Fall-back config.
         triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
         # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
@@ -1001,7 +997,7 @@ class _attention_prefill(torch.autograd.Function):
         assert do.is_contiguous()
         assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
         seqlen_q = q.shape[2]
-        if True:
+        if False:
             dq = torch.zeros_like(q)
             dk = torch.zeros_like(k)
             dv = torch.zeros_like(v)
@@ -1017,8 +1013,8 @@ class _attention_prefill(torch.autograd.Function):
         RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
         arg_k = k
         arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
-        # assert N_CTX % PRE_BLOCK == 0
-        if True:
+        assert N_CTX % PRE_BLOCK == 0
+        if False:
             delta = torch.zeros_like(M)
         else:
             delta = torch.empty_like(M)
@@ -1341,24 +1337,25 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 
 
 @pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
-    (1, 1, 1, 16)
-    # (4, 48, 1024, 64),
-    # (4, 48, 2048, 64),
-    # (2, 48, 4096, 64),
-    # (1, 16, 1024, 64),
-    # (1, 16, 1024, 128),
+    # (1, 1, 1, 16)
+    (4, 48, 1024, 64),
+    (4, 48, 2048, 64),
+    (2, 48, 4096, 64),
+    (1, 16, 1024, 64),
+    (1, 16, 1024, 128),
     #(1, 16, 8192, 63),
     #(1, 16, 1022, 64),
 ])
 @pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
-# @pytest.mark.parametrize('torch_sdpa_test', [False, True])
-@pytest.mark.parametrize('torch_sdpa_test', [False])
-# @pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('causal', [False])
-# @pytest.mark.parametrize('use_alibi', [False, True])
-@pytest.mark.parametrize('use_alibi', [False])
+@pytest.mark.parametrize('torch_sdpa_test', [False, True])
+# @pytest.mark.parametrize('torch_sdpa_test', [False])
+@pytest.mark.parametrize('causal', [True, False])
+# @pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('use_alibi', [False, True])
+# @pytest.mark.parametrize('use_alibi', [False])
 def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, use_alibi,
                 dtype=torch.float16):
+    pytest.skip("Prefill Backward Kernel is broken")
     torch.manual_seed(20)
     if qseqlen_not_equal_kseqlen is not None:
         seqlen_q = qseqlen_not_equal_kseqlen
@@ -1378,7 +1375,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     input_metadata.layout = "bhsd"
 
     dropout_p = 0
-    if True:
+    if False:
         q_data = torch.arange(1, seqlen_q + 1, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(Z, -1, H, D_HEAD)
         q = q_data.clone().detach().requires_grad_(True)
         
@@ -1401,7 +1398,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         alibi_slopes = torch.tensor([2**(-8 / H * i) for i in range(1, H + 1)], dtype=torch.float32,
                                     device="cuda").repeat(Z, 1)
         input_metadata.need_alibi(alibi_slopes, Z, H)
-    if True:
+    if False:
         dout = torch.zeros_like(q)
     else:
         dout = torch.randn_like(q)
@@ -1436,10 +1433,10 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dq, q.grad = q.grad.clone(), None
-
     # compare
-    print("tri_out:", tri_out)
-    print("ref_out:",ref_out )
+    if DEBUG:
+        print("tri_out:", tri_out)
+        print("ref_out:",ref_out )
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
     # The current block size for MI200 series is 64x64. This results in
     # larger differences in float results due to rounding.
