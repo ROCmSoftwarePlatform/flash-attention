@@ -39,7 +39,7 @@ def skip_config(*args,  skip_pct = 0.95):
     return random.random() >= (1.0 - skip_pct)
 
 def skip_not_power_of_2_config(*args):
-    if all(is_power_of_2(arg) for arg in args):
+    if not all(is_power_of_2(arg) for arg in args):
         return True
     else:
         return False
@@ -1055,11 +1055,8 @@ def test_flash_attn_output(
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if not (is_power_of_2(seqlen_q) and is_power_of_2(seqlen_k) and is_power_of_2(d)):
-            pytest.skip("seqlen_q, seqlen_k, or d are not powers of 2")
-
-        # if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
-        #     pytest.skip("Randomly skipping this configuration to limited test time")
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
+            pytest.skip("Randomly skipping this configuration to limited test time")
 
     if (
         max(seqlen_q, seqlen_k) >= 2048
