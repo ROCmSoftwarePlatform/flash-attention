@@ -123,7 +123,7 @@ class MetaData():
             assert self.bias is None
             # TODO:Remove once dropout is supported with varlen
             assert self.dropout_p == 0.0
-            assert not self.return_encoded_softmax
+            # assert not self.return_encoded_softmax
         else:
             assert q.dim() == 4
             assert self.max_seqlens_q > 0 and self.max_seqlens_k > 0
@@ -309,10 +309,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_ENCODED_SOFTMAX:
-                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p).to(encoded_sm_ptrs.type.element_ty))
+                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p))
             p = tl.where(keep, p, 0.0)
         elif RETURN_ENCODED_SOFTMAX:
-            tl.store(encoded_sm_ptrs, p.to(encoded_sm_ptrs.type.element_ty))
+            tl.store(encoded_sm_ptrs, p)
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
@@ -352,7 +352,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                       num_warps=8),
         # TODO: This config fails with head_size not pow2 with data mismatches. Check why.
         #    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+        # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+        #               num_warps=4),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
                       num_warps=4),
     ],
     key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
@@ -361,7 +363,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
 @triton.jit
 def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz, stride_kh,
              stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh, stride_om,
-             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, cu_seqlens_q, cu_seqlens_k,
+             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
              dropout_p, philox_seed, philox_offset_base, encoded_softmax, alibi_slopes, HQ: tl.constexpr,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
@@ -469,8 +471,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
     # We can ask to return the dropout mask without actually doing any dropout. In
     # this case, we return an invalid pointer so indicate the mask is not valid.
     if RETURN_ENCODED_SOFTMAX:
-        encoded_sm_base = encoded_softmax + off_h_q * seqlen_q * seqlen_k
-        encoded_sm_ptrs = encoded_sm_base + offs_m[:, None] * seqlen_k + offs_n[None, :]
+        encoded_sm_offset = encoded_softmax + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        encoded_sm_ptrs = encoded_sm_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
     else:
         encoded_sm_ptrs = None
     # initialize pointer to m and l
@@ -897,13 +899,13 @@ def get_strides_from_layout(q, k, v, o, metadata):
     return q_strides, k_strides, v_strides, o_strides
 
 
-class _attention(torch.autograd.Function):
+class _attention_prefill(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
         if DEBUG:
             print()
-            print("_attention.forward")
+            print("_attention_prefill.forward")
             print("q:", q, q.shape)
             print("k:", k, k.shape)
             print("v:", v, v.shape)
@@ -934,10 +936,13 @@ class _attention(torch.autograd.Function):
         # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
         # only.  This return holds no useful output aside from debugging.
         if metadata.return_encoded_softmax:
-            encoded_softmax = torch.zeros((q.shape[0], q.shape[1], q.shape[2], k.shape[2]), device=q.device,
+            encoded_softmax = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
                                           dtype=torch.float32)
+            softmax_strides = (encoded_softmax.stride(0), encoded_softmax.stride(1), encoded_softmax.stride(2),
+                            encoded_softmax.stride(3))
         else:
             encoded_softmax = None
+            softmax_strides = (0, 0 , 0 , 0)
 
         M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
 
@@ -957,7 +962,7 @@ class _attention(torch.autograd.Function):
             alibi_strides = (0, 0)
 
         attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                       *bias_strides, *alibi_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
+                       *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                        dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
                        encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
                        ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
@@ -965,6 +970,14 @@ class _attention(torch.autograd.Function):
                        BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
                        USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                        > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
+
+        if DEBUG:
+            print("Saving in ctx for backward")
+            print("q:", q, q.shape)
+            print("k:", k, k.shape)
+            print("v:", v, v.shape)
+            print("o:", o, o.shape)
+            print("M:", M, M.shape)
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
@@ -977,21 +990,37 @@ class _attention(torch.autograd.Function):
         ctx.philox_offset = philox_offset
         ctx.encoded_softmax = encoded_softmax
         ctx.return_encoded_softmax = metadata.return_encoded_softmax
-        return o, encoded_softmax
+        return o, M, encoded_softmax
 
     @staticmethod
-    def backward(ctx, do, _):
+    def backward(ctx, do, _): # expects bhsd
+        if DEBUG:
+            print()
+            print("_attention_prefill.backward")
+            print("do:", do, do.shape, do.stride())
+
         if torch.version.hip is not None:
             BLOCK = 64
         else:
             BLOCK = 128
         q, k, v, o, M = ctx.saved_tensors
+        if DEBUG:
+            print("q:", q, q.shape, q.stride())
+            print("k:", k, k.shape, k.stride())
+            print("v:", v, v.shape, v.stride())
+            print("o:", o, o.shape, o.stride())
+            print("M:", M, M.shape, M.stride())
         assert do.is_contiguous()
         assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
         seqlen_q = q.shape[2]
-        dq = torch.empty_like(q)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
+        if False:
+            dq = torch.zeros_like(q)
+            dk = torch.zeros_like(k)
+            dv = torch.zeros_like(v)
+        else:
+            dq = torch.empty_like(q)
+            dk = torch.empty_like(k)
+            dv = torch.empty_like(v)
         BATCH, N_HEAD, N_CTX = q.shape[:3]
         PRE_BLOCK = 128
         # NUM_WARPS, NUM_STAGES = 4, 1
@@ -1001,10 +1030,20 @@ class _attention(torch.autograd.Function):
         arg_k = k
         arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
         assert N_CTX % PRE_BLOCK == 0
-        delta = torch.empty_like(M)
+        if False:
+            delta = torch.zeros_like(M)
+        else:
+            delta = torch.empty_like(M)
         _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
         # padded_head = (Lk != ctx.BLOCK_DMODEL)
         grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
+        if DEBUG:
+            print()
+            print("_attn_bwd_preprocess input")
+            print("o:", o, o.shape, )
+            print("do:", k, k.shape)
+            print("delta:", v, v.shape)
+
         _attn_bwd_preprocess[grid_preprocess](
             o,
             do,
@@ -1023,6 +1062,22 @@ class _attention(torch.autograd.Function):
             D_HEAD=ctx.BLOCK_DMODEL,
         )
         grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
+        if DEBUG:
+            print()
+            print("_attn_bwd input")
+            print("q:", q, q.shape)
+            print("arg_k:", arg_k, arg_k.shape)
+            print("v:", v, v.shape)
+            print("ctx.sm_scale:", ctx.sm_scale)
+            print("ctx.alibi_slopes:", ctx.alibi_slopes)
+            print("do:", do, do.shape)
+            print("dq:", dq, dq.shape)
+            print("dk:", dk, dk.shape)
+            print("dv:", dv, dv.shape)
+            print("M:", M, M.shape)
+            print("delta:", delta, delta.shape)
+
+
         _attn_bwd[grid](
             q,
             arg_k,
@@ -1050,10 +1105,17 @@ class _attention(torch.autograd.Function):
             USE_ALIBI=False if ctx.alibi_slopes is None else True,
         )
 
+        if DEBUG:
+            print()
+            print("_attn_bwd output")
+            print("dq:", dq, dq.shape)
+            print("dk:", dk, dk.shape)
+            print("dv:", dv, dv.shape)
+
         return dq, dk, dv, None, None
 
 
-attention_prefill = _attention.apply
+attention_prefill = _attention_prefill.apply
 
 
 def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout):
@@ -1148,7 +1210,7 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
 
     # Transpose here if layout is bshd so we have same reference code for all layouts
     if layout == 'bshd':
@@ -1219,7 +1281,7 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=tor
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
     # reference implementation:171
 
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
@@ -1291,6 +1353,7 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 
 
 @pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
+    # (1, 1, 1, 16)
     (4, 48, 1024, 64),
     (4, 48, 2048, 64),
     (2, 48, 4096, 64),
@@ -1301,11 +1364,11 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 ])
 @pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
 @pytest.mark.parametrize('torch_sdpa_test', [False, True])
-@pytest.mark.parametrize('causal', [True])
+@pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_alibi', [False, True])
 def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, use_alibi,
                 dtype=torch.float16):
-    pytest.skip()
+    pytest.skip("Prefill Backward Kernel is broken")
     torch.manual_seed(20)
     if qseqlen_not_equal_kseqlen is not None:
         seqlen_q = qseqlen_not_equal_kseqlen
@@ -1322,11 +1385,22 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     input_metadata = MetaData(sm_scale=sm_scale)
     input_metadata.max_seqlens_q = seqlen_q
     input_metadata.max_seqlens_k = seqlen_k
+    input_metadata.layout = "bhsd"
 
     dropout_p = 0
-    q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    if False:
+        q_data = torch.arange(1, seqlen_q + 1, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(Z, -1, H, D_HEAD)
+        q = q_data.clone().detach().requires_grad_(True)
+        
+        k_data = torch.arange(1, seqlen_k + 1, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(Z, -1, H, D_HEAD)
+        k = k_data.clone().detach().requires_grad_(True)
+        
+        v_data = torch.arange(1, seqlen_k + 1, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(Z, -1, H, D_HEAD)
+        v = v_data.clone().detach().requires_grad_(True)
+    else:
+        q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     o = torch.empty_like(q)
 
     if causal:
@@ -1337,7 +1411,11 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         alibi_slopes = torch.tensor([2**(-8 / H * i) for i in range(1, H + 1)], dtype=torch.float32,
                                     device="cuda").repeat(Z, 1)
         input_metadata.need_alibi(alibi_slopes, Z, H)
-    dout = torch.randn_like(q)
+    if False:
+        dout = torch.zeros_like(q)
+    else:
+        dout = torch.randn_like(q)
+
     # reference implementation
     if torch_sdpa_test:
         ref_out, ref_softmax = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
@@ -1363,17 +1441,15 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         ref_dq, q.grad = q.grad.clone(), None
 
     # # triton implementation
-    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
     tri_out.backward(dout)
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dq, q.grad = q.grad.clone(), None
-    # test
-    #print("reference")
-    #print(ref_dv)
-    #print("tri")
-    #print(tri_dv)
     # compare
+    if DEBUG:
+        print("tri_out:", tri_out)
+        print("ref_out:",ref_out )
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
     # The current block size for MI200 series is 64x64. This results in
     # larger differences in float results due to rounding.
@@ -1497,7 +1573,7 @@ def run_benchmark(custom, args):
         o = torch.empty_like(q)
         fn = lambda: attention_prefill(q, k, v, o, input_metadata)
         if mode == 'bwd':
-            o, _ = fn()
+            o, _, _= fn()
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)

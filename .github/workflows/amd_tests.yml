@@ -16,7 +16,6 @@ concurrency:
 
 permissions: read-all
 
-
 jobs:
   Runner-Preparation-AMD:
     runs-on: ubuntu-latest
@@ -52,17 +51,47 @@ jobs:
           pip install matplotlib pandas pytest
           git clone https://github.com/triton-lang/triton
           cd triton
+          git checkout 2e9f2c2d20601c24b91a4c32a7b97ad1f8a55d88 
           pip install --verbose -e python
           cd ..
       - name: Build
         run: |
           python setup.py install
-      - name: AMD Kernel Tests
-        run: |
-          pytest flash_attn/flash_attn_triton_kernel_decode_amd.py::test_op_fwd
-          pytest flash_attn/flash_attn_triton_kernel_prefill_amd.py
+      # - name: Flash Attention Mini Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_output
+      # - name: Flash Attention qkvpacked Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_qkvpacked
+      #     pytest tests/test_flash_attn.py::test_flash_attn_varlen_qkvpacked
+      # - name: Flash Attention output Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_output
+      #     pytest tests/test_flash_attn.py::test_flash_attn_varlen_output
+      # - name: Flash Attention causal Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_causal
+      #     pytest tests/test_flash_attn.py::test_flash_attn_varlen_causal
+      # - name: Flash Attention kvcache Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_kvcache
+      #     pytest tests/test_flash_attn.py::test_flash_attn_splitkv
+      # - name: Flash Attention race condition Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_race_condition
+      # - name: Flash Attention bwd Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_bwd_overflow
+      #     pytest tests/test_flash_attn.py::test_flash_attn_bwd_transpose
+      #     pytest tests/test_flash_attn.py::test_flash_attn_bwd_varlen_overflow
+      # - name: Flash Attention deterministic Tests
+      #   run: |
+      #     pytest tests/test_flash_attn.py::test_flash_attn_deterministic
+      #     pytest tests/test_flash_attn.py::test_flash_attn_varlen_deterministic
       - name: Flash Attention Tests
         run: |
-          pytest tests/test_flash_attn.py::test_flash_attn_kvcache
-          pytest tests/test_flash_attn.py::test_flash_attn_output
-          pytest tests/test_flash_attn.py::test_flash_attn_varlen_output
+          pytest tests/test_flash_attn.py
+      - name: AMD Kernel Tests
+        run: |
+          pytest -v -s flash_attn/flash_attn_triton_kernel_decode_amd.py::test_op_fwd
+          pytest -v -s flash_attn/flash_attn_triton_kernel_prefill_amd.py
