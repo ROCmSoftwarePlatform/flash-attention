@@ -1361,11 +1361,8 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 ])
 @pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
 @pytest.mark.parametrize('torch_sdpa_test', [False, True])
-# @pytest.mark.parametrize('torch_sdpa_test', [False])
 @pytest.mark.parametrize('causal', [True, False])
-# @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_alibi', [False, True])
-# @pytest.mark.parametrize('use_alibi', [False])
 def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, use_alibi,
                 dtype=torch.float16):
     pytest.skip("Prefill Backward Kernel is broken")
