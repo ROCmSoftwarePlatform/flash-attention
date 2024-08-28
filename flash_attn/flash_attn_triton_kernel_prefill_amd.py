@@ -123,7 +123,7 @@ class MetaData():
             assert self.bias is None
             # TODO:Remove once dropout is supported with varlen
             assert self.dropout_p == 0.0
-            assert not self.return_encoded_softmax
+            # assert not self.return_encoded_softmax
         else:
             assert q.dim() == 4
             assert self.max_seqlens_q > 0 and self.max_seqlens_k > 0
@@ -309,10 +309,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_ENCODED_SOFTMAX:
-                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p).to(encoded_sm_ptrs.type.element_ty))
+                tl.store(encoded_sm_ptrs, tl.where(keep, p, -p))
             p = tl.where(keep, p, 0.0)
         elif RETURN_ENCODED_SOFTMAX:
-            tl.store(encoded_sm_ptrs, p.to(encoded_sm_ptrs.type.element_ty))
+            tl.store(encoded_sm_ptrs, p)
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
@@ -363,7 +363,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
 @triton.jit
 def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz, stride_kh,
              stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh, stride_om,
-             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, cu_seqlens_q, cu_seqlens_k,
+             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
              dropout_p, philox_seed, philox_offset_base, encoded_softmax, alibi_slopes, HQ: tl.constexpr,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
@@ -471,8 +471,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
     # We can ask to return the dropout mask without actually doing any dropout. In
     # this case, we return an invalid pointer so indicate the mask is not valid.
     if RETURN_ENCODED_SOFTMAX:
-        encoded_sm_base = encoded_softmax + off_h_q * seqlen_q * seqlen_k
-        encoded_sm_ptrs = encoded_sm_base + offs_m[:, None] * seqlen_k + offs_n[None, :]
+        encoded_sm_offset = encoded_softmax + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        encoded_sm_ptrs = encoded_sm_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
     else:
         encoded_sm_ptrs = None
     # initialize pointer to m and l
@@ -936,10 +936,13 @@ class _attention_prefill(torch.autograd.Function):
         # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
         # only.  This return holds no useful output aside from debugging.
         if metadata.return_encoded_softmax:
-            encoded_softmax = torch.zeros((q.shape[0], q.shape[1], q.shape[2], k.shape[2]), device=q.device,
+            encoded_softmax = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
                                           dtype=torch.float32)
+            softmax_strides = (encoded_softmax.stride(0), encoded_softmax.stride(1), encoded_softmax.stride(2),
+                            encoded_softmax.stride(3))
         else:
             encoded_softmax = None
+            softmax_strides = (0, 0 , 0 , 0)
 
         M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
 
@@ -959,7 +962,7 @@ class _attention_prefill(torch.autograd.Function):
             alibi_strides = (0, 0)
 
         attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                       *bias_strides, *alibi_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
+                       *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                        dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
                        encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
                        ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,

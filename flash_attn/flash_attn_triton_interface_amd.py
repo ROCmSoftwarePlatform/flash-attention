@@ -61,6 +61,8 @@ def fwd(q,
     input_metadata.max_seqlens_q = q.shape[1]
     input_metadata.max_seqlens_k = k.shape[1]
     input_metadata.layout = "bshd"
+    if return_softmax:
+        input_metadata.return_encoded_softmax = True
 
     batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, input_metadata)
     
@@ -75,11 +77,6 @@ def fwd(q,
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
-    
-    # Perform the forward attention computation
-    # ctx = AttentionContext(None, None, None, None, None, None, None, None, None, None)
-    # tri_out, encoded_softmax = _attention_prefill.forward(ctx, q, k, v, o, input_metadata)
-
     tri_out, encoded_softmax = attention_prefill(q, k, v, o, input_metadata)
 
     # _, _, _, _, softmax_lse = ctx.saved_tensors
@@ -247,6 +244,8 @@ def varlen_fwd(
 
     # Setup metadata
     input_metadata = MetaData(sm_scale=softmax_scale)
+    if return_softmax:
+        input_metadata.return_encoded_softmax = True
     input_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)  # set layout to "thd" and other metdata
 
     # get shapes
@@ -263,10 +262,6 @@ def varlen_fwd(
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
-
-    # Perform the forward attention computation
-    # ctx = AttentionContext(None, None, None, None, None, None, None, None, None, None)
-    # tri_out, encoded_softmax = _attention_prefill.forward(ctx, q, k, v, o, input_metadata)
 
     tri_out, encoded_softmax = attention_prefill(q, k, v, o, input_metadata)
 
