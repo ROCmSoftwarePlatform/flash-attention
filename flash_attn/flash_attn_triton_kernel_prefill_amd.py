@@ -990,7 +990,7 @@ class _attention_prefill(torch.autograd.Function):
         ctx.philox_offset = philox_offset
         ctx.encoded_softmax = encoded_softmax
         ctx.return_encoded_softmax = metadata.return_encoded_softmax
-        return o, encoded_softmax
+        return o, M, encoded_softmax
 
     @staticmethod
     def backward(ctx, do, _): # expects bhsd
@@ -1210,7 +1210,7 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
 
     # Transpose here if layout is bshd so we have same reference code for all layouts
     if layout == 'bshd':
@@ -1281,7 +1281,7 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype=tor
     o = torch.empty_like(q)
 
     # triton implementation
-    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
     # reference implementation:171
 
     scores = torch.einsum('bhqd,bhkd->bhqk', q, k).float() * sm_scale
@@ -1441,7 +1441,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         ref_dq, q.grad = q.grad.clone(), None
 
     # # triton implementation
-    tri_out, _ = attention_prefill(q, k, v, o, input_metadata)
+    tri_out, _, _ = attention_prefill(q, k, v, o, input_metadata)
     tri_out.backward(dout)
     tri_dv, v.grad = v.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -1573,7 +1573,7 @@ def run_benchmark(custom, args):
         o = torch.empty_like(q)
         fn = lambda: attention_prefill(q, k, v, o, input_metadata)
         if mode == 'bwd':
-            o, _ = fn()
+            o, _, _= fn()
             do = torch.randn_like(o)
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)

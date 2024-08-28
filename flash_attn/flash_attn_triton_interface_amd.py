@@ -77,11 +77,7 @@ def fwd(q,
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
-    tri_out, encoded_softmax = attention_prefill(q, k, v, o, input_metadata)
-
-    # _, _, _, _, softmax_lse = ctx.saved_tensors
-    softmax_lse = encoded_softmax
-    softmax_dmask = None
+    tri_out, softmax_lse, softmax_dmask= attention_prefill(q, k, v, o, input_metadata)
 
     return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
 
@@ -263,11 +259,7 @@ def varlen_fwd(
     # Check arguments
     input_metadata.check_args(q, k, v, o)
 
-    tri_out, encoded_softmax = attention_prefill(q, k, v, o, input_metadata)
-
-    # _, _, _, _, softmax_lse = ctx.saved_tensors
-    softmax_lse = encoded_softmax
-    softmax_dmask = None
+    tri_out, softmax_lse, softmax_dmask= attention_prefill(q, k, v, o, input_metadata)
 
     return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
 
@@ -401,8 +393,7 @@ def fwd_kvcache(
         input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
 
     # launch kernel
-    tri_out = attention_decode(q, k_cache, v_cache, input_metadata)
-    softmax_lse = None
+    tri_out, softmax_lse = attention_decode(q, k_cache, v_cache, input_metadata)
 
     if DEBUG:
         print()

@@ -950,7 +950,7 @@ class _attention(torch.autograd.Function):
             # the data is laid out properly. Just need to reshape dims
             out = out.reshape(batch_size, seqlen_q, -1, dim_padded)
 
-        return out.narrow(-1, 0, dim_k)
+        return out.narrow(-1, 0, dim_k), lse
 
 
 attention_decode = _attention.apply
@@ -978,26 +978,31 @@ def test_op_fwd(batch_size, seqlen_q, seqlen_k, group_q, group_k, dim, dtype=tor
                      device="cuda").normal_(mean=0.,
                                             std=0.5).requires_grad_()).expand(-1, -1, -1, query_group_head_size, -1)
     scale = 1 / dim**0.5
-
-    print("q:", q.shape)
-    print("k:", k.shape)
-    print("v:", v.shape)
+    if DEBUG:
+        print("q:", q.shape)
+        print("k:", k.shape)
+        print("v:", v.shape)
     input_metadata = MetaData(sm_scale=scale)
     input_metadata.layout = "bsghd"
-    tri_out = attention_decode(q, k, v, input_metadata)
-    print("tri_out:", tri_out.shape)
-    print()
+    tri_out, _ = attention_decode(q, k, v, input_metadata)
+    
+    if DEBUG:
+        print("tri_out:", tri_out.shape)
+        print()
 
     q = q.reshape([batch_size, seqlen_q, -1, dim]).permute(0, 2, 1, 3)
     k = k.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
     v = v.reshape([batch_size, seqlen_k, -1, dim]).permute(0, 2, 1, 3)
-    print("q_ref:", q.shape)
-    print("k_ref:", k.shape)
-    print("v_ref:", v.shape)
+    if DEBUG:
+        print("q_ref:", q.shape)
+        print("k_ref:", k.shape)
+        print("v_ref:", v.shape)
     attn = (q @ k.transpose(-1, -2) * scale).softmax(-1)
-    print("attn:", attn.shape)
+    if DEBUG:
+        print("attn:", attn.shape)
     ref_out = attn @ v
-    print("ref_out:", ref_out.shape)
+    if DEBUG:
+        print("ref_out:", ref_out.shape)
 
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=1e-3, rtol=0)
@@ -1021,7 +1026,7 @@ def test_op_fwd_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     scale = 1 / K**0.5
     input_metadata = MetaData(sm_scale=scale)
     input_metadata.layout = "bsghd"
-    tri_out = attention_decode(q, quant_k, quant_v, input_metadata)
+    tri_out, _ = attention_decode(q, quant_k, quant_v, input_metadata)
 
     q = q.reshape([B, Mq, -1, K]).permute(0, 2, 1, 3)
     k = k.reshape([B, Mkv, -1, K]).permute(0, 2, 1, 3)
