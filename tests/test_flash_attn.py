@@ -38,6 +38,12 @@ def is_power_of_2(n):
 def skip_config(*args,  skip_pct = 0.95):
     return random.random() >= (1.0 - skip_pct)
 
+def skip_not_power_of_2_config(*args):
+    if all(is_power_of_2(arg) for arg in args):
+        return True
+    else:
+        return False
+
 def is_amd():
     if torch.version.hip is not None:
         return True
@@ -662,7 +668,7 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen, d):
+        if skip_not_power_of_2_config(seqlen, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if seqlen >= 2048 and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30:
@@ -847,7 +853,7 @@ def test_flash_attn_varlen_qkvpacked(
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen, d):
+        if skip_not_power_of_2_config(seqlen, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if seqlen >= 2048 and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30:
@@ -1049,7 +1055,7 @@ def test_flash_attn_output(
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if (
@@ -1373,7 +1379,7 @@ def test_flash_attn_varlen_output(
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD yet")
         
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if (
@@ -1702,7 +1708,7 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
     
     if (
@@ -1833,7 +1839,7 @@ def test_flash_attn_varlen_causal(
         if seqlen_q * seqlen_k >= 256 * 512:
             pytest.skip(f"{seqlen_q}, {seqlen_k} leads to out of memory on AMD")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if (
@@ -2015,7 +2021,7 @@ def test_flash_attn_splitkv(
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
     
     if swap_sq_sk:
@@ -2210,7 +2216,7 @@ def test_flash_attn_kvcache(
         if has_leftpad == True:
             pytest.skip("cache_leftpad not supported on AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if seqlen_q > seqlen_k and new_kv:
@@ -2559,7 +2565,7 @@ def test_flash_attn_race_condition(seqlen_q, seqlen_k, d, dropout_p, causal, dty
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
         
     device = "cuda"
@@ -2619,7 +2625,7 @@ def test_flash_attn_bwd_overflow(seqlen, d, causal, dtype):
         if True:
             pytest.skip("Backward Attention not supported on AMD yet")
         
-        if skip_config(seqlen, d):
+        if skip_not_power_of_2_config(seqlen, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     device = "cuda"
@@ -2683,7 +2689,7 @@ def test_flash_attn_bwd_transpose(seqlen, d, causal, dtype):
         if True:
             pytest.skip("Backward Attention not supported on AMD yet")
         
-        if skip_config(seqlen, d):
+        if skip_not_power_of_2_config(seqlen, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     device = "cuda"
@@ -2743,7 +2749,7 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
         if True:
             pytest.skip("Backward Attention not supported on AMD yet")
 
-        if skip_config(d):
+        if skip_not_power_of_2_config(d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     device = "cuda"
@@ -2808,7 +2814,7 @@ def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, loc
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if (
@@ -2877,7 +2883,7 @@ def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, caus
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_not_power_of_2_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
     if (
