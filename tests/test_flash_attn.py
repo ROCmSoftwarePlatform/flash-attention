@@ -32,6 +32,9 @@ random.seed(skip_seed)
 if DEBUG:
     print("skip_seed:", skip_seed)
 
+def is_power_of_2(n):
+    return n > 0 and (n & (n - 1)) == 0
+
 def skip_config(*args,  skip_pct = 0.95):
     return random.random() >= (1.0 - skip_pct)
 
@@ -649,18 +652,15 @@ def get_dropout_fraction(
 # @pytest.mark.parametrize("seqlen", [512])
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize("dropout_p", [0.0])
-@pytest.mark.parametrize("test_backward", [False, True])
-# @pytest.mark.parametrize("test_backward", [True])
-def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype, test_backward):
+def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype):
     if is_amd():
+        test_backward = False
+
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD yet")
 
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
-
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
 
         if skip_config(seqlen, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
@@ -770,13 +770,7 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
 
-    if False:
-        # Create a custom g tensor
-        g = torch.zeros_like(out)
-        # Focus on the first token of the first sequence in the first head
-        g[0, 0, 0, :] = 1.0  
-    else:
-        g = torch.randn_like(out)
+    g = torch.randn_like(out)
     
     if DEBUG:
         print()
@@ -841,19 +835,17 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
 # @pytest.mark.parametrize('seqlen', [128])
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize("test_backward", [False, True])
 def test_flash_attn_varlen_qkvpacked(
-    seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype, test_backward
+    seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype
 ):
     if is_amd():
+        test_backward = False
+
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD yet")
 
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
-        
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
 
         if skip_config(seqlen, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
@@ -1026,10 +1018,8 @@ def test_flash_attn_varlen_qkvpacked(
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize("dropout_p", [0.0])
 @pytest.mark.parametrize("softcap", [0.0, 50.0])
-@pytest.mark.parametrize("test_backward", [False, True])
 def test_flash_attn_output(
-    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap, test_backward
-):
+    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap):
     if DEBUG:
         print()
         print("test_flash_attn_output")
@@ -1048,20 +1038,16 @@ def test_flash_attn_output(
         print("test_backward:",  test_backward)
 
     if is_amd():
+        test_backward = False
+
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported on AMD yet")
 
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD yet")
-        
-        # if causal == True:
-        #     pytest.skip("causal not supported on AMD yet")
 
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
-
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
 
         if skip_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
@@ -1376,6 +1362,8 @@ def test_flash_attn_varlen_output(
         print("test_backward:",  test_backward)
 
     if is_amd():
+        test_backward = False
+
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD yet")
 
@@ -1384,12 +1372,6 @@ def test_flash_attn_varlen_output(
         
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD yet")
-
-        # if causal == True:
-        #     pytest.skip("causal not supported on AMD yet")
-
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
         
         if skip_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
@@ -1702,9 +1684,7 @@ def test_flash_attn_varlen_output(
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
-@pytest.mark.parametrize("test_backward", [False, True])
-# @pytest.mark.parametrize("test_backward", [True])
-def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype, test_backward):
+def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
     if DEBUG:
         print()
         print("test_flash_attn_causal")
@@ -1717,11 +1697,10 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype, test
         print("test_backward:",  test_backward)
 
     if is_amd():
+        test_backward = False
+
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
-
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
 
         if skip_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
@@ -1839,20 +1818,17 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype, test
 # TODO: add smaller page sizes when https://github.com/Dao-AILab/flash-attention/pull/824 is merged
 @pytest.mark.parametrize("paged_kv_block_size", [None, 256, 512])
 # @pytest.mark.parametrize("seqlen_q,seqlen_k", [(256, 128)])
-@pytest.mark.parametrize("test_backward", [False, True])
-# @pytest.mark.parametrize("test_backward", [True])
 def test_flash_attn_varlen_causal(
-    seqlen_q, seqlen_k, swap_sq_sk, d, local, paged_kv_block_size, dtype, test_backward
+    seqlen_q, seqlen_k, swap_sq_sk, d, local, paged_kv_block_size, dtype
 ):
     if is_amd():
+        test_backward = False
+      
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
         if paged_kv_block_size is not None:
             pytest.skip("paged attention not supported on AMD yet")
-
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
 
         if seqlen_q * seqlen_k >= 256 * 512:
             pytest.skip(f"{seqlen_q}, {seqlen_k} leads to out of memory on AMD")
@@ -2029,19 +2005,16 @@ def test_flash_attn_varlen_causal(
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
-@pytest.mark.parametrize("test_backward", [False, True])
-# @pytest.mark.parametrize("test_backward", [True])
 def test_flash_attn_splitkv(
     seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, alibi, deterministic, dtype, test_backward
 ):
     
     if is_amd():
+        test_backward = False
+
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
-        
         if skip_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
     
@@ -2579,15 +2552,12 @@ def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k,
 )
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize("dropout_p", [0.0])
-@pytest.mark.parametrize("test_backward", [False, True])
-# @pytest.mark.parametrize("test_backward", [True])
 def test_flash_attn_race_condition(seqlen_q, seqlen_k, d, dropout_p, causal, dtype, test_backward):
     if is_amd():
+        test_backward = False
+
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported in AMD yet")
-
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
 
         if skip_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
@@ -2830,17 +2800,14 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
-@pytest.mark.parametrize("test_backward", [False, True])
-# @pytest.mark.parametrize("test_backward", [True])
-def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype, test_backward):
+def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype):
 
     if is_amd():
+        test_backward = False
+
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
-      
         if skip_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
 
@@ -2903,15 +2870,12 @@ def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, loc
     ],
 )
 # @pytest.mark.parametrize("seqlen_q,seqlen_k", [(256, 128)])
-@pytest.mark.parametrize("test_backward", [False, True])
-# @pytest.mark.parametrize("test_backward", [True])
 def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype, test_backward):
     if is_amd():
+        test_backward = False
+        
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
-
-        if test_backward == True:
-            pytest.skip("Backward Attention not supported on AMD yet")
 
         if skip_config(seqlen_q, seqlen_k, d):
             pytest.skip("Randomly skipping this configuration to limited test time")
