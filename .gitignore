@@ -25,11 +25,4 @@ var/
 
 # Dev
 venv
-
-# AMD
-.eggs
-.vscode
-core
 scripts
-log*
-*csv

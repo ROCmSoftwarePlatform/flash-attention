@@ -28,8 +28,6 @@ import torch
 import triton
 import triton.language as tl
 
-DEBUG = False
-
 
 class MetaData():
     cu_seqlens_q = None
@@ -363,7 +361,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
 @triton.jit
 def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz, stride_kh,
              stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh, stride_om,
-             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah, stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
+             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
+             stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
              dropout_p, philox_seed, philox_offset_base, encoded_softmax, alibi_slopes, HQ: tl.constexpr,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
@@ -903,15 +902,6 @@ class _attention_prefill(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        if DEBUG:
-            print()
-            print("_attention_prefill.forward")
-            print("q:", q, q.shape)
-            print("k:", k, k.shape)
-            print("v:", v, v.shape)
-            print("o:", o, o.shape)
-            print("metadata:", metadata)
-
         # NOTE: a large bias tensor leads to overflow during pointer arithmetic
         if (metadata.bias is not None):
             assert (metadata.bias.numel() < 2**31)
@@ -971,14 +961,6 @@ class _attention_prefill(torch.autograd.Function):
                        USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                        > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
 
-        if DEBUG:
-            print("Saving in ctx for backward")
-            print("q:", q, q.shape)
-            print("k:", k, k.shape)
-            print("v:", v, v.shape)
-            print("o:", o, o.shape)
-            print("M:", M, M.shape)
-
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
@@ -994,33 +976,17 @@ class _attention_prefill(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, do, _): # expects bhsd
-        if DEBUG:
-            print()
-            print("_attention_prefill.backward")
-            print("do:", do, do.shape, do.stride())
-
         if torch.version.hip is not None:
             BLOCK = 64
         else:
             BLOCK = 128
         q, k, v, o, M = ctx.saved_tensors
-        if DEBUG:
-            print("q:", q, q.shape, q.stride())
-            print("k:", k, k.shape, k.stride())
-            print("v:", v, v.shape, v.stride())
-            print("o:", o, o.shape, o.stride())
-            print("M:", M, M.shape, M.stride())
         assert do.is_contiguous()
         assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
         seqlen_q = q.shape[2]
-        if False:
-            dq = torch.zeros_like(q)
-            dk = torch.zeros_like(k)
-            dv = torch.zeros_like(v)
-        else:
-            dq = torch.empty_like(q)
-            dk = torch.empty_like(k)
-            dv = torch.empty_like(v)
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
         BATCH, N_HEAD, N_CTX = q.shape[:3]
         PRE_BLOCK = 128
         # NUM_WARPS, NUM_STAGES = 4, 1
@@ -1030,19 +996,10 @@ class _attention_prefill(torch.autograd.Function):
         arg_k = k
         arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
         assert N_CTX % PRE_BLOCK == 0
-        if False:
-            delta = torch.zeros_like(M)
-        else:
-            delta = torch.empty_like(M)
+        delta = torch.empty_like(M)
         _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
         # padded_head = (Lk != ctx.BLOCK_DMODEL)
         grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
-        if DEBUG:
-            print()
-            print("_attn_bwd_preprocess input")
-            print("o:", o, o.shape, )
-            print("do:", k, k.shape)
-            print("delta:", v, v.shape)
 
         _attn_bwd_preprocess[grid_preprocess](
             o,
@@ -1062,21 +1019,6 @@ class _attention_prefill(torch.autograd.Function):
             D_HEAD=ctx.BLOCK_DMODEL,
         )
         grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
-        if DEBUG:
-            print()
-            print("_attn_bwd input")
-            print("q:", q, q.shape)
-            print("arg_k:", arg_k, arg_k.shape)
-            print("v:", v, v.shape)
-            print("ctx.sm_scale:", ctx.sm_scale)
-            print("ctx.alibi_slopes:", ctx.alibi_slopes)
-            print("do:", do, do.shape)
-            print("dq:", dq, dq.shape)
-            print("dk:", dk, dk.shape)
-            print("dv:", dv, dv.shape)
-            print("M:", M, M.shape)
-            print("delta:", delta, delta.shape)
-
 
         _attn_bwd[grid](
             q,
@@ -1105,14 +1047,7 @@ class _attention_prefill(torch.autograd.Function):
             USE_ALIBI=False if ctx.alibi_slopes is None else True,
         )
 
-        if DEBUG:
-            print()
-            print("_attn_bwd output")
-            print("dq:", dq, dq.shape)
-            print("dk:", dk, dk.shape)
-            print("dv:", dv, dv.shape)
-
-        return dq, dk, dv, None, None
+        return dq, dk, dv, M, None
 
 
 attention_prefill = _attention_prefill.apply
@@ -1388,19 +1323,9 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     input_metadata.layout = "bhsd"
 
     dropout_p = 0
-    if False:
-        q_data = torch.arange(1, seqlen_q + 1, dtype=dtype, device="cuda").view(1, seqlen_q, 1, 1).expand(Z, -1, H, D_HEAD)
-        q = q_data.clone().detach().requires_grad_(True)
-        
-        k_data = torch.arange(1, seqlen_k + 1, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(Z, -1, H, D_HEAD)
-        k = k_data.clone().detach().requires_grad_(True)
-        
-        v_data = torch.arange(1, seqlen_k + 1, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(Z, -1, H, D_HEAD)
-        v = v_data.clone().detach().requires_grad_(True)
-    else:
-        q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-        k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-        v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
     o = torch.empty_like(q)
 
     if causal:
@@ -1411,10 +1336,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         alibi_slopes = torch.tensor([2**(-8 / H * i) for i in range(1, H + 1)], dtype=torch.float32,
                                     device="cuda").repeat(Z, 1)
         input_metadata.need_alibi(alibi_slopes, Z, H)
-    if False:
-        dout = torch.zeros_like(q)
-    else:
-        dout = torch.randn_like(q)
+    dout = torch.randn_like(q)
 
     # reference implementation
     if torch_sdpa_test:
