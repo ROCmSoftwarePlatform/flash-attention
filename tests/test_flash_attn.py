@@ -1345,9 +1345,8 @@ def test_flash_attn_output(
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 @pytest.mark.parametrize("softcap", [0.0, 50.0])
 # @pytest.mark.parametrize('dropout_p', [0.0])
-@pytest.mark.parametrize("test_backward", [False, True])
 def test_flash_attn_varlen_output(
-    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap, test_backward
+    seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     
     if DEBUG:
@@ -2012,7 +2011,7 @@ def test_flash_attn_varlen_causal(
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 def test_flash_attn_splitkv(
-    seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, alibi, deterministic, dtype, test_backward
+    seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, alibi, deterministic, dtype
 ):
     
     if is_amd():
@@ -2558,7 +2557,7 @@ def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k,
 )
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize("dropout_p", [0.0])
-def test_flash_attn_race_condition(seqlen_q, seqlen_k, d, dropout_p, causal, dtype, test_backward):
+def test_flash_attn_race_condition(seqlen_q, seqlen_k, d, dropout_p, causal, dtype):
     if is_amd():
         test_backward = False
 
@@ -2807,7 +2806,6 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype):
-
     if is_amd():
         test_backward = False
 
@@ -2876,7 +2874,7 @@ def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, loc
     ],
 )
 # @pytest.mark.parametrize("seqlen_q,seqlen_k", [(256, 128)])
-def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype, test_backward):
+def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype):
     if is_amd():
         test_backward = False
         
