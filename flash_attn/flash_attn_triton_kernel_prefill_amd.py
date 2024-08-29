@@ -188,15 +188,6 @@ def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second):
 
 
 @triton.jit
-def print_gpu(prefix, val=None):
-    if (tl.program_id(0) == 0) and ((tl.program_id(1) == 0) and (tl.program_id(2) == 0)):
-        if val is not None:
-            tl.device_print(prefix, val)
-        else:
-            tl.device_print(prefix)
-
-
-@triton.jit
 def compute_alibi_block(alibi_slope, seqlen_q, seqlen_k, offs_m, offs_n, transpose=False):
     # when seqlen_k and seqlen_q are different we want the diagonal to stick to the bottom right of the attention matrix
     # for casual mask we want something like this where (1 is kept and 0 is masked)
@@ -348,12 +339,11 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                       num_warps=4),
         triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'waves_per_eu': 4, 'PRE_LOAD_V': False}, num_stages=1,
                       num_warps=8),
-        # TODO: This config fails with head_size not pow2 with data mismatches. Check why.
-        #    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-        # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
-        #               num_warps=4),
         triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
                       num_warps=4),
+        # TODO: This configs fails with head_size not pow2 with data mismatches. figure out why
+        # triton.Config({'BLOCK_M': 32, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
+        # triton.Config({'BLOCK_M': 16, 'BLOCK_N': 16, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
     ],
     key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
     use_cuda_graph=True,
