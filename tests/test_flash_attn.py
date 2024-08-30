@@ -2645,7 +2645,7 @@ def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, caus
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD yet")
 
-        if skip_config(seqlen_q, seqlen_k, d):
+        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
 
     if (
