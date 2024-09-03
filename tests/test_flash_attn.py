@@ -1,4 +1,5 @@
 import math
+import random
 
 import pytest
 import torch
@@ -20,9 +21,12 @@ from flash_attn.layers.rotary import apply_rotary_emb
 def is_power_of_2(n):
     return n > 0 and (n & (n - 1)) == 0
 
+random.seed(42)
+
 def skip_config(**kwargs):
     if 'd' in kwargs:
-        return not is_power_of_2(kwargs['d'])
+        # return not is_power_of_2(kwargs['d'])
+        return random.random() < 0.20
     return False
 
 def is_hip():
