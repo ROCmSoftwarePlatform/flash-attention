@@ -56,9 +56,11 @@ jobs:
           cd ..
       - name: Build
         run: |
+          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
           python setup.py install
       - name: Flash Attention Tests
         run: |
+          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
           pytest tests/test_flash_attn.py
       - name: AMD Kernel Tests
         run: |

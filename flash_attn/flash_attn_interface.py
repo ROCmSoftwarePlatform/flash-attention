@@ -4,16 +4,13 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-
-def is_hip():
-    if torch.version.hip is not None:
-        return True
-    return False
+import os
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-if is_hip():
-    from . import flash_attn_triton_interface_amd as flash_attn_gpu
+USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
+if USE_TRITON_ROCM:
+    from flash_attn import flash_attn_triton_interface_amd as flash_attn_gpu
 else:
     import flash_attn_2_cuda as flash_attn_gpu
 

@@ -1,4 +1,5 @@
 import math
+import os
 import random
 
 import pytest
@@ -18,20 +19,15 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
-def is_power_of_2(n):
-    return n > 0 and (n & (n - 1)) == 0
 
-random.seed(42)
+# Test ROCM Triton Backend
+USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
+if USE_TRITON_ROCM:
+    random.seed(42)
 
 def skip_config(**kwargs):
     if 'd' in kwargs:
-        # return not is_power_of_2(kwargs['d'])
         return random.random() < 0.20
-    return False
-
-def is_hip():
-    if torch.version.hip is not None:
-        return True
     return False
 
 MAX_HEADDIM_SM8x = 192
@@ -601,14 +597,14 @@ def get_dropout_fraction(
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize("dropout_p", [0.0])
 def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if dropout_p != 0.0:
-            pytest.skip("Dropout not supported in AMD yet")
+            pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen=seqlen, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -763,14 +759,14 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
 def test_flash_attn_varlen_qkvpacked(
     seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype
 ):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if dropout_p != 0.0:
-            pytest.skip("Dropout not supported in AMD yet")
+            pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen=seqlen, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -946,17 +942,17 @@ def test_flash_attn_varlen_qkvpacked(
 def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if dropout_p != 0.0:
-            pytest.skip("Dropout not supported on AMD yet")
+            pytest.skip("Dropout not supported on AMD's Triton Backend yet")
 
         if softcap != 0.0:
-            pytest.skip("softcap not supported on AMD yet")
+            pytest.skip("softcap not supported on AMD's Triton Backend yet")
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -1232,17 +1228,17 @@ def test_flash_attn_varlen_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
 
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if dropout_p != 0.0:
-            pytest.skip("Dropout not supported in AMD yet")
+            pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
         
         if softcap != 0.0:
-            pytest.skip("softcap not supported on AMD yet")
+            pytest.skip("softcap not supported on AMD's Triton Backend yet")
         
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -1556,11 +1552,11 @@ def test_flash_attn_varlen_output(
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -1681,14 +1677,14 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
 def test_flash_attn_varlen_causal(
     seqlen_q, seqlen_k, swap_sq_sk, d, local, paged_kv_block_size, dtype
 ):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
       
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if paged_kv_block_size is not None:
-            pytest.skip("paged attention not supported on AMD yet")
+            pytest.skip("paged attention not supported on AMD's Triton Backend yet")
 
         if seqlen_q * seqlen_k >= 256 * 512:
             pytest.skip(f"{seqlen_q}, {seqlen_k} leads to out of memory on AMD")
@@ -1869,11 +1865,11 @@ def test_flash_attn_splitkv(
     seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, alibi, deterministic, dtype
 ):
     
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -2038,18 +2034,18 @@ def test_flash_attn_kvcache(
     num_splits,
     dtype,
 ):
-    if is_hip():
+    if USE_TRITON_ROCM:
         if paged_kv_block_size is not None:
-            pytest.skip("paged attention not supported on AMD yet")
+            pytest.skip("paged attention not supported on AMD's Triton Backend yet")
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
         
         if rotary_interleaved == True or rotary_fraction > 0.0:
-            pytest.skip("rotary embedding not supported on AMD yet")
+            pytest.skip("rotary embedding not supported on AMD's Triton Backend yet")
 
         if has_leftpad == True:
-            pytest.skip("cache_leftpad not supported on AMD yet")
+            pytest.skip("cache_leftpad not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -2329,11 +2325,11 @@ def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k,
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 # @pytest.mark.parametrize("dropout_p", [0.0])
 def test_flash_attn_race_condition(seqlen_q, seqlen_k, d, dropout_p, causal, dtype):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if dropout_p != 0.0:
-            pytest.skip("Dropout not supported in AMD yet")
+            pytest.skip("Dropout not supported in AMD's Triton Backend yet")
 
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -2390,9 +2386,9 @@ def test_flash_attn_bwd_overflow(seqlen, d, causal, dtype):
     """We previously had a bug where not masking elements beyond seqlen_k caused NaN in dQ,
     in the case where seqlen % 128 != 0.
     """
-    if is_hip():
+    if USE_TRITON_ROCM:
         if True:
-            pytest.skip("Backward Attention not supported on AMD yet")
+            pytest.skip("Backward Attention not supported on AMD's Triton Backend yet")
         
         if skip_config(seqlen=seqlen, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -2453,9 +2449,9 @@ def test_flash_attn_bwd_transpose(seqlen, d, causal, dtype):
     """We previously had a bug where we were using the wrong strides of dout, which shows up
     when dout is not contiguous.
     """
-    if is_hip():
+    if USE_TRITON_ROCM:
         if True:
-            pytest.skip("Backward Attention not supported on AMD yet")
+            pytest.skip("Backward Attention not supported on AMD's Triton Backend yet")
         
         if skip_config(seqlen=seqlen, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -2512,9 +2508,9 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
     """We previously had a bug where not masking elements beyond seqlen_k caused NaN in dQ,
     in the case where seqlen % 128 != 0 or varlen.
     """
-    if is_hip():
+    if USE_TRITON_ROCM:
         if True:
-            pytest.skip("Backward Attention not supported on AMD yet")
+            pytest.skip("Backward Attention not supported on AMD's Triton Backend yet")
 
         if skip_config(d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -2574,11 +2570,11 @@ def test_flash_attn_bwd_varlen_overflow(d, causal, dtype):
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
 def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
 
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")
@@ -2643,11 +2639,11 @@ def test_flash_attn_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, loc
 )
 # @pytest.mark.parametrize("seqlen_q,seqlen_k", [(256, 128)])
 def test_flash_attn_varlen_deterministic(seqlen_q, seqlen_k, swap_sq_sk, d, causal, local, dtype):
-    if is_hip():
+    if USE_TRITON_ROCM:
         test_backward = False
         
         if local == True:
-            pytest.skip("local sliding window attention not supported on AMD yet")
+            pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
         if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
             pytest.skip("Skipping configuration due to limited test time")

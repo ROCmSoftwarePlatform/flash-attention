@@ -28,10 +28,6 @@ from torch.utils.cpp_extension import (
     IS_HIP_EXTENSION,
 )
 
-def is_hip():
-    if torch.version.hip is not None:
-        return True
-    return False
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -65,9 +61,7 @@ FORCE_BUILD = os.getenv("FLASH_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
 SKIP_CUDA_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("FLASH_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
-
-if is_hip():
-    SKIP_CUDA_BUILD = True
+USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
 
 def get_platform():
     """
@@ -319,81 +313,85 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
 
-    # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
-    # See https://github.com/pytorch/pytorch/pull/70650
-    generator_flag = []
-    torch_dir = torch.__path__[0]
-    if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
-        generator_flag = ["-DOLD_GENERATOR_PATH"]
+    if USE_TRITON_ROCM:
+        pass
+    else:
 
-    check_if_rocm_home_none("flash_attn")
-    cc_flag = []
+        # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
+        # See https://github.com/pytorch/pytorch/pull/70650
+        generator_flag = []
+        torch_dir = torch.__path__[0]
+        if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
+            generator_flag = ["-DOLD_GENERATOR_PATH"]
 
-    archs = os.getenv("GPU_ARCHS", "native").split(";")
-    validate_and_update_archs(archs)
+        check_if_rocm_home_none("flash_attn")
+        cc_flag = []
 
-    cc_flag = [f"--offload-arch={arch}" for arch in archs]
+        archs = os.getenv("GPU_ARCHS", "native").split(";")
+        validate_and_update_archs(archs)
 
-    # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
-    # torch._C._GLIBCXX_USE_CXX11_ABI
-    # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
-    if FORCE_CXX11_ABI:
-        torch._C._GLIBCXX_USE_CXX11_ABI = True
+        cc_flag = [f"--offload-arch={arch}" for arch in archs]
 
-    sources = ["csrc/flash_attn_ck/flash_api.cpp",
-               "csrc/flash_attn_ck/mha_bwd.cpp",
-               "csrc/flash_attn_ck/mha_fwd.cpp",
-               "csrc/flash_attn_ck/mha_varlen_bwd.cpp",
-               "csrc/flash_attn_ck/mha_varlen_fwd.cpp"] + glob.glob(
-        f"build/fmha_*wd*.cpp"
-    )
+        # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
+        # torch._C._GLIBCXX_USE_CXX11_ABI
+        # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
+        if FORCE_CXX11_ABI:
+            torch._C._GLIBCXX_USE_CXX11_ABI = True
 
-    rename_cpp_to_cu(sources)
-
-    renamed_sources = ["csrc/flash_attn_ck/flash_api.cu",
-                       "csrc/flash_attn_ck/mha_bwd.cu",
-                       "csrc/flash_attn_ck/mha_fwd.cu",
-                       "csrc/flash_attn_ck/mha_varlen_bwd.cu",
-                       "csrc/flash_attn_ck/mha_varlen_fwd.cu"] + glob.glob(f"build/fmha_*wd*.cu")
-    extra_compile_args = {
-        "cxx": ["-O3", "-std=c++17"] + generator_flag,
-        "nvcc":
-            [
-                "-O3","-std=c++17",
-                "-mllvm", "-enable-post-misched=0",
-                "-DCK_TILE_FMHA_FWD_FAST_EXP2=1",
-                "-fgpu-flush-denormals-to-zero",
-                "-DCK_ENABLE_BF16",
-                "-DCK_ENABLE_BF8",
-                "-DCK_ENABLE_FP16",
-                "-DCK_ENABLE_FP32",
-                "-DCK_ENABLE_FP64",
-                "-DCK_ENABLE_FP8",
-                "-DCK_ENABLE_INT8",
-                "-DCK_USE_XDL",
-                "-DUSE_PROF_API=1",
-                "-D__HIP_PLATFORM_HCC__=1",
-                # "-DFLASHATTENTION_DISABLE_BACKWARD",
-            ]
-            + generator_flag
-            + cc_flag
-        ,
-    }
-
-    include_dirs = [
-        Path(this_dir) / "csrc" / "composable_kernel" / "include",
-        Path(this_dir) / "csrc" / "composable_kernel" / "library" / "include",
-        Path(this_dir) / "csrc" / "composable_kernel" / "example" / "ck_tile" / "01_fmha",
-    ]
-
-    ext_modules.append(
-        CUDAExtension(
-            name="flash_attn_2_cuda",
-            sources=renamed_sources,
-            extra_compile_args=extra_compile_args,
-            include_dirs=include_dirs,
+        sources = ["csrc/flash_attn_ck/flash_api.cpp",
+                "csrc/flash_attn_ck/mha_bwd.cpp",
+                "csrc/flash_attn_ck/mha_fwd.cpp",
+                "csrc/flash_attn_ck/mha_varlen_bwd.cpp",
+                "csrc/flash_attn_ck/mha_varlen_fwd.cpp"] + glob.glob(
+            f"build/fmha_*wd*.cpp"
         )
-    )
+
+        rename_cpp_to_cu(sources)
+
+        renamed_sources = ["csrc/flash_attn_ck/flash_api.cu",
+                        "csrc/flash_attn_ck/mha_bwd.cu",
+                        "csrc/flash_attn_ck/mha_fwd.cu",
+                        "csrc/flash_attn_ck/mha_varlen_bwd.cu",
+                        "csrc/flash_attn_ck/mha_varlen_fwd.cu"] + glob.glob(f"build/fmha_*wd*.cu")
+        extra_compile_args = {
+            "cxx": ["-O3", "-std=c++17"] + generator_flag,
+            "nvcc":
+                [
+                    "-O3","-std=c++17",
+                    "-mllvm", "-enable-post-misched=0",
+                    "-DCK_TILE_FMHA_FWD_FAST_EXP2=1",
+                    "-fgpu-flush-denormals-to-zero",
+                    "-DCK_ENABLE_BF16",
+                    "-DCK_ENABLE_BF8",
+                    "-DCK_ENABLE_FP16",
+                    "-DCK_ENABLE_FP32",
+                    "-DCK_ENABLE_FP64",
+                    "-DCK_ENABLE_FP8",
+                    "-DCK_ENABLE_INT8",
+                    "-DCK_USE_XDL",
+                    "-DUSE_PROF_API=1",
+                    "-D__HIP_PLATFORM_HCC__=1",
+                    # "-DFLASHATTENTION_DISABLE_BACKWARD",
+                ]
+                + generator_flag
+                + cc_flag
+            ,
+        }
+
+        include_dirs = [
+            Path(this_dir) / "csrc" / "composable_kernel" / "include",
+            Path(this_dir) / "csrc" / "composable_kernel" / "library" / "include",
+            Path(this_dir) / "csrc" / "composable_kernel" / "example" / "ck_tile" / "01_fmha",
+        ]
+
+        ext_modules.append(
+            CUDAExtension(
+                name="flash_attn_2_cuda",
+                sources=renamed_sources,
+                extra_compile_args=extra_compile_args,
+                include_dirs=include_dirs,
+            )
+        )
 
 
 def get_package_version():

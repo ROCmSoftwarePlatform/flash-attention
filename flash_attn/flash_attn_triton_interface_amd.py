@@ -20,7 +20,7 @@ def fwd(q,
         gen_):
 
     if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
+        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
 
     if o is None:
         o = torch.empty_like(q)
@@ -88,7 +88,7 @@ def bwd(
             self.saved_tensors = (q, k, v, o, M)
 
     if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
+        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
 
     if out is None:
         out = torch.empty_like(q)
@@ -139,7 +139,7 @@ def varlen_fwd(
         gen_):
 
     if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
+        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
     
     if o is None:
         o = torch.empty_like(q)
@@ -195,7 +195,7 @@ def varlen_bwd(
     gen_,
     rng_state,
 ):
-    raise ValueError("varlen_bwd is not supported on AMD yet")
+    raise ValueError("varlen_bwd is not supported on AMD's Triton Backend yet")
 
 def fwd_kvcache(
         q,
