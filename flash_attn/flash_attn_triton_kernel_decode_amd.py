@@ -147,7 +147,7 @@ def _fwd_kernel_splitK(
         for i in range(0, N_CTX_NEW, BLOCK_N):
             # Load from K_new
             k_new_block = tl.load(
-                knew_base + stride_kn_d + 
+                knew_base +
                 tl.arange(0, BLOCK_DMODEL)[:, None] * stride_kn_d +
                 (tl.arange(0, BLOCK_N) + i)[None, :] * stride_kn_n,
                  mask=(tl.arange(0, BLOCK_N)[None, :] + i < N_CTX_NEW) &
@@ -157,7 +157,7 @@ def _fwd_kernel_splitK(
             
             # Store to K
             tl.store(
-                k_base + stride_kd + 
+                k_base +
                 tl.arange(0, BLOCK_DMODEL)[:, None] * stride_kd +
                 (tl.arange(0, BLOCK_N) + i + start_idx)[None, :] * stride_kn,
                 k_new_block,
@@ -170,7 +170,7 @@ def _fwd_kernel_splitK(
         for i in range(0, N_CTX_NEW, BLOCK_N):
             # Load from V_new
             v_new_block = tl.load(
-                vnew_base + stride_vn_d + 
+                vnew_base +
                 (tl.arange(0, BLOCK_N) + i)[:, None] * stride_vn_n +
                 tl.arange(0, BLOCK_DMODEL)[None, :] * stride_vn_d,
                 mask=(tl.arange(0, BLOCK_N)[:, None] + i < N_CTX_NEW) &
@@ -180,7 +180,7 @@ def _fwd_kernel_splitK(
             
             # Store to V
             tl.store(
-                v_base + stride_vd + 
+                v_base + 
                 (tl.arange(0, BLOCK_N) + i + start_idx)[:, None] * stride_vn +
                 tl.arange(0, BLOCK_DMODEL)[None, :] * stride_vd,
                 v_new_block,
@@ -198,7 +198,7 @@ def _fwd_kernel_splitK(
     )
 
     K_block_ptr = tl.make_block_ptr(
-        base=k_base + stride_kd ,
+        base=k_base,
         shape=(ACTUAL_BLOCK_DMODEL, hi),
         strides=(stride_kd, stride_kn),
         offsets=(0, lo),
@@ -206,7 +206,7 @@ def _fwd_kernel_splitK(
         order=(0, 1),
     )
     V_block_ptr = tl.make_block_ptr(
-        base=v_base + stride_vd,
+        base=v_base,
         shape=(hi, ACTUAL_BLOCK_DMODEL),
         strides=(stride_vn, stride_vd),
         offsets=(lo, 0),
@@ -214,7 +214,6 @@ def _fwd_kernel_splitK(
         order=(1, 0),
     )
 
- 
     K_scale_shift_block_ptr = None
     V_scale_shift_block_ptr = None
 
@@ -237,7 +236,7 @@ def _fwd_kernel_splitK(
 
     # loop over k, v and update accumulator
     for start_n in range(lo, hi, BLOCK_N):
-        k, v = load_dequantize_k_v_group(
+        k, v = load_k_v_group(
             K_block_ptr,
             V_block_ptr,
             K_scale_shift_block_ptr,
@@ -335,7 +334,7 @@ def _fwd_kernel_splitK(
 
 
 @triton.jit
-def load_dequantize_k_v_group(
+def load_k_v_group(
     K_block_ptr,
     V_block_ptr,
     K_scale_shift_block_ptr,
@@ -347,9 +346,7 @@ def load_dequantize_k_v_group(
     dtype: tl.constexpr,
     group_id: tl.constexpr,
 ):
-    #Load K/V for a given block. In case of int4-quantized K/V,
-    # dequantize them after loading. If quantization is group-wise,
-    # use group_id to advance the pointers to the current group.
+    #Load K/V for a given block
 
     # Advance to the current quantization group
     K_block_ptr = tl.advance(K_block_ptr, (ACTUAL_BLOCK_DMODEL * group_id, 0))
@@ -359,24 +356,6 @@ def load_dequantize_k_v_group(
     k = tl.load(K_block_ptr, boundary_check=(1, ) if BOUNDS_CHECKS_N else ())
     v = tl.load(V_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ())
 
-    if PACKED_PER_VAL > 1:
-        # K/V are quantized, load quantization coefficients and dequantize
-        K_scale_shift_block_ptr = tl.advance(K_scale_shift_block_ptr, (group_id, 0))
-        V_scale_shift_block_ptr = tl.advance(V_scale_shift_block_ptr, (0, group_id))
-
-        k_scale_shift = tl.load(K_scale_shift_block_ptr, boundary_check=(1, ) if BOUNDS_CHECKS_N else ())
-        v_scale_shift = tl.load(V_scale_shift_block_ptr, boundary_check=(0, ) if BOUNDS_CHECKS_N else ())
-
-        k_scale, k_shift = cast_uint32_to_half2(k_scale_shift)
-        v_scale, v_shift = cast_uint32_to_half2(v_scale_shift)
-        v = dequantize(v, v_scale, v_shift, PACKED_PER_VAL).to(dtype)
-        k_t = dequantize(
-            tl.trans(k),
-            tl.trans(k_scale),
-            tl.trans(k_shift),
-            PACKED_PER_VAL,
-        ).to(dtype)
-        k = tl.trans(k_t)
     return k, v
 
 
@@ -660,13 +639,6 @@ class _attention(torch.autograd.Function):
             cache_seqlens = input_metadata.cache_seqlens
         else:
             cache_seqlens = None
-
-        # Update dim_k if Quantized
-        PACKED_PER_VAL = 1
-        if k.dtype == torch.int32:
-            # Quantized K/V
-            PACKED_PER_VAL = 8
-            dim_k = (dim_k - cls.NUM_QUANT_GROUPS) * 8
 
         assert dim_k == dim_q, f"Keys have head dim {dim_k} but queries have head dim {dim_q}"
 
