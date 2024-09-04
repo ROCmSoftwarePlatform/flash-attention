@@ -19,17 +19,11 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+.eggs
 
 # IDE-related
 .idea/
 
 # Dev
 venv
-
-# AMD
-.eggs
-.vscode
-core
 scripts
-log*
-*csv

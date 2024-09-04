@@ -28,10 +28,6 @@ from torch.utils.cpp_extension import (
     IS_HIP_EXTENSION,
 )
 
-def is_hip():
-    if torch.version.hip is not None:
-        return True
-    return False
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -65,9 +61,7 @@ FORCE_BUILD = os.getenv("FLASH_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
 SKIP_CUDA_BUILD = os.getenv("FLASH_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("FLASH_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
-
-if is_hip():
-    SKIP_CUDA_BUILD = True
+USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
 
 def get_platform():
     """
@@ -325,24 +319,28 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
 
-    # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
-    # See https://github.com/pytorch/pytorch/pull/70650
-    generator_flag = []
-    torch_dir = torch.__path__[0]
-    if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
-        generator_flag = ["-DOLD_GENERATOR_PATH"]
+    if USE_TRITON_ROCM:
+        # Skip C++ extension compilation if using Triton Backend
+        pass
+    else:
+        # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
+        # See https://github.com/pytorch/pytorch/pull/70650
+        generator_flag = []
+        torch_dir = torch.__path__[0]
+        if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
+            generator_flag = ["-DOLD_GENERATOR_PATH"]
 
     check_if_rocm_home_none("flash_attn")
     archs = os.getenv("GPU_ARCHS", "native").split(";")
     validate_and_update_archs(archs)
 
-    cc_flag = [f"--offload-arch={arch}" for arch in archs]
+        cc_flag = [f"--offload-arch={arch}" for arch in archs]
 
-    # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
-    # torch._C._GLIBCXX_USE_CXX11_ABI
-    # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
-    if FORCE_CXX11_ABI:
-        torch._C._GLIBCXX_USE_CXX11_ABI = True
+        # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
+        # torch._C._GLIBCXX_USE_CXX11_ABI
+        # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
+        if FORCE_CXX11_ABI:
+            torch._C._GLIBCXX_USE_CXX11_ABI = True
 
     sources = ["csrc/flash_attn_ck/flash_api.cpp",
                "csrc/flash_attn_ck/flash_common.cpp",
@@ -411,7 +409,6 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
             extra_compile_args=extra_compile_args,
             include_dirs=include_dirs,
         )
-    )
 
 
 def get_package_version():
