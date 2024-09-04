@@ -139,7 +139,8 @@ ext_modules = []
 # We want this even if SKIP_CUDA_BUILD because when we run python setup.py sdist we want the .hpp
 # files included in the source distribution, in case the user compiles from source.
 if IS_ROCM:
-    subprocess.run(["git", "submodule", "update", "--init", "csrc/composable_kernel"])
+    if not USE_TRITON_ROCM:
+        subprocess.run(["git", "submodule", "update", "--init", "csrc/composable_kernel"])
 else:
     subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
 
@@ -304,8 +305,6 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
         )
     )
 elif not SKIP_CUDA_BUILD and IS_ROCM:
-    ck_dir = "csrc/composable_kernel"
-
     #use codegen get code dispatch
     if not os.path.exists("./build"):
         os.makedirs("build")
@@ -323,6 +322,11 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
         # Skip C++ extension compilation if using Triton Backend
         pass
     else:
+        ck_dir = "csrc/composable_kernel"
+
+        os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd --output_dir build --receipt 2")
+        os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d bwd --output_dir build --receipt 2")
+
         # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
         # See https://github.com/pytorch/pytorch/pull/70650
         generator_flag = []
