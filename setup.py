@@ -314,9 +314,9 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
     TORCH_MINOR = int(torch.__version__.split(".")[1])
 
     if USE_TRITON_ROCM:
+        # Skip C++ extension compilation if using Triton Backend
         pass
     else:
-
         # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
         # See https://github.com/pytorch/pytorch/pull/70650
         generator_flag = []
