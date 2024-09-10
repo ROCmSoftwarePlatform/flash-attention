@@ -888,68 +888,157 @@ def get_strides_from_layout(q, k, v, o, metadata):
     return q_strides, k_strides, v_strides, o_strides
 
 
+
+def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, alibi_slopes ): # expects bhsd
+    if True:
+        print("do:", do, do.shape, do.stride())
+        print("q:", q, q.shape, q.stride())
+        print("k:", k, k.shape, k.stride())
+        print("v:", v, v.shape, v.stride())
+        print("o:", o, o.shape, o.stride())
+        print("M:", M, M.shape, M.stride())
+    
+    if torch.version.hip is not None:
+        BLOCK = 64
+    else:
+        BLOCK = 128
+    assert do.is_contiguous()
+    assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
+    seqlen_q = q.shape[2]
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    BATCH, N_HEAD, N_CTX = q.shape[:3]
+    PRE_BLOCK = 128
+    # NUM_WARPS, NUM_STAGES = 4, 1
+    BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
+    BLK_SLICE_FACTOR = 2
+    RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
+    arg_k = k
+    arg_k = arg_k * (sm_scale * RCP_LN2)
+    assert N_CTX % PRE_BLOCK == 0
+    delta = torch.empty_like(M)
+    _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
+    # padded_head = (Lk != ctx.BLOCK_DMODEL)
+    grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
+
+    _attn_bwd_preprocess[grid_preprocess](
+        o,
+        do,
+        delta,
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        o.stride(3),
+        do.stride(0),
+        do.stride(1),
+        do.stride(2),
+        do.stride(3),
+        seqlen_q,
+        head_dim=Lk,
+        BLOCK_M=BLOCK,
+        D_HEAD=BLOCK_DMODEL,
+    )
+    grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
+
+    _attn_bwd[grid](
+        q,
+        arg_k,
+        v,
+        sm_scale,
+        alibi_slopes,
+        do,
+        dq,
+        dk,
+        dv,
+        M,
+        delta,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        N_HEAD,
+        N_CTX,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        BLOCK_M1=BLOCK_M1,
+        BLOCK_N1=BLOCK_N1,
+        BLOCK_M2=BLOCK_M2,
+        BLOCK_N2=BLOCK_N2,
+        BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
+        USE_ALIBI=False if alibi_slopes is None else True,
+    )
+
+    return dq, dk, dv, M, None
+
+
+def attention_prefill_forward_impl(q, k, v, o, metadata):
+    # NOTE: a large bias tensor leads to overflow during pointer arithmetic
+    if (metadata.bias is not None):
+        assert (metadata.bias.numel() < 2**31)
+
+    if o is None:
+        o = torch.empty_like(q, dtype=v.dtype)
+    metadata.check_args(q, k, v, o)
+
+    batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
+    q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata)
+
+    # Get closest power of 2 over or equal to 32.
+    padded_d_model = 1 << (head_size - 1).bit_length()
+    # Smallest head_dim supported is 16. If smaller, the tile in the
+    # kernel is padded - there is no padding in memory for any dims.
+    padded_d_model = max(padded_d_model, 16)
+
+    grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
+
+    # encoded_softmax is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
+    # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
+    # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
+    # only.  This return holds no useful output aside from debugging.
+    if metadata.return_encoded_softmax:
+        encoded_softmax = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
+                                        dtype=torch.float32)
+        softmax_strides = (encoded_softmax.stride(0), encoded_softmax.stride(1), encoded_softmax.stride(2),
+                        encoded_softmax.stride(3))
+    else:
+        encoded_softmax = None
+        softmax_strides = (0, 0 , 0 , 0)
+
+    M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
+
+    # Seed the RNG so we get reproducible results for testing.
+    philox_seed = 0x1BF52
+    philox_offset = 0x1D4B42
+
+    if metadata.bias is not None:
+        bias_strides = (metadata.bias.stride(0), metadata.bias.stride(1), metadata.bias.stride(2),
+                        metadata.bias.stride(3))
+    else:
+        bias_strides = (0, 0, 0, 0)
+
+    if metadata.alibi_slopes is not None:
+        alibi_strides = (metadata.alibi_slopes.stride(0), metadata.alibi_slopes.stride(1))
+    else:
+        alibi_strides = (0, 0)
+
+    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
+                    *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
+                    dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
+                    encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
+                    ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
+                    MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
+                    BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
+                    USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
+                    > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
+
+    return o, M, encoded_softmax, q, k , v, o , M, grid, head_size, philox_seed, philox_offset, encoded_softmax
+
+
 class _attention_prefill(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        # NOTE: a large bias tensor leads to overflow during pointer arithmetic
-        if (metadata.bias is not None):
-            assert (metadata.bias.numel() < 2**31)
-
-        if o is None:
-            o = torch.empty_like(q, dtype=v.dtype)
-        metadata.check_args(q, k, v, o)
-
-        batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
-        q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata)
-
-        # Get closest power of 2 over or equal to 32.
-        padded_d_model = 1 << (head_size - 1).bit_length()
-        # Smallest head_dim supported is 16. If smaller, the tile in the
-        # kernel is padded - there is no padding in memory for any dims.
-        padded_d_model = max(padded_d_model, 16)
-
-        grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
-
-        # encoded_softmax is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
-        # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
-        # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
-        # only.  This return holds no useful output aside from debugging.
-        if metadata.return_encoded_softmax:
-            encoded_softmax = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
-                                          dtype=torch.float32)
-            softmax_strides = (encoded_softmax.stride(0), encoded_softmax.stride(1), encoded_softmax.stride(2),
-                            encoded_softmax.stride(3))
-        else:
-            encoded_softmax = None
-            softmax_strides = (0, 0 , 0 , 0)
-
-        M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
-
-        # Seed the RNG so we get reproducible results for testing.
-        philox_seed = 0x1BF52
-        philox_offset = 0x1D4B42
-
-        if metadata.bias is not None:
-            bias_strides = (metadata.bias.stride(0), metadata.bias.stride(1), metadata.bias.stride(2),
-                            metadata.bias.stride(3))
-        else:
-            bias_strides = (0, 0, 0, 0)
-
-        if metadata.alibi_slopes is not None:
-            alibi_strides = (metadata.alibi_slopes.stride(0), metadata.alibi_slopes.stride(1))
-        else:
-            alibi_strides = (0, 0)
-
-        attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                       *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
-                       dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
-                       encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
-                       ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
-                       MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
-                       BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
-                       USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
-                       > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
+        o, M, encoded_softmax, q, k , v, o , M, grid, head_size, philox_seed, philox_offset, encoded_softmax = attention_prefill_forward_impl(q, k, v, o, metadata)
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
@@ -965,80 +1054,9 @@ class _attention_prefill(torch.autograd.Function):
         return o, M, encoded_softmax
 
     @staticmethod
-    def backward(ctx, do, _): # expects bhsd
-        if torch.version.hip is not None:
-            BLOCK = 64
-        else:
-            BLOCK = 128
+    def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, M = ctx.saved_tensors
-        assert do.is_contiguous()
-        assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
-        seqlen_q = q.shape[2]
-        dq = torch.empty_like(q)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-        BATCH, N_HEAD, N_CTX = q.shape[:3]
-        PRE_BLOCK = 128
-        # NUM_WARPS, NUM_STAGES = 4, 1
-        BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
-        BLK_SLICE_FACTOR = 2
-        RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-        arg_k = k
-        arg_k = arg_k * (ctx.sm_scale * RCP_LN2)
-        assert N_CTX % PRE_BLOCK == 0
-        delta = torch.empty_like(M)
-        _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
-        # padded_head = (Lk != ctx.BLOCK_DMODEL)
-        grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
-
-        _attn_bwd_preprocess[grid_preprocess](
-            o,
-            do,
-            delta,
-            o.stride(0),
-            o.stride(1),
-            o.stride(2),
-            o.stride(3),
-            do.stride(0),
-            do.stride(1),
-            do.stride(2),
-            do.stride(3),
-            seqlen_q,
-            head_dim=Lk,
-            BLOCK_M=BLOCK,
-            D_HEAD=ctx.BLOCK_DMODEL,
-        )
-        grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
-
-        _attn_bwd[grid](
-            q,
-            arg_k,
-            v,
-            ctx.sm_scale,
-            ctx.alibi_slopes,
-            do,
-            dq,
-            dk,
-            dv,
-            M,
-            delta,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            q.stride(3),
-            N_HEAD,
-            N_CTX,
-            BLOCK_DMODEL=ctx.BLOCK_DMODEL,
-            BLOCK_M1=BLOCK_M1,
-            BLOCK_N1=BLOCK_N1,
-            BLOCK_M2=BLOCK_M2,
-            BLOCK_N2=BLOCK_N2,
-            BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
-            USE_ALIBI=False if ctx.alibi_slopes is None else True,
-        )
-
-        return dq, dk, dv, M, None
-
+        return attention_prefill_backward_impl(do, q, k, v, o, M, ctx.sm_scale, ctx.BLOCK_DMODEL, ctx.alibi_slopes)
 
 attention_prefill = _attention_prefill.apply
 
