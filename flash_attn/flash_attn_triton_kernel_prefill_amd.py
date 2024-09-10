@@ -960,24 +960,17 @@ def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, a
         print("v:", v, v.shape, v.stride())
         print("o:", o, o.shape, o.stride())
         print("M:", M, M.shape, M.stride())
+        print("layout: layout")
 
-
+    # the kernel wants bhsd
     if layout == "bhsd":
         pass
     elif layout == "bshd":
-        # Transform inputs from bshd to bhsd layout
-        do = do.permute(0, 2, 1, 3).contiguous()
-        q = q.permute(0, 2, 1, 3).contiguous()
-        k = k.permute(0, 2, 1, 3).contiguous()
-        v = v.permute(0, 2, 1, 3).contiguous()
-        o = o.permute(0, 2, 1, 3).contiguous() 
-
-        # Ensure all tensors have the same stride
-        do = do.view(do.shape)
-        q = q.view(q.shape)
-        k = k.view(k.shape)
-        v = v.view(v.shape)
-        o = o.view(o.shape)
+        do= do.transpose(1, 2)
+        q= q.transpose(1, 2)
+        k= q.transpose(1, 2)
+        v= q.transpose(1, 2)
+        o= q.transpose(1, 2)
     else:
         raise ValueError(f"Unknown layout {layout}")
 
@@ -995,7 +988,6 @@ def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, a
         print("k:", k, k.shape, k.stride())
         print("v:", v, v.shape, v.stride())
         print("o:", o, o.shape, o.stride())
-        print("M:", M, M.shape, M.stride())
 
     assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
     seqlen_q = q.shape[2]
@@ -1015,7 +1007,6 @@ def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, a
     _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
     # padded_head = (Lk != ctx.BLOCK_DMODEL)
     grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
-
     _attn_bwd_preprocess[grid_preprocess](
         o,
         do,
@@ -1034,7 +1025,6 @@ def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, a
         D_HEAD=BLOCK_DMODEL,
     )
     grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
-
     _attn_bwd[grid](
         q,
         arg_k,
