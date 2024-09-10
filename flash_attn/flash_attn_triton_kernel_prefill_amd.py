@@ -889,7 +889,70 @@ def get_strides_from_layout(q, k, v, o, metadata):
 
 
 
-def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, alibi_slopes, layout): # expects bhsd
+def attention_prefill_forward_impl(q, k, v, o, metadata):
+    # NOTE: a large bias tensor leads to overflow during pointer arithmetic
+    if (metadata.bias is not None):
+        assert (metadata.bias.numel() < 2**31)
+
+    if o is None:
+        o = torch.empty_like(q, dtype=v.dtype)
+    metadata.check_args(q, k, v, o)
+
+    batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
+    q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata)
+
+    # Get closest power of 2 over or equal to 32.
+    padded_d_model = 1 << (head_size - 1).bit_length()
+    # Smallest head_dim supported is 16. If smaller, the tile in the
+    # kernel is padded - there is no padding in memory for any dims.
+    padded_d_model = max(padded_d_model, 16)
+
+    grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
+
+    # encoded_softmax is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
+    # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
+    # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
+    # only.  This return holds no useful output aside from debugging.
+    if metadata.return_encoded_softmax:
+        encoded_softmax = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
+                                        dtype=torch.float32)
+        softmax_strides = (encoded_softmax.stride(0), encoded_softmax.stride(1), encoded_softmax.stride(2),
+                        encoded_softmax.stride(3))
+    else:
+        encoded_softmax = None
+        softmax_strides = (0, 0 , 0 , 0)
+
+    M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
+
+    # Seed the RNG so we get reproducible results for testing.
+    philox_seed = 0x1BF52
+    philox_offset = 0x1D4B42
+
+    if metadata.bias is not None:
+        bias_strides = (metadata.bias.stride(0), metadata.bias.stride(1), metadata.bias.stride(2),
+                        metadata.bias.stride(3))
+    else:
+        bias_strides = (0, 0, 0, 0)
+
+    if metadata.alibi_slopes is not None:
+        alibi_strides = (metadata.alibi_slopes.stride(0), metadata.alibi_slopes.stride(1))
+    else:
+        alibi_strides = (0, 0)
+
+    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
+                    *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
+                    dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
+                    encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
+                    ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
+                    MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
+                    BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
+                    USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
+                    > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
+
+    return o, M, encoded_softmax, q, k , v, o , M, grid, head_size, philox_seed, philox_offset, encoded_softmax
+
+
+def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, alibi_slopes, layout):
     if True:
         print("do:", do, do.shape, do.stride())
         print("q:", q, q.shape, q.stride())
@@ -1000,69 +1063,6 @@ def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, a
     )
 
     return dq, dk, dv, M, None
-
-
-def attention_prefill_forward_impl(q, k, v, o, metadata):
-    # NOTE: a large bias tensor leads to overflow during pointer arithmetic
-    if (metadata.bias is not None):
-        assert (metadata.bias.numel() < 2**31)
-
-    if o is None:
-        o = torch.empty_like(q, dtype=v.dtype)
-    metadata.check_args(q, k, v, o)
-
-    batch, nheads_q, nheads_k, head_size = get_shape_from_layout(q, k, metadata)
-    q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, metadata)
-
-    # Get closest power of 2 over or equal to 32.
-    padded_d_model = 1 << (head_size - 1).bit_length()
-    # Smallest head_dim supported is 16. If smaller, the tile in the
-    # kernel is padded - there is no padding in memory for any dims.
-    padded_d_model = max(padded_d_model, 16)
-
-    grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
-
-    # encoded_softmax is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
-    # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
-    # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
-    # only.  This return holds no useful output aside from debugging.
-    if metadata.return_encoded_softmax:
-        encoded_softmax = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
-                                        dtype=torch.float32)
-        softmax_strides = (encoded_softmax.stride(0), encoded_softmax.stride(1), encoded_softmax.stride(2),
-                        encoded_softmax.stride(3))
-    else:
-        encoded_softmax = None
-        softmax_strides = (0, 0 , 0 , 0)
-
-    M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
-
-    # Seed the RNG so we get reproducible results for testing.
-    philox_seed = 0x1BF52
-    philox_offset = 0x1D4B42
-
-    if metadata.bias is not None:
-        bias_strides = (metadata.bias.stride(0), metadata.bias.stride(1), metadata.bias.stride(2),
-                        metadata.bias.stride(3))
-    else:
-        bias_strides = (0, 0, 0, 0)
-
-    if metadata.alibi_slopes is not None:
-        alibi_strides = (metadata.alibi_slopes.stride(0), metadata.alibi_slopes.stride(1))
-    else:
-        alibi_strides = (0, 0)
-
-    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                    *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
-                    dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
-                    encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
-                    ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
-                    MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
-                    BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
-                    USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
-                    > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
-
-    return o, M, encoded_softmax, q, k , v, o , M, grid, head_size, philox_seed, philox_offset, encoded_softmax
 
 
 class _attention_prefill(torch.autograd.Function):
