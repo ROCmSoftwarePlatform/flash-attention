@@ -16,6 +16,21 @@ def fwd(q,
         softcap,
         return_softmax,
         gen_):
+    if True:
+        print()
+        print("flash_attn_triton_amd.py::fwd")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("alibi_slopes:", alibi_slopes)
+        print("dropout_p:", dropout_p)
+        print("softmax_scale:", softmax_scale)
+        print("causal:", causal)
+        print("window_size_left:", window_size_left)
+        print("window_size_right:", window_size_right)
+        print("softcap", softcap)
+        print("return_softmax:", return_softmax)
+        print("gen_:", gen_)
 
     if dropout_p != 0.0:
         raise ValueError("dropout is not supported on AMD's Triton Backend yet")
@@ -45,6 +60,13 @@ def fwd(q,
     # Check arguments
     input_metadata.check_args(q, k, v, o)
     tri_out, softmax_lse, softmax_dmask= attention_prefill(q, k, v, o, input_metadata)
+
+    if True:
+        print("tri_out:", tri_out, tri_out.shape)
+        if softmax_lse is not None:
+            print("softmax_lse:", softmax_lse, softmax_lse.shape)
+        if softmax_dmask is not None:
+            print("v:", softmax_dmask, softmax_dmask.shape)
 
     return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
 
