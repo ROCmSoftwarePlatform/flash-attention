@@ -99,26 +99,9 @@ def bwd(
 
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
 
-    # Transform inputs from bshd to bhsd layout
-    dout_bhsd = dout.permute(0, 2, 1, 3).contiguous()
-    q_bhsd = q.permute(0, 2, 1, 3).contiguous()
-    k_bhsd = k.permute(0, 2, 1, 3).contiguous()
-    v_bhsd = v.permute(0, 2, 1, 3).contiguous()
-    out_bhsd = out.permute(0, 2, 1, 3).contiguous() if out is not None else None
+    dq, dk, dv, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
 
-    # Ensure all tensors have the same stride
-    dout_bhsd = dout_bhsd.view(dout_bhsd.shape)
-    q_bhsd = q_bhsd.view(q_bhsd.shape)
-    k_bhsd = k_bhsd.view(k_bhsd.shape)
-    v_bhsd = v_bhsd.view(v_bhsd.shape)
-    out_bhsd = out_bhsd.view(out_bhsd.shape) if out_bhsd is not None else None
-
-    assert q_bhsd.stride() == k_bhsd.stride() == v_bhsd.stride() == out_bhsd.stride() == dout_bhsd.stride()
-
-
-    dq, dk, dv, _, _ = attention_prefill_backward_impl(dout_bhsd, q_bhsd, k_bhsd, v_bhsd, out_bhsd, softmax_lse, softmax_scale, head_size, alibi_slopes) # expect bhsd
-
-    softmax_d = None # not sure what softmax_d is supposed to be
+    softmax_d = None # fill this in
     if True:
         print()
         print("bwd output")

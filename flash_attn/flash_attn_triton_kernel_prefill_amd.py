@@ -889,7 +889,7 @@ def get_strides_from_layout(q, k, v, o, metadata):
 
 
 
-def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, alibi_slopes ): # expects bhsd
+def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, alibi_slopes, layout): # expects bhsd
     if True:
         print("do:", do, do.shape, do.stride())
         print("q:", q, q.shape, q.stride())
@@ -897,12 +897,43 @@ def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, a
         print("v:", v, v.shape, v.stride())
         print("o:", o, o.shape, o.stride())
         print("M:", M, M.shape, M.stride())
-    
+
+
+    if layout == "bhsd":
+        pass
+    elif layout == "bshd":
+        # Transform inputs from bshd to bhsd layout
+        do = do.permute(0, 2, 1, 3).contiguous()
+        q = q.permute(0, 2, 1, 3).contiguous()
+        k = k.permute(0, 2, 1, 3).contiguous()
+        v = v.permute(0, 2, 1, 3).contiguous()
+        o = o.permute(0, 2, 1, 3).contiguous() 
+
+        # Ensure all tensors have the same stride
+        do = do.view(do.shape)
+        q = q.view(q.shape)
+        k = k.view(k.shape)
+        v = v.view(v.shape)
+        o = o.view(o.shape)
+    else:
+        raise ValueError(f"Unknown layout {layout}")
+
     if torch.version.hip is not None:
         BLOCK = 64
     else:
         BLOCK = 128
     assert do.is_contiguous()
+
+    if True:
+        print()
+        print("Before check stride")
+        print("do:", do, do.shape, do.stride())
+        print("q:", q, q.shape, q.stride())
+        print("k:", k, k.shape, k.stride())
+        print("v:", v, v.shape, v.stride())
+        print("o:", o, o.shape, o.stride())
+        print("M:", M, M.shape, M.stride())
+
     assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
     seqlen_q = q.shape[2]
     dq = torch.empty_like(q)
@@ -1051,12 +1082,13 @@ class _attention_prefill(torch.autograd.Function):
         ctx.philox_offset = philox_offset
         ctx.encoded_softmax = encoded_softmax
         ctx.return_encoded_softmax = metadata.return_encoded_softmax
+        ctx.layout = metadata.layout
         return o, M, encoded_softmax
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, M = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, M, ctx.sm_scale, ctx.BLOCK_DMODEL, ctx.alibi_slopes)
+        return attention_prefill_backward_impl(do, q, k, v, o, M, ctx.sm_scale, ctx.BLOCK_DMODEL, ctx.alibi_slopes, ctx.layout)
 
 attention_prefill = _attention_prefill.apply
 
