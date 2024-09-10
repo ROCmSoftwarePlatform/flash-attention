@@ -64,6 +64,7 @@ def bwd(
     causal,
     window_size_left,
     window_size_right,
+    softcap,
     deterministic,
     gen_,
     rng_state,
