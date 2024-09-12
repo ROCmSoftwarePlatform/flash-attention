@@ -1804,12 +1804,14 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
     #(1, 16, 1022, 64),
 ])
 @pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
-@pytest.mark.parametrize('torch_sdpa_test', [False, True])
-@pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('use_alibi', [False, True])
+# @pytest.mark.parametrize('torch_sdpa_test', [False, True])
+@pytest.mark.parametrize('torch_sdpa_test', [False])
+# @pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('causal', [False])
+# @pytest.mark.parametrize('use_alibi', [False, True])
+@pytest.mark.parametrize('use_alibi', [False])
 def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, use_alibi,
                 dtype=torch.float16):
-    pytest.skip("Prefill Backward Kernel is broken")
     torch.manual_seed(20)
     if qseqlen_not_equal_kseqlen is not None:
         seqlen_q = qseqlen_not_equal_kseqlen
@@ -1875,7 +1877,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     tri_dk, k.grad = k.grad.clone(), None
     tri_dq, q.grad = q.grad.clone(), None
     # compare
-    if DEBUG:
+    if True:
         print("tri_out:", tri_out)
         print("ref_out:",ref_out )
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
@@ -1890,6 +1892,14 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         ATOL = 1e-1 * max(1.0, (seqlen_q + D_HEAD) / 64.0)
 
     RTOL = 0
+
+    if True:
+        print("ref_dv:", ref_dv)
+        print("tri_dv:",tri_dv )
+        print("ref_dk:", ref_dk)
+        print("tri_dk:",tri_dk )
+        print("ref_dq:", ref_dq)
+        print("tri_dq:",tri_dq )
 
     torch.testing.assert_close(ref_dv, tri_dv, atol=ATOL, rtol=RTOL)
     torch.testing.assert_close(ref_dk, tri_dk, atol=ATOL, rtol=RTOL)
