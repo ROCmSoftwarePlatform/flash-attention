@@ -710,13 +710,13 @@ def _bwd_kernel_one_col_block(
     DV,  #
     L,  #
     D,  #
-    Q_block_ptr,
-    K_block_ptr,
-    V_block_ptr,  #
-    DO_block_ptr,
-    DQ_block_ptr,
-    DK_block_ptr,
-    DV_block_ptr,  #
+    q_offset,
+    k_offset,
+    v_offset,
+    do_offset,
+    dq_offset,
+    dk_offset,
+    dv_offset,
     stride_dqa,
     stride_qz,
     stride_qh,
@@ -742,52 +742,48 @@ def _bwd_kernel_one_col_block(
     BLOCK_DMODEL: tl.constexpr,  #
     BLOCK_N: tl.constexpr,  #
     SEQUENCE_PARALLEL: tl.constexpr,  #
-    CAUSAL: tl.constexpr,  #
-    MMA_V3: tl.constexpr,  #
+    CAUSAL: tl.constexpr,
 ):
     if CAUSAL:
         lo = start_n * BLOCK_M
     else:
         lo = 0
 
-    Q_offset = (off_z * stride_qz + off_h * stride_qh) // stride_qm
-    DQ_offset = off_z * stride_qz + off_h * stride_qh
-    K_offset = (off_z * stride_kz + off_h * stride_kh) // stride_kn
-    V_offset = (off_z * stride_vz + off_h * stride_vh) // stride_vn
     if SEQUENCE_PARALLEL:
-        DQ_offset += stride_dqa * start_n
-    DQ_offset = DQ_offset // stride_qm
-
-    Q_block_ptr = tl.advance(Q_block_ptr, (lo + Q_offset, 0))
-    K_block_ptr = tl.advance(K_block_ptr, (start_n * BLOCK_M + K_offset, 0))
-    V_block_ptr = tl.advance(V_block_ptr, (start_n * BLOCK_M + V_offset, 0))
-    DO_block_ptr = tl.advance(DO_block_ptr, (lo + Q_offset, 0))
-    DQ_block_ptr = tl.advance(DQ_block_ptr, (lo + DQ_offset, 0))
-    DK_block_ptr = tl.advance(DK_block_ptr, (start_n * BLOCK_M + K_offset, 0))
-    DV_block_ptr = tl.advance(DV_block_ptr, (start_n * BLOCK_M + V_offset, 0))
-
+        dq_offset += stride_dqa * start_n
     # initialize row/col offsets
     offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_m = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
     # pointer to row-wise quantities in value-like data
     D_ptrs = D + off_hz * N_CTX
     l_ptrs = L + off_hz * N_CTX
-    # initialize dv amd dk
+    # initialize dv and dk accumulators
     dv = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
     dk = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
-    # k and v stay in SRAM throughout
-    k = tl.load(K_block_ptr)
-    v = tl.load(V_block_ptr)
+    # load k and v once per column block
+    k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
+    v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
+    k = tl.load(k_ptrs)
+    v = tl.load(v_ptrs)
+
     # loop over rows
+    # num_block_m = tl.cdiv(N_CTX, BLOCK_M)
     for start_m in range(lo, num_block * BLOCK_M, BLOCK_M):
         offs_m_curr = start_m + offs_m
+        q_ptrs = q_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
+        dq_ptrs = dq_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
+        do_ptrs = do_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
+
         # load q, k, v, do on-chip
-        q = tl.load(Q_block_ptr)
+        q = tl.load(q_ptrs)
+        do = tl.load(do_ptrs)
+
         # recompute p = softmax(qk, dim=-1).T
         # NOTE: `do` is pre-divided by `l`; no normalization here
         if CAUSAL:
             qk = tl.where(
-                offs_m_curr[:, None] >= (offs_n[None, :]), float(0.0), float("-inf")
+                offs_m_curr[:, None] >= offs_n[None, :], float(0.0), float("-inf")
             )
         else:
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -796,7 +792,6 @@ def _bwd_kernel_one_col_block(
         l_i = tl.load(l_ptrs + offs_m_curr)
         p = tl.math.exp2(qk - l_i[:, None])
         # compute dv
-        do = tl.load(DO_block_ptr)
         dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
         # compute dp = dot(v, do)
         Di = tl.load(D_ptrs + offs_m_curr)
@@ -806,26 +801,26 @@ def _bwd_kernel_one_col_block(
         ds = (p * (dp - Di[:, None]) * sm_scale).to(Q.dtype.element_ty)
         # compute dk = dot(ds.T, q)
         dk += tl.dot(tl.trans(ds), q)
+
         # compute dq
         if not SEQUENCE_PARALLEL:
-            dq = tl.load(DQ_block_ptr)
+            dq = tl.load(dq_ptrs)
             dq += tl.dot(ds, k)
-            tl.store(DQ_block_ptr, dq.to(Q.dtype.element_ty))
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty))
         elif SEQUENCE_PARALLEL:
-            if MMA_V3:
+            if False: # path for MMA_V3 in oai kernel
                 dq = tl.dot(ds, k)
             else:
                 # not work with mma v3, because M % 64 != 0
                 dq = tl.trans(tl.dot(tl.trans(k), tl.trans(ds)))
-            tl.store(DQ_block_ptr, dq.to(Q.dtype.element_ty))
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty))
 
-        # increment pointers
-        DQ_block_ptr = tl.advance(DQ_block_ptr, (BLOCK_M, 0))
-        Q_block_ptr = tl.advance(Q_block_ptr, (BLOCK_M, 0))
-        DO_block_ptr = tl.advance(DO_block_ptr, (BLOCK_M, 0))
+    # write-back dv and dk
+    dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
+    dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     # write-back
-    tl.store(DV_block_ptr, dv.to(V.dtype.element_ty))
-    tl.store(DK_block_ptr, dk.to(K.dtype.element_ty))
+    tl.store(dv_ptrs, dv.to(V.dtype.element_ty))
+    tl.store(dk_ptrs, dk.to(K.dtype.element_ty))
 
 
 @triton.jit
@@ -833,111 +828,53 @@ def _bwd_kernel(
     Q,
     K,
     V,
-    sm_scale,  #
+    sm_scale,
     Out,
-    DO,  #
+    DO,
     DQ,
     DK,
-    DV,  #
-    L,  #
-    D,  #
+    DV,
+    L,
+    D,
     stride_dqa,
     stride_qz,
     stride_qh,
     stride_qm,
-    stride_qk,  #
+    stride_qk,
     stride_kz,
     stride_kh,
     stride_kn,
-    stride_kk,  #
+    stride_kk,
     stride_vz,
     stride_vh,
     stride_vn,
-    stride_vk,  #
+    stride_vk,
     Z,
     H,
-    N_CTX,  #
-    Z_H_N_CTX,  #
-    SQ_Z_H_N_CTX,  #
+    N_CTX,
+    Z_H_N_CTX,
+    SQ_Z_H_N_CTX,
     BLOCK_M: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,  #
-    BLOCK_N: tl.constexpr,  #
-    SEQUENCE_PARALLEL: tl.constexpr,  #
-    CAUSAL: tl.constexpr,  #
-    MMA_V3: tl.constexpr,  #
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SEQUENCE_PARALLEL: tl.constexpr,
+    CAUSAL: tl.constexpr
 ):
     qk_scale = sm_scale * 1.44269504
     off_hz = tl.program_id(0)
     off_z = off_hz // H
     off_h = off_hz % H
 
-    Q_block_ptr = tl.make_block_ptr(
-        base=Q,
-        shape=(Z_H_N_CTX, BLOCK_DMODEL),
-        strides=(stride_qm, stride_qk),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
-    K_block_ptr = tl.make_block_ptr(
-        base=K,
-        shape=(Z_H_N_CTX, BLOCK_DMODEL),
-        strides=(stride_kn, stride_kk),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
-    V_block_ptr = tl.make_block_ptr(
-        base=V,
-        shape=(Z_H_N_CTX, BLOCK_DMODEL),
-        strides=(stride_vn, stride_vk),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
-    DO_block_ptr = tl.make_block_ptr(
-        base=DO,
-        shape=(Z_H_N_CTX, BLOCK_DMODEL),
-        strides=(stride_qm, stride_qk),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
+    q_offset = Q + off_z * stride_qz + off_h * stride_qh
+    k_offset = K + off_z * stride_kz + off_h * stride_kh
+    v_offset = V + off_z * stride_vz + off_h * stride_vh
+    do_offset = DO + off_z * stride_qz + off_h * stride_qh
     if SEQUENCE_PARALLEL:
-        DQ_block_ptr = tl.make_block_ptr(
-            base=DQ,
-            shape=(SQ_Z_H_N_CTX, BLOCK_DMODEL),
-            strides=(stride_qm, stride_qk),
-            offsets=(0, 0),
-            block_shape=(BLOCK_M, BLOCK_DMODEL),
-            order=(1, 0),
-        )
+        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh # use SQ_Z_H_N_CTX
     else:
-        DQ_block_ptr = tl.make_block_ptr(
-            base=DQ,
-            shape=(Z_H_N_CTX, BLOCK_DMODEL),
-            strides=(stride_qm, stride_qk),
-            offsets=(0, 0),
-            block_shape=(BLOCK_M, BLOCK_DMODEL),
-            order=(1, 0),
-        )
-
-    DK_block_ptr = tl.make_block_ptr(
-        base=DK,
-        shape=(Z_H_N_CTX, BLOCK_DMODEL),
-        strides=(stride_kn, stride_kk),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
-    DV_block_ptr = tl.make_block_ptr(
-        base=DV,
-        shape=(Z_H_N_CTX, BLOCK_DMODEL),
-        strides=(stride_vn, stride_vk),
-        offsets=(0, 0),
-        block_shape=(BLOCK_M, BLOCK_DMODEL),
-        order=(1, 0),
-    )
+        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh # use Z_H_N_CTX
+    dk_offset = DK + off_z * stride_kz + off_h * stride_kh
+    dv_offset = DV + off_z * stride_vz + off_h * stride_vh
 
     num_block_n = tl.cdiv(N_CTX, BLOCK_N)
     if not SEQUENCE_PARALLEL:
@@ -955,13 +892,13 @@ def _bwd_kernel(
                 DV,  #
                 L,  #
                 D,  #
-                Q_block_ptr,
-                K_block_ptr,
-                V_block_ptr,  #
-                DO_block_ptr,
-                DQ_block_ptr,
-                DK_block_ptr,
-                DV_block_ptr,  #
+                q_offset,
+                k_offset,
+                v_offset,
+                do_offset,
+                dq_offset,
+                dk_offset,
+                dv_offset,
                 stride_dqa,
                 stride_qz,
                 stride_qh,
@@ -987,8 +924,7 @@ def _bwd_kernel(
                 BLOCK_DMODEL=BLOCK_DMODEL,  #
                 BLOCK_N=BLOCK_N,  #
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,  #
-                CAUSAL=CAUSAL,  #
-                MMA_V3=MMA_V3,  #
+                CAUSAL=CAUSAL
             )
     else:
         start_n = tl.program_id(1)
@@ -1005,13 +941,13 @@ def _bwd_kernel(
             DV,  #
             L,  #
             D,  #
-            Q_block_ptr,
-            K_block_ptr,
-            V_block_ptr,  #
-            DO_block_ptr,
-            DQ_block_ptr,
-            DK_block_ptr,
-            DV_block_ptr,  #
+            q_offset,
+            k_offset,
+            v_offset,
+            do_offset,
+            dq_offset,
+            dk_offset,
+            dv_offset,
             stride_dqa,
             stride_qz,
             stride_qh,
@@ -1037,8 +973,7 @@ def _bwd_kernel(
             BLOCK_DMODEL=BLOCK_DMODEL,  #
             BLOCK_N=BLOCK_N,  #
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,  #
-            CAUSAL=CAUSAL,  #
-            MMA_V3=MMA_V3,  #
+            CAUSAL=CAUSAL
         )
 
 
@@ -1057,8 +992,6 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, BLOCK_
     else:
         raise ValueError(f"Unknown layout {layout}")
 
-
-    MMA_V3 = False
     sequence_parallel = False
     causal = False
 
@@ -1124,8 +1057,7 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, BLOCK_
         BLOCK_N=BLOCK,  #
         BLOCK_DMODEL=BLOCK_DMODEL,  #
         SEQUENCE_PARALLEL=sequence_parallel,  #
-        CAUSAL=causal,  #
-        MMA_V3=MMA_V3,  #
+        CAUSAL=causal,
         num_warps=8,  #
         num_stages=1,  #
     )
@@ -1412,24 +1344,23 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 
 
 @pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
-    (1, 1, 1, 1),
-    (1, 1, 4, 2),
-    (1, 1, 1, 3),
-    (1, 1, 1, 4),
-    (1, 1, 1, 7),
-    (1, 1, 1, 16),
-    (1, 1, 1, 32),
-    # (4, 48, 1024, 64),
-    # (4, 48, 2048, 64),
-    # (2, 48, 4096, 64),
-    # (1, 16, 1024, 64),
-    # (1, 16, 1024, 128),
+    # (1, 1, 1, 1),
+    # (1, 1, 4, 2),
+    # (1, 1, 1, 3),
+    # (1, 1, 1, 4),
+    # (1, 1, 1, 7),
+    # (1, 1, 1, 16),
+    # (1, 1, 1, 32),
+    (1, 16, 1022, 64),
+    (4, 48, 1024, 64),
+    (4, 48, 2048, 64),
+    (2, 48, 4096, 64),
+    (1, 16, 1024, 64),
+    (1, 16, 1024, 128),
     # (1, 16, 8192, 63),
-    # (1, 16, 1022, 64),
 ])
 @pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
-# @pytest.mark.parametrize('torch_sdpa_test', [False, True])
-@pytest.mark.parametrize('torch_sdpa_test', [False])
+@pytest.mark.parametrize('torch_sdpa_test', [False, True])
 # @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('causal', [False])
 # @pytest.mark.parametrize('use_alibi', [False, True])
