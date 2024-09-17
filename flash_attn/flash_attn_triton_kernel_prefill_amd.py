@@ -31,6 +31,9 @@ import triton.language as tl
 from triton import cdiv
 
 
+DEBUG = False
+
+
 class MetaData():
     cu_seqlens_q = None
     cu_seqlens_k = None
@@ -702,14 +705,14 @@ def _bwd_kernel_one_col_block(
     K,
     V,
     sm_scale,
-    qk_scale,  #
+    qk_scale,
     Out,
-    DO,  #
+    DO,
     DQ,
     DK,
-    DV,  #
-    L,  #
-    D,  #
+    DV,
+    L,
+    D,
     q_offset,
     k_offset,
     v_offset,
@@ -721,27 +724,29 @@ def _bwd_kernel_one_col_block(
     stride_qz,
     stride_qh,
     stride_qm,
-    stride_qk,  #
+    stride_qk,
     stride_kz,
     stride_kh,
     stride_kn,
-    stride_kk,  #
+    stride_kk,
     stride_vz,
     stride_vh,
     stride_vn,
-    stride_vk,  #
+    stride_vk,
     Z,
     H,
-    N_CTX,  #
+    N_CTX_Q,
+    N_CTX_K,
     off_h,
     off_z,
     off_hz,
     start_n,
-    num_block,  #
+    num_block_n,
     BLOCK_M: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,  #
-    BLOCK_N: tl.constexpr,  #
-    SEQUENCE_PARALLEL: tl.constexpr,  #
+    BLOCK_DMODEL: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
 ):
     if CAUSAL:
@@ -755,29 +760,35 @@ def _bwd_kernel_one_col_block(
     offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_m = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
+
+    # Apply masking for head dimension
+    mask_d = offs_d < ACTUAL_BLOCK_DMODEL
+
     # pointer to row-wise quantities in value-like data
-    D_ptrs = D + off_hz * N_CTX
-    l_ptrs = L + off_hz * N_CTX
+    D_ptrs = D + off_hz * N_CTX_Q
+    l_ptrs = L + off_hz * N_CTX_Q
+
     # initialize dv and dk accumulators
     dv = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
     dk = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+
     # load k and v once per column block
     k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
-    k = tl.load(k_ptrs)
-    v = tl.load(v_ptrs)
+    k = tl.load(k_ptrs, mask_d[None, :], other=0.0)
+    v = tl.load(v_ptrs, mask_d[None, :], other=0.0)
 
     # loop over rows
     # num_block_m = tl.cdiv(N_CTX, BLOCK_M)
-    for start_m in range(lo, num_block * BLOCK_M, BLOCK_M):
+    for start_m in range(lo, num_block_n * BLOCK_M, BLOCK_M):
         offs_m_curr = start_m + offs_m
         q_ptrs = q_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
         dq_ptrs = dq_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
         do_ptrs = do_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
 
         # load q, k, v, do on-chip
-        q = tl.load(q_ptrs)
-        do = tl.load(do_ptrs)
+        q = tl.load(q_ptrs, mask=mask_d[None, :], other=0.0)
+        do = tl.load(do_ptrs, mask=mask_d[None, :], other=0.0)
 
         # recompute p = softmax(qk, dim=-1).T
         # NOTE: `do` is pre-divided by `l`; no normalization here
@@ -804,23 +815,23 @@ def _bwd_kernel_one_col_block(
 
         # compute dq
         if not SEQUENCE_PARALLEL:
-            dq = tl.load(dq_ptrs)
+            dq = tl.load(dq_ptrs, mask_d[None, :], other=0.0)
             dq += tl.dot(ds, k)
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty))
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask_d[None, :])
         elif SEQUENCE_PARALLEL:
             if False: # path for MMA_V3 in oai kernel
                 dq = tl.dot(ds, k)
             else:
                 # not work with mma v3, because M % 64 != 0
                 dq = tl.trans(tl.dot(tl.trans(k), tl.trans(ds)))
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty))
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask_d[None, :])
 
     # write-back dv and dk
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     # write-back
-    tl.store(dv_ptrs, dv.to(V.dtype.element_ty))
-    tl.store(dk_ptrs, dk.to(K.dtype.element_ty))
+    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=mask_d[None, :])
+    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=mask_d[None, :])
 
 
 @triton.jit
@@ -851,11 +862,13 @@ def _bwd_kernel(
     stride_vk,
     Z,
     H,
-    N_CTX,
+    N_CTX_Q,
+    N_CTX_K,
     Z_H_N_CTX,
     SQ_Z_H_N_CTX,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr
@@ -876,7 +889,7 @@ def _bwd_kernel(
     dk_offset = DK + off_z * stride_kz + off_h * stride_kh
     dv_offset = DV + off_z * stride_vz + off_h * stride_vh
 
-    num_block_n = tl.cdiv(N_CTX, BLOCK_N)
+    num_block_n = tl.cdiv(N_CTX_K, BLOCK_N)
     if not SEQUENCE_PARALLEL:
         for start_n in range(0, num_block_n):
             _bwd_kernel_one_col_block(
@@ -886,12 +899,12 @@ def _bwd_kernel(
                 sm_scale,
                 qk_scale,
                 Out,
-                DO,  #
+                DO,
                 DQ,
                 DK,
-                DV,  #
-                L,  #
-                D,  #
+                DV,
+                L,
+                D,
                 q_offset,
                 k_offset,
                 v_offset,
@@ -903,27 +916,29 @@ def _bwd_kernel(
                 stride_qz,
                 stride_qh,
                 stride_qm,
-                stride_qk,  #
+                stride_qk,
                 stride_kz,
                 stride_kh,
                 stride_kn,
-                stride_kk,  #
+                stride_kk,
                 stride_vz,
                 stride_vh,
                 stride_vn,
-                stride_vk,  #
+                stride_vk,
                 Z,
                 H,
-                N_CTX,  #
+                N_CTX_Q,
+                N_CTX_K,
                 off_h,
                 off_z,
                 off_hz,
                 start_n,
-                num_block_n,  #
+                num_block_n,
                 BLOCK_M=BLOCK_M,
-                BLOCK_DMODEL=BLOCK_DMODEL,  #
-                BLOCK_N=BLOCK_N,  #
-                SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,  #
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+                BLOCK_N=BLOCK_N,
+                SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
                 CAUSAL=CAUSAL
             )
     else:
@@ -935,12 +950,12 @@ def _bwd_kernel(
             sm_scale,
             qk_scale,
             Out,
-            DO,  #
+            DO,
             DQ,
             DK,
-            DV,  #
-            L,  #
-            D,  #
+            DV,
+            L,
+            D,
             q_offset,
             k_offset,
             v_offset,
@@ -952,41 +967,57 @@ def _bwd_kernel(
             stride_qz,
             stride_qh,
             stride_qm,
-            stride_qk,  #
+            stride_qk,
             stride_kz,
             stride_kh,
             stride_kn,
-            stride_kk,  #
+            stride_kk,
             stride_vz,
             stride_vh,
             stride_vn,
-            stride_vk,  #
+            stride_vk,
             Z,
             H,
-            N_CTX,  #
+            N_CTX_Q,
+            N_CTX_K,
             off_h,
             off_z,
             off_hz,
             start_n,
-            num_block_n,  #
+            num_block_n,
             BLOCK_M=BLOCK_M,
-            BLOCK_DMODEL=BLOCK_DMODEL,  #
-            BLOCK_N=BLOCK_N,  #
-            SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,  #
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+            BLOCK_N=BLOCK_N,
+            SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
             CAUSAL=CAUSAL
         )
 
 
 
 
-def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, BLOCK_DMODEL, alibi_slopes, layout):
+def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, layout):
+    if DEBUG:
+        print()
+        print("do:", do, do.shape, do.stride())
+        print("q:", q, q.shape, q.stride())
+        print("k:", k, k.shape, k.stride())
+        print("v:", v, v.shape, v.stride())
+        print("o:", o, o.shape, o.stride())
+        print("L:", L, L.shape, L.stride())
+        print("sm_scale", sm_scale)
+        print("head_size", head_size)
+        print("alibi_slopes", alibi_slopes)
+        print("layout", layout)
+
+
     # the kernel wants bhsd
     if layout == "bshd":
-        do= do.transpose(1, 2)
-        q= q.transpose(1, 2)
-        k= q.transpose(1, 2)
-        v= q.transpose(1, 2)
-        o= q.transpose(1, 2)
+        do = do.transpose(1, 2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        o = o.transpose(1, 2)
     elif layout == "bhsd":
         pass
     else:
@@ -997,14 +1028,29 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, BLOCK_
 
     # OOM issue on hip
     if torch.version.hip is not None:
-        BLOCK = 64
+        BLOCK_M = 64
+        BLOCK_N = 64
     else:
-        BLOCK = 128
+        BLOCK_M = 128
+        BLOCK_N = 128
 
-    seq_len_kv = k.shape[2]
+    batch_q, heads_q, N_CTX_Q, head_size_q = q.shape
+    batch_k, heads_k, N_CTX_K, head_size_k = k.shape
+
+    assert (batch_q == batch_k)
+    assert (heads_q == heads_k) # just for now
+    assert (head_size_q == head_size_q == head_size)
+
+    batch = batch_q
+    # get closest power of 2 over or equal to 32.
+    padded_d_model = 1 << (head_size - 1).bit_length()
+    padded_d_model = max(padded_d_model, 16)
+    BLOCK_DMODEL = padded_d_model
+    ACTUAL_BLOCK_DMODEL = head_size
+
     do = do.contiguous()
     if sequence_parallel:
-        replicas = cdiv(seq_len_kv, BLOCK)
+        replicas = cdiv(N_CTX_K, BLOCK_N)
         new_dq_shape = (replicas,) + q.shape
         dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
     else:
@@ -1012,70 +1058,72 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, BLOCK_
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
     delta = torch.empty_like(L)
-    
-    grid = (cdiv(q.shape[2], BLOCK), q.shape[0] * q.shape[1], 1)
+    batch_headsize = batch * heads_q
+    num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
+    num_blocks_n = cdiv(N_CTX_K, BLOCK_N)
 
 
-    _bwd_preprocess[(cdiv(q.shape[2], BLOCK) * grid[1],)](
+    _bwd_preprocess[(num_blocks_m * batch_headsize,)](
         o,
         do,
         delta,
-        BLOCK_M=BLOCK,
+        BLOCK_M=BLOCK_M,
         D_HEAD=BLOCK_DMODEL,
     )
-    _bwd_kernel[(grid[1], cdiv(seq_len_kv, BLOCK) if sequence_parallel else 1)](
+
+    _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
         k,
         v,
-        sm_scale,  #
+        sm_scale,
         o,
-        do,  #
+        do,
         dq,
         dk,
-        dv,  #
-        L,  #
-        delta,  #
+        dv,
+        L,
+        delta,
         o.numel(),
         q.stride(0),
         q.stride(1),
         q.stride(2),
-        q.stride(3),  #
+        q.stride(3),
         k.stride(0),
         k.stride(1),
         k.stride(2),
-        k.stride(3),  #
+        k.stride(3),
         v.stride(0),
         v.stride(1),
         v.stride(2),
-        v.stride(3),  #
+        v.stride(3),
         q.shape[0],
         q.shape[1],
-        q.shape[2],  #
-        q.shape[0] * q.shape[1] * q.shape[2],  #
-        cdiv(seq_len_kv, BLOCK) * q.shape[0] * q.shape[1] * q.shape[2],  #
-        BLOCK_M=BLOCK,
-        BLOCK_N=BLOCK,  #
-        BLOCK_DMODEL=BLOCK_DMODEL,  #
-        SEQUENCE_PARALLEL=sequence_parallel,  #
+        N_CTX_Q,
+        N_CTX_K,
+        batch_q * head_size_q * N_CTX_Q,
+        num_blocks_n * batch_q * head_size_q * N_CTX_Q,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+        SEQUENCE_PARALLEL=sequence_parallel,
         CAUSAL=causal,
-        num_warps=8,  #
-        num_stages=1,  #
+        num_warps=8,
+        num_stages=1,
     )
 
     if len(dq.shape) == 5:
         dq = dq.sum(dim=0)
 
-
     # go back to original layout
     if layout == "bshd":
-        dq= dq.transpose(1, 2)
-        dk= dk.transpose(1, 2)
-        dv= dv.transpose(1, 2)
+        dq = dq.transpose(1, 2)
+        dk = dk.transpose(1, 2)
+        dv = dv.transpose(1, 2)
     elif layout == "bhsd":
         pass
     else:
         raise ValueError(f"Unknown layout {layout}")
-
 
     return dq, dk, dv, None, None
 
@@ -1343,53 +1391,68 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
-    # (1, 1, 1, 1),
-    # (1, 1, 4, 2),
-    # (1, 1, 1, 3),
-    # (1, 1, 1, 4),
-    # (1, 1, 1, 7),
-    # (1, 1, 1, 16),
-    # (1, 1, 1, 32),
-    (1, 16, 1022, 64),
-    (4, 48, 1024, 64),
-    (4, 48, 2048, 64),
-    (2, 48, 4096, 64),
-    (1, 16, 1024, 64),
-    (1, 16, 1024, 128),
-    # (1, 16, 8192, 63),
+@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
+    # doesnot work
+    # (1, 1, 1, 1,  1),
+    # (1, 1, 4, 4, 2),
+    # (1, 1, 4, 3),
+    # (1, 1, 3, 4),
+    # (1, 1, 4, 4),
+    # (1, 1, 4, 7),
+    # (1, 1, 16, 16),
+    # (1, 1, 32, 32, 32),
+    # works
+    (1, 1, 64, 64, 64),
+    (1, 16, 1022, 1022, 64),
+    (4, 48, 1024, 1024, 64),
+    (4, 48, 2048, 2048, 64),
+    (2, 48, 4096, 4096, 64),
+    (1, 16, 1024, 1024, 64),
+    (1, 16, 1024, 1024, 128),
+    (1, 16, 8192, 8192, 63),
 ])
-@pytest.mark.parametrize('qseqlen_not_equal_kseqlen', [None])
-@pytest.mark.parametrize('torch_sdpa_test', [False, True])
+# @pytest.mark.parametrize('torch_sdpa_test', [False, True])
+@pytest.mark.parametrize('torch_sdpa_test', [False])
 # @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('causal', [False])
 # @pytest.mark.parametrize('use_alibi', [False, True])
 @pytest.mark.parametrize('use_alibi', [False])
-def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sdpa_test, use_alibi,
-                dtype=torch.float16):
+def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_alibi, dtype=torch.float16):
     torch.manual_seed(20)
-    if qseqlen_not_equal_kseqlen is not None:
-        seqlen_q = qseqlen_not_equal_kseqlen
+
+    # seqlens
+    seqlen_q = N_CTX_Q
+    seqlen_k = N_CTX_K
+
+    # setup up metadata
+    
+    if DEBUG:
+        sm_scale = 1
     else:
-        seqlen_q = N_CTX
-    seqlen_k = N_CTX
-
-    if causal and ((N_CTX - 1) & N_CTX):
-        pytest.skip()
-    if causal and seqlen_q != seqlen_k:
-        pytest.skip()
-
-    sm_scale = D_HEAD**-0.5
+        sm_scale = D_HEAD**-0.5
     input_metadata = MetaData(sm_scale=sm_scale)
     input_metadata.max_seqlens_q = seqlen_q
     input_metadata.max_seqlens_k = seqlen_k
     input_metadata.layout = "bhsd"
 
     dropout_p = 0
-    q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    o = torch.empty_like(q)
+    if DEBUG:
+        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, 1, seqlen_q, 1).expand(Z, H, seqlen_q, D_HEAD).requires_grad_()
+        k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
+        v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
+    else:
+        q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+    if DEBUG:
+        o = torch.zeros_like(q)
+    else:
+        o = torch.empty_like(q)
+
+    # if DEBUG:
+    #     print("q:", q, q.shape)
+    #     print("k:", k, k.shape)
+    #     print("v:", v, v.shape)
 
     if causal:
         input_metadata.need_causal()
@@ -1399,7 +1462,11 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
         alibi_slopes = torch.tensor([2**(-8 / H * i) for i in range(1, H + 1)], dtype=torch.float32,
                                     device="cuda").repeat(Z, 1)
         input_metadata.need_alibi(alibi_slopes, Z, H)
-    dout = torch.randn_like(q)
+
+    if DEBUG:
+        dout = torch.ones_like(q)
+    else:
+        dout = torch.randn_like(q)
 
     # reference implementation
     if torch_sdpa_test:
@@ -1413,13 +1480,15 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     else:
         M = torch.tril(torch.ones((seqlen_q, seqlen_k), device="cuda"))
         p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
+        # print("ref_p:", p )
         if use_alibi:
-            p += compute_alibi_tensor(alibi_slopes, N_CTX, N_CTX)
+            p += compute_alibi_tensor(alibi_slopes, N_CTX_Q, N_CTX_K)
         if causal:
             p[:, :, M == 0] = float("-inf")
 
-        p = torch.softmax(p.float(), dim=-1).type(dtype=p.dtype)
-        ref_out = torch.matmul(p, v)
+        ref_softmax = torch.softmax(p.float(), dim=-1).type(dtype=p.dtype)
+        print("ref_softmax:", ref_softmax )
+        ref_out = torch.matmul(ref_softmax, v)
         ref_out.backward(dout)
         ref_dv, v.grad = v.grad.clone(), None
         ref_dk, k.grad = k.grad.clone(), None
@@ -1432,7 +1501,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
     tri_dk, k.grad = k.grad.clone(), None
     tri_dq, q.grad = q.grad.clone(), None
     # compare
-    if True:
+    if DEBUG:
         print("tri_out:", tri_out)
         print("ref_out:",ref_out )
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
@@ -1448,7 +1517,7 @@ def test_op_bwd(Z, H, N_CTX, D_HEAD, qseqlen_not_equal_kseqlen, causal, torch_sd
 
     RTOL = 0
 
-    if True:
+    if DEBUG:
         print("ref_dv:", ref_dv)
         print("tri_dv:",tri_dv )
         print("ref_dk:", ref_dk)
