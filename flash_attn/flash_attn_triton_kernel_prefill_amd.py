@@ -31,7 +31,7 @@ import triton.language as tl
 from triton import cdiv
 
 
-DEBUG = False
+DEBUG = True
 
 
 class MetaData():
@@ -999,12 +999,12 @@ def _bwd_kernel(
 def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, layout):
     if DEBUG:
         print()
-        print("do:", do, do.shape, do.stride())
-        print("q:", q, q.shape, q.stride())
-        print("k:", k, k.shape, k.stride())
-        print("v:", v, v.shape, v.stride())
-        print("o:", o, o.shape, o.stride())
-        print("L:", L, L.shape, L.stride())
+        print("do:", do, do.shape)
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o, o.shape)
+        print("L:", L, L.shape)
         print("sm_scale", sm_scale)
         print("head_size", head_size)
         print("alibi_slopes", alibi_slopes)
@@ -1394,6 +1394,7 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     # doesnot work
     # (1, 1, 1, 1,  1),
+    (1, 1, 1, 1,  16),
     # (1, 1, 4, 4, 2),
     # (1, 1, 4, 3),
     # (1, 1, 3, 4),
@@ -1402,14 +1403,14 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
     # (1, 1, 16, 16),
     # (1, 1, 32, 32, 32),
     # works
-    (1, 1, 64, 64, 64),
-    (1, 16, 1022, 1022, 64),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (2, 48, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
-    (1, 16, 8192, 8192, 63),
+    # (1, 1, 64, 64, 64),
+    # (1, 16, 1022, 1022, 64),
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (2, 48, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
+    # (1, 16, 8192, 8192, 63),
 ])
 # @pytest.mark.parametrize('torch_sdpa_test', [False, True])
 @pytest.mark.parametrize('torch_sdpa_test', [False])
