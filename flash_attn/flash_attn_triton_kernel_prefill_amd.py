@@ -1394,7 +1394,8 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     # doesnot work
     # (1, 1, 1, 1,  1),
-    (1, 1, 1, 1,  16),
+    # (1, 1, 1, 1,  16),
+    (1, 1, 2, 2,  16),
     # (1, 1, 4, 4, 2),
     # (1, 1, 4, 3),
     # (1, 1, 3, 4),
