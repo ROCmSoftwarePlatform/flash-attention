@@ -1018,6 +1018,15 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, head_s
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         o = o.transpose(1, 2)
+        # TODO: does L/M need to be transposed
+
+        if DEBUG:
+            print("After layout change")
+            print("do:", do, do.shape)
+            print("q:", q, q.shape)
+            print("k:", k, k.shape)
+            print("v:", v, v.shape)
+            print("o:", o, o.shape)
     elif layout == "bhsd":
         pass
     else:
@@ -1026,7 +1035,7 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, head_s
     sequence_parallel = False
     causal = False
 
-    # OOM issue on hip
+    # OOM issue on hip # TODO: use autotune
     if torch.version.hip is not None:
         BLOCK_M = 64
         BLOCK_N = 64
@@ -1055,13 +1064,29 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, head_s
         dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
     else:
         dq = torch.zeros_like(q, dtype=q.dtype)
-    dk = torch.empty_like(k)
-    dv = torch.empty_like(v)
-    delta = torch.empty_like(L)
+
+    if DEBUG:
+        dk = torch.zeros_like(k)
+        dv = torch.zeros_like(v)
+        delta = torch.zeros_like(L)
+    else:
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+        delta = torch.empty_like(L)
+    
+    
     batch_headsize = batch * heads_q
     num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
     num_blocks_n = cdiv(N_CTX_K, BLOCK_N)
 
+
+    if DEBUG:
+        print("before _bwd_preprocess")
+        print("o:", o, o.shape)
+        print("do:", do, do.shape)
+        print("delta:", delta, delta.shape)
+        print("BLOCK_M:", BLOCK_M)
+        print("D_HEAD:", BLOCK_DMODEL)
 
     _bwd_preprocess[(num_blocks_m * batch_headsize,)](
         o,
@@ -1070,6 +1095,29 @@ def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, head_s
         BLOCK_M=BLOCK_M,
         D_HEAD=BLOCK_DMODEL,
     )
+
+    if DEBUG:
+        print("after _bwd_preprocess")
+        print("o:", o, o.shape)
+        print("do:", do, do.shape)
+        print("delta:", delta, delta.shape)
+        print("BLOCK_M:", BLOCK_M)
+        print("D_HEAD:", BLOCK_DMODEL)
+
+    
+    if DEBUG:
+        print("before _bwd_kernel")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("sm_scale", sm_scale)
+        print("o:", o, o.shape)
+        print("do:", do, do.shape)
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
+        print("L:", L, L.shape)
+        print("delta:", delta, delta.shape)
 
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
@@ -1427,7 +1475,6 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     seqlen_k = N_CTX_K
 
     # setup up metadata
-    
     if DEBUG:
         sm_scale = 1
     else:
@@ -1442,19 +1489,12 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, 1, seqlen_q, 1).expand(Z, H, seqlen_q, D_HEAD).requires_grad_()
         k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
         v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
+        o = torch.zeros_like(q)
     else:
         q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
         k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
         v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-    if DEBUG:
-        o = torch.zeros_like(q)
-    else:
-        o = torch.empty_like(q)
-
-    # if DEBUG:
-    #     print("q:", q, q.shape)
-    #     print("k:", k, k.shape)
-    #     print("v:", v, v.shape)
+        o = torch.empty_like(q)       
 
     if causal:
         input_metadata.need_causal()
@@ -1521,11 +1561,11 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 
     if DEBUG:
         print("ref_dv:", ref_dv)
-        print("tri_dv:",tri_dv )
+        print("tri_dv:", tri_dv)
         print("ref_dk:", ref_dk)
-        print("tri_dk:",tri_dk )
+        print("tri_dk:", tri_dk)
         print("ref_dq:", ref_dq)
-        print("tri_dq:",tri_dq )
+        print("tri_dq:", tri_dq)
 
     torch.testing.assert_close(ref_dv, tri_dv, atol=ATOL, rtol=RTOL)
     torch.testing.assert_close(ref_dk, tri_dk, atol=ATOL, rtol=RTOL)
