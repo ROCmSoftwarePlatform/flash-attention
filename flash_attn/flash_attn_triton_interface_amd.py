@@ -44,7 +44,7 @@ def fwd(q,
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
-    tri_out, softmax_lse, softmax_dmask, _, _ , _, _ , _, _, _, _, _, _ = attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    tri_out, softmax_lse, softmax_dmask, _, _ , _, _ , _, _, _, = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
     return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
 

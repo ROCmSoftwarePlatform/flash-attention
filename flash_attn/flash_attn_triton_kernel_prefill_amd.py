@@ -473,6 +473,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+    
     # scale sm_scale by log_2(e) and use 2^x in the loop as we do not
     # have native e^x support in HW.
     qk_scale = sm_scale * 1.44269504089
@@ -556,6 +557,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
             out_ptrs_mask = mask_m_offsets[:, None] >= out_mask_boundary[None, :]
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
+    
     # write back LSE
     l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
@@ -651,7 +653,8 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
         encoded_softmax = None
         softmax_strides = (0, 0 , 0 , 0)
 
-    M = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
+    # cumlative sum of a row scores
+    L = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
 
     # Seed the RNG so we get reproducible results for testing.
     philox_seed = 0x1BF52
@@ -668,7 +671,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
     else:
         alibi_strides = (0, 0)
 
-    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
+    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, L, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                     dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
                     encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
@@ -678,7 +681,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                     > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
 
-    return o, M, encoded_softmax, q, k , v, o , M, grid, head_size, philox_seed, philox_offset, encoded_softmax
+    return o, L, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset
 
 @triton.jit
 def _bwd_preprocess(
@@ -1180,9 +1183,9 @@ class _attention_prefill(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        o, M, encoded_softmax, q, k , v, o , M, grid, head_size, philox_seed, philox_offset, encoded_softmax = attention_prefill_forward_impl(q, k, v, o, metadata)
+        o, L, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, o, metadata)
 
-        ctx.save_for_backward(q, k, v, o, M)
+        ctx.save_for_backward(q, k, v, o, L)
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
         ctx.BLOCK_DMODEL = head_size
@@ -1194,7 +1197,7 @@ class _attention_prefill(torch.autograd.Function):
         ctx.encoded_softmax = encoded_softmax
         ctx.return_encoded_softmax = metadata.return_encoded_softmax
         ctx.layout = metadata.layout
-        return o, M, encoded_softmax
+        return o, L, encoded_softmax
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
