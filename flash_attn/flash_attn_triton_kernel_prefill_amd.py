@@ -1471,6 +1471,147 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dk, tri_dk, atol=ATOL, rtol=RTOL)
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
+@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
+    (1, 1, 256, 512, 16),
+    (1, 1, 128, 128, 64),
+    (2, 4, 1024, 1024, 64),
+    (4, 8, 2048, 2048, 128),
+    (4, 16, 4096, 4096, 64),
+    (8, 32, 8192, 8192, 128),
+])
+@pytest.mark.parametrize('causal', [False])
+def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
+    dtype = torch.float16
+    torch.manual_seed(0)
+    
+    sm_scale = D_HEAD ** -0.5
+    layout = 'bhsd'
+    alibi_slopes = None
+
+    # Generate random inputs
+    q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype)
+    k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
+    v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
+
+    # Set up metadata
+    input_metadata = MetaData(sm_scale=sm_scale)
+    input_metadata.max_seqlens_q = N_CTX_Q
+    input_metadata.max_seqlens_k = N_CTX_K
+    input_metadata.layout = layout
+    if causal:
+        input_metadata.need_causal()
+    
+    # Call Triton's forward implementation directly
+    o, softmax_lse_triton, encoded_softmax, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, None, input_metadata)
+
+    # Compute reference output and softmax_lse using PyTorch's built-in function
+    q_ref = q.clone()
+    k_ref = k.clone()
+    v_ref = v.clone()
+
+    # Compute attention scores
+    attention_scores = torch.matmul(q_ref, k_ref.transpose(-2, -1)) * sm_scale
+
+    # Apply causal mask if needed
+    if causal:
+        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device='cuda', dtype=torch.bool))
+        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
+
+    # Compute softmax probabilities
+    p = torch.softmax(attention_scores, dim=-1)
+
+    # Compute output
+    ref_o = torch.matmul(p, v_ref)
+
+    # Compute softmax_lse (log-sum-exp of attention scores)
+    softmax_lse_ref = torch.logsumexp(attention_scores, dim=-1)
+
+    # Compare the outputs
+    torch.testing.assert_close(o, ref_o, atol=1e-2, rtol=1e-2, msg='Output o does not match reference')
+
+    # Compare softmax_lse
+    torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2, msg='softmax_lse does not match reference')
+
+
+
+@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
+    (1, 1, 256, 512, 16),
+    # (1, 1, 128, 128, 64),
+    # (2, 4, 1024, 1024, 64),
+    # (4, 8, 2048, 2048, 128),
+    # (4, 16, 4096, 4096, 64),
+    # (8, 32, 8192, 8192, 128),
+])
+@pytest.mark.parametrize('causal', [False])
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
+    dtype = torch.float16
+    torch.manual_seed(0)
+    
+    sm_scale = D_HEAD ** -0.5
+    head_size = D_HEAD
+    layout = 'bhsd'
+    alibi_slopes = None
+
+    # Generate random inputs
+    q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+    k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+    v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+    
+    # Compute attention scores
+    attention_scores = torch.matmul(q, k.transpose(-2, -1)) * sm_scale
+
+    # Apply causal mask if needed
+    if causal:
+        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device='cuda', dtype=torch.bool))
+        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
+
+    # Compute softmax probabilities
+    p = torch.softmax(attention_scores, dim=-1)
+
+    # Compute output
+    o = torch.matmul(p, v)
+
+    # Compute softmax_lse (log-sum-exp of attention scores)
+    softmax_lse = torch.logsumexp(attention_scores, dim=-1)
+
+    # Prepare gradient of the output
+    do = torch.randn_like(o)
+
+    # Call Triton's backward implementation directly
+    # Note: We use the same q, k, v, o, and softmax_lse computed above
+    # Since we did not use attention_prefill_forward_impl, we need to ensure that
+    # the tensors are in the correct format and layout expected by the backward implementation
+    dq, dk, dv, _, _ = attention_prefill_backward_impl(
+        do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout
+    )
+
+    # Compute reference gradients using autograd
+    q_ref = q.clone().detach().requires_grad_(True)
+    k_ref = k.clone().detach().requires_grad_(True)
+    v_ref = v.clone().detach().requires_grad_(True)
+
+    # Compute reference output using the same steps
+    attention_scores_ref = torch.matmul(q_ref, k_ref.transpose(-2, -1)) * sm_scale
+
+    if causal:
+        attention_scores_ref = attention_scores_ref.masked_fill(~causal_mask, float('-inf'))
+
+    p_ref = torch.softmax(attention_scores_ref, dim=-1)
+    o_ref = torch.matmul(p_ref, v_ref)
+
+    # Perform backward pass
+    o_ref.backward(do)
+
+    ref_dq = q_ref.grad
+    ref_dk = k_ref.grad
+    ref_dv = v_ref.grad
+
+    # Compare the gradients
+    torch.testing.assert_close(dq, ref_dq, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(dk, ref_dk, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(dv, ref_dv, atol=1e-2, rtol=1e-2)
+
+
 
 def nonvarlen_benchmark_configs():
     configs = [
