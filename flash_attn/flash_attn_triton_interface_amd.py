@@ -1,7 +1,6 @@
 import torch
 import triton
-from .flash_attn_triton_kernel_prefill_amd import MetaData, attention_prefill_backward_new_impl, get_shape_from_layout, attention_prefill_forward_impl
-from .old_bwd import attention_prefill_backward_old_impl
+from .flash_attn_triton_kernel_prefill_amd import MetaData, get_shape_from_layout, attention_prefill_forward_impl, attention_prefill_backward_impl
 from .flash_attn_triton_kernel_decode_amd import attention_decode
 
 def fwd(q,
@@ -99,10 +98,7 @@ def bwd(
         out = torch.empty_like(q)
 
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
-    if True:
-        dq, dk, dv, _, _ = attention_prefill_backward_old_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
-    else:
-        dq, dk, dv, _, _ = attention_prefill_backward_new_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
+    dq, dk, dv, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
 
     softmax_d = None # fill this in
     if True:
