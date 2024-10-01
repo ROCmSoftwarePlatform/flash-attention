@@ -292,9 +292,11 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                                               global_n_positions)
             qk += (alibi_block * 1.44269504089)  # scale factor of log2(e)
 
-        # softmax
+        # get max scores so far
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        # shift scores to 0
         qk = qk - m_ij[:, None]
+        # take exponential of scores
         p = tl.math.exp2(qk)
 
         # CAVEAT: Must update l_ij before applying dropout
@@ -309,7 +311,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             tl.store(encoded_sm_ptrs, p)
         
         # -- update output accumulator --
-        alpha = tl.math.exp2(m_i - m_ij)
+        alpha = tl.math.exp2(m_i - m_ij) # adjustment factor for acc and li as we loop and find new maxes
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
             v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL)
@@ -355,7 +357,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz, stride_kh,
+def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz, stride_kh,
              stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh, stride_om,
              stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
              stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
@@ -415,7 +417,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
             tl.store(o_ptrs, acc, mask=o_ptrs_mask)
             # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
             # statically known.
-            l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+            l_ptrs = LSE + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
             # We store inf to LSE, not -inf because in the bwd pass, we subtract this
             # from qk which makes it -inf, such that exp(qk - inf) = 0 for these masked blocks.
             l = tl.full([BLOCK_M], value=float("inf"), dtype=tl.float32)
@@ -559,17 +561,17 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm, s
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     
-    # write back LSE
-    l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+    # write back LSE(Log Sum Exponents), the log of the normalization constant
+    l_ptrs = LSE + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
     # This is only true for the last M block. For others, overflow_size will be -ve
     overflow_size = end_m_idx - seqlen_q
     if overflow_size > 0:
         boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow_size, dtype=tl.int32)
         l_ptrs_mask = tl.arange(0, BLOCK_M) < boundary
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
+        tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask) # the log of the normalization constant
     else:
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i))
+        tl.store(l_ptrs, m_i + tl.math.log2(l_i)) # the log of the normalization constant
 
     # write back O
     o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
@@ -654,8 +656,8 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
         encoded_softmax = None
         softmax_strides = (0, 0 , 0 , 0)
 
-    # cumlative sum of a row scores
-    L = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
+    # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
+    LSE = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
 
     # Seed the RNG so we get reproducible results for testing.
     philox_seed = 0x1BF52
@@ -672,7 +674,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
     else:
         alibi_strides = (0, 0)
 
-    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, L, o, *q_strides, *k_strides, *v_strides, *o_strides,
+    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, LSE, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                     dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
                     encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
@@ -682,7 +684,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                     > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
 
-    return o, L, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset
+    return o, LSE, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset
 
 @triton.jit
 def _bwd_preprocess(
