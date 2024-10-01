@@ -29,6 +29,7 @@ import triton
 import triton.language as tl
 
 from triton import cdiv
+from .old_bwd import attention_prefill_backward_old_impl
 
 
 DEBUG = True
@@ -1002,7 +1003,7 @@ def _bwd_kernel(
 
 
 
-def attention_prefill_backward_baseline_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, layout):
+def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, layout):
     if DEBUG:
         print()
         print("do:", do, do.shape)
@@ -1205,8 +1206,10 @@ class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, M = ctx.saved_tensors
-        
-        return attention_prefill_backward_baseline_impl(do, q, k, v, o, M, ctx.sm_scale, ctx.BLOCK_DMODEL, ctx.alibi_slopes, ctx.layout)
+        if True:
+            return attention_prefill_backward_old_impl(do, q, k, v, o, M, ctx.sm_scale, ctx.BLOCK_DMODEL, ctx.alibi_slopes, ctx.layout)
+        else:
+            return attention_prefill_backward_new_impl(do, q, k, v, o, M, ctx.sm_scale, ctx.BLOCK_DMODEL, ctx.alibi_slopes, ctx.layout)
 
 attention_prefill = _attention_prefill.apply
 
