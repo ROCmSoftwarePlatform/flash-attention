@@ -934,7 +934,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
         softmax_strides = (0, 0 , 0 , 0)
 
     # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
-    LSE = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
+    softmax_lse = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
 
     # Seed the RNG so we get reproducible results for testing.
     philox_seed = 0x1BF52
@@ -951,7 +951,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
     else:
         alibi_strides = (0, 0)
 
-    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, LSE, o, *q_strides, *k_strides, *v_strides, *o_strides,
+    attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                     dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
                     encoded_softmax=encoded_softmax, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
@@ -961,17 +961,17 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                     > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
 
-    return o, LSE, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset
+    return o, softmax_lse, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset
 
 
-def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODEL, alibi_slopes, layout):
+def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout):
     if True:
         print("do:", do, do.shape, do.stride())
         print("q:", q, q.shape, q.stride())
         print("k:", k, k.shape, k.stride())
         print("v:", v, v.shape, v.stride())
         print("o:", o, o.shape, o.stride())
-        print("M:", M, M.shape, M.stride())
+        print("M:", softmax_lse, softmax_lse.shape, softmax_lse.stride())
         print("layout:", layout)
 
     # the kernel wants bhsd
@@ -1005,7 +1005,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODE
     arg_k = k
     arg_k = arg_k * (sm_scale * RCP_LN2)
     assert N_CTX % PRE_BLOCK == 0
-    delta = torch.empty_like(M)
+    delta = torch.empty_like(softmax_lse)
     _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
     # padded_head = (Lk != ctx.BLOCK_DMODEL)
     grid_preprocess = (triton.cdiv(do.shape[2], BLOCK), do.shape[1], do.shape[0])
@@ -1025,7 +1025,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODE
         seqlen_q,
         head_dim=Lk,
         BLOCK_M=BLOCK,
-        D_HEAD=BLOCK_DMODEL,
+        D_HEAD=head_size,
     )
     grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
 
@@ -1039,7 +1039,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODE
         dq,
         dk,
         dv,
-        M,
+        softmax_lse,
         delta,
         q.stride(0),
         q.stride(1),
@@ -1047,7 +1047,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODE
         q.stride(3),
         N_HEAD,
         N_CTX,
-        BLOCK_DMODEL=BLOCK_DMODEL,
+        BLOCK_DMODEL=head_size,
         BLOCK_M1=BLOCK_M1,
         BLOCK_N1=BLOCK_N1,
         BLOCK_M2=BLOCK_M2,
@@ -1056,25 +1056,25 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODE
         USE_ALIBI=False if alibi_slopes is None else True,
     )
 
-    return dq, dk, dv, M, None
+    return dq, dk, dv, softmax_lse, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, M, sm_scale, head_size, alibi_slopes, layout):
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout):
     if True:
-        return attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, head_size, alibi_slopes, layout)
+        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
     else:
-        return attention_prefill_backward_new_impl(do, q, k, v, o, M, sm_scale, head_size, alibi_slopes, layout)
+        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
 
 
 
 class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        o, L, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, o, metadata)
+        o, softmax_lse, encoded_softmax, q, k, v, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, o, metadata)
 
-        ctx.save_for_backward(q, k, v, o, L)
+        ctx.save_for_backward(q, k, v, o, softmax_lse)
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
-        ctx.BLOCK_DMODEL = head_size
+        ctx.head_size = head_size
         ctx.causal = metadata.causal
         ctx.alibi_slopes = metadata.alibi_slopes
         ctx.dropout_p = metadata.dropout_p
@@ -1083,12 +1083,12 @@ class _attention_prefill(torch.autograd.Function):
         ctx.encoded_softmax = encoded_softmax
         ctx.return_encoded_softmax = metadata.return_encoded_softmax
         ctx.layout = metadata.layout
-        return o, L, encoded_softmax
+        return o, softmax_lse, encoded_softmax
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
-        q, k, v, o, M = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, M, ctx.sm_scale, ctx.BLOCK_DMODEL, ctx.alibi_slopes, ctx.layout)
+        q, k, v, o, softmax_lse = ctx.saved_tensors
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.layout)
 
 attention_prefill = _attention_prefill.apply
 
