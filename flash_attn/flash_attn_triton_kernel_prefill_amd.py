@@ -1449,10 +1449,10 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # doesnot work
+    # new tests: doesnot work with new_impl
     # (1, 1, 1, 1,  1),
     # (1, 1, 1, 1,  16),
-    (1, 1, 2, 2,  16),
+    # (1, 1, 2, 2,  16),
     # (1, 1, 4, 4, 2),
     # (1, 1, 4, 3),
     # (1, 1, 3, 4),
@@ -1460,7 +1460,7 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
     # (1, 1, 4, 7),
     # (1, 1, 16, 16),
     # (1, 1, 32, 32, 32),
-    # works
+    # new tests: works with new_impl
     # (1, 1, 64, 64, 64),
     # (1, 16, 1022, 1022, 64),
     # (4, 48, 1024, 1024, 64),
@@ -1469,6 +1469,16 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
     # (1, 16, 1024, 1024, 64),
     # (1, 16, 1024, 1024, 128),
     # (1, 16, 8192, 8192, 63),
+    # failing FA
+    (1, 1, 256, 512, 16), 
+    # old tests
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (2, 48, 4096,4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
+    # (1, 16, 8192, 8192, 63),
+    # (1, 16, 1022, 1022, 64),
 ])
 # @pytest.mark.parametrize('torch_sdpa_test', [False, True])
 @pytest.mark.parametrize('torch_sdpa_test', [False])
@@ -1479,12 +1489,14 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_alibi, dtype=torch.float16):
     torch.manual_seed(20)
 
+    DEBUG_INPUT = False
+
     # seqlens
     seqlen_q = N_CTX_Q
     seqlen_k = N_CTX_K
 
     # setup up metadata
-    if DEBUG:
+    if DEBUG_INPUT:
         sm_scale = 1
     else:
         sm_scale = D_HEAD**-0.5
@@ -1494,7 +1506,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     input_metadata.layout = "bhsd"
 
     dropout_p = 0
-    if DEBUG:
+    if DEBUG_INPUT:
         q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, 1, seqlen_q, 1).expand(Z, H, seqlen_q, D_HEAD).requires_grad_()
         k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
         v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
@@ -1503,7 +1515,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
         k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
         v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-        o = torch.empty_like(q)       
+        o = torch.empty_like(q)
 
     if causal:
         input_metadata.need_causal()
@@ -1514,7 +1526,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
                                     device="cuda").repeat(Z, 1)
         input_metadata.need_alibi(alibi_slopes, Z, H)
 
-    if DEBUG:
+    if DEBUG_INPUT:
         dout = torch.ones_like(q)
     else:
         dout = torch.randn_like(q)

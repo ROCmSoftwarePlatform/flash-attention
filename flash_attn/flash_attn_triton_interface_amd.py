@@ -100,7 +100,7 @@ def bwd(
 
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
     if True:
-        return attention_prefill_backward_old_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
+        dq, dk, dv, _, _ = attention_prefill_backward_old_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
     else:
         dq, dk, dv, _, _ = attention_prefill_backward_new_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
 

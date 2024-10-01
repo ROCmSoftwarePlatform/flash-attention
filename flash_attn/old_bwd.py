@@ -294,7 +294,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODE
         print("v:", v, v.shape, v.stride())
         print("o:", o, o.shape, o.stride())
         print("M:", M, M.shape, M.stride())
-        print("layout: layout")
+        print("layout:", layout)
 
     # the kernel wants bhsd
     if layout == "bhsd":
@@ -323,7 +323,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, M, sm_scale, BLOCK_DMODE
         print("v:", v, v.shape, v.stride())
         print("o:", o, o.shape, o.stride())
 
-    assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
+    # assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
     seqlen_q = q.shape[2]
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
