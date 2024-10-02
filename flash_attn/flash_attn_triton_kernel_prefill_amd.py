@@ -385,7 +385,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
              ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr,
-             USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
+             USE_LOG_SPACE: tl.constexpr, LN2: tl.constexpr, RCP_LN2: tl.constexpr):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -581,7 +581,6 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
     # This is only true for the last M block. For others, overflow_size will be -ve
     overflow_size = end_m_idx - seqlen_q
-    LN2= 0.6931471824645996
     softmax_lse = m_i + tl.math.log2(l_i)
     if USE_LOG_SPACE:
         softmax_lse *= LN2
@@ -983,9 +982,6 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
     else:
         alibi_strides = (0, 0)
 
-    print("metadata.USE_LOG_SPACE:", metadata.USE_LOG_SPACE)
-    print("metadata.RCP_LN2:", metadata.RCP_LN2)
-
     attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                     dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
@@ -995,7 +991,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                     > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
-                    USE_LOG_SPACE=metadata.USE_LOG_SPACE, RCP_LN2=metadata.RCP_LN2)
+                    USE_LOG_SPACE=metadata.USE_LOG_SPACE, LN2=metadata.LN2, RCP_LN2=metadata.RCP_LN2)
 
     return o, softmax_lse, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset
 
