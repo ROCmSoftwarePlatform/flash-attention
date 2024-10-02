@@ -245,7 +245,12 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr,
-                    ACTUAL_BLOCK_DMODEL: tl.constexpr, USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
+                    ACTUAL_BLOCK_DMODEL: tl.constexpr, sm_scale: tl.constexpr, USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
+    if USE_LOG_SPACE:
+        qk_scale = sm_scale * RCP_LN2
+    else:
+        qk_scale = sm_scale  
+    
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
@@ -277,6 +282,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         
         # -- compute qk ----
         qk += tl.dot(q, k)
+        if USE_LOG_SPACE:
+            qk*=qk_scale
 
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
@@ -489,19 +496,11 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
-
-    # scale sm_scale by log_2(e) and use 2^x in the loop as we do not
-    # have native e^x support in HW.
-    if USE_LOG_SPACE:
-        qk_scale = sm_scale * RCP_LN2
-    else:
-        qk_scale = sm_scale 
     # Q is loaded once at the beginning and shared by all N blocks.
     q_ptrs_mask = offs_m[:, None] < seqlen_q
     if PADDED_HEAD:
         q_ptrs_mask = q_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
     q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
-    q = (q * qk_scale).to(q.type.element_ty)
 
     # Here we compute how many full and masked blocks we have.
     padded_block_k = n_extra_tokens != 0
@@ -532,7 +531,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, False, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
+                                        ACTUAL_BLOCK_DMODEL, sm_scale,  USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -556,7 +555,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
                                         offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
+                                        ACTUAL_BLOCK_DMODEL, sm_scale, USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
     # epilogue
     acc = acc / l_i[:, None]
     if ENABLE_DROPOUT:
