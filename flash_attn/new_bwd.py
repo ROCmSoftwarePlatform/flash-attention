@@ -408,13 +408,13 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
     num_blocks_n = cdiv(N_CTX_K, BLOCK_N)
 
 
-    if DEBUG:
-        print("before _bwd_preprocess")
-        print("o:", o, o.shape)
-        print("do:", do, do.shape)
-        print("delta:", delta, delta.shape)
-        print("BLOCK_M:", BLOCK_M)
-        print("D_HEAD:", BLOCK_DMODEL)
+    # if DEBUG:
+    #     print("before _bwd_preprocess")
+    #     print("o:", o, o.shape)
+    #     print("do:", do, do.shape)
+    #     print("delta:", delta, delta.shape)
+    #     print("BLOCK_M:", BLOCK_M)
+    #     print("D_HEAD:", BLOCK_DMODEL)
 
     _bwd_preprocess[(num_blocks_m * batch_headsize,)](
         o,
@@ -424,28 +424,28 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
         D_HEAD=BLOCK_DMODEL,
     )
 
-    if DEBUG:
-        print("after _bwd_preprocess")
-        print("o:", o, o.shape)
-        print("do:", do, do.shape)
-        print("delta:", delta, delta.shape)
-        print("BLOCK_M:", BLOCK_M)
-        print("D_HEAD:", BLOCK_DMODEL)
+    # if DEBUG:
+    #     print("after _bwd_preprocess")
+    #     print("o:", o, o.shape)
+    #     print("do:", do, do.shape)
+    #     print("delta:", delta, delta.shape)
+    #     print("BLOCK_M:", BLOCK_M)
+    #     print("D_HEAD:", BLOCK_DMODEL)
 
     
-    if DEBUG:
-        print("before _bwd_kernel")
-        print("q:", q, q.shape)
-        print("k:", k, k.shape)
-        print("v:", v, v.shape)
-        print("sm_scale", sm_scale)
-        print("o:", o, o.shape)
-        print("do:", do, do.shape)
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
-        print("dv:", dv, dv.shape)
-        print("L:", L, L.shape)
-        print("delta:", delta, delta.shape)
+    # if DEBUG:
+    #     print("before _bwd_kernel")
+    #     print("q:", q, q.shape)
+    #     print("k:", k, k.shape)
+    #     print("v:", v, v.shape)
+    #     print("sm_scale", sm_scale)
+    #     print("o:", o, o.shape)
+    #     print("do:", do, do.shape)
+    #     print("dq:", dq, dq.shape)
+    #     print("dk:", dk, dk.shape)
+    #     print("dv:", dv, dv.shape)
+    #     print("L:", L, L.shape)
+    #     print("delta:", delta, delta.shape)
 
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
