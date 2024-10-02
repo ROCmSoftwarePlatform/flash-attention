@@ -54,7 +54,7 @@ class MetaData():
     seqlen_new = None
     k_new = None
     v_new = None
-    dropout_p, return_encoded_softmax = 0.0, False
+    dropout_p, return_encoded_softmax, return_scores = 0.0, False, True
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     USE_EXP2 = True
     RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
@@ -243,11 +243,12 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, start_m,
                     actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, batch_philox_offset, exp_scores_ptrs,
-                    block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
+                    block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope, score_ptrs,
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr,
-                    ACTUAL_BLOCK_DMODEL: tl.constexpr, sm_scale: tl.constexpr, USE_EXP2: tl.constexpr, RCP_LN2: tl.constexpr):
+                    ACTUAL_BLOCK_DMODEL: tl.constexpr, sm_scale: tl.constexpr, USE_EXP2: tl.constexpr, RCP_LN2: tl.constexpr,
+                    RETURN_SCORES: tl.constexpr):
     if USE_EXP2:
         qk_scale = sm_scale * RCP_LN2
     else:
@@ -286,6 +287,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         
         # -- compute qk ----
         qk += tl.dot(q, k)
+        if RETURN_SCORES:
+            tl.store(score_ptrs, qk)
 
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
@@ -324,8 +327,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             tl.store(exp_scores_ptrs, p)
         
         # -- update output accumulator --
+        # alpha is an adjustment factor for acc and li as we loop and find new maxes
         if USE_EXP2:
-            alpha = tl.math.exp2(m_i - m_ij) # adjustment factor for acc and li as we loop and find new maxes
+            alpha = tl.math.exp2(m_i - m_ij)
         else:
             alpha = tl.math.exp(m_i - m_ij)
         acc = acc * alpha[:, None]
@@ -377,12 +381,12 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
              stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, 
              stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
              stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
-             dropout_p, philox_seed, philox_offset_base, softmax_unnormalized, alibi_slopes, HQ: tl.constexpr,
+             dropout_p, philox_seed, philox_offset_base, scores, exp_scores, alibi_slopes,  HQ: tl.constexpr,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
              ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr,
-             USE_EXP2: tl.constexpr, LN2: tl.constexpr, RCP_LN2: tl.constexpr):
+             USE_EXP2: tl.constexpr, LN2: tl.constexpr, RCP_LN2: tl.constexpr, RETURN_SCORES: tl.constexpr):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -477,6 +481,12 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     else:
         alibi_slope = None
 
+    if RETURN_SCORES:
+        scores_offset = scores + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        score_ptrs = scores_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
+    else:
+        score_ptrs = None
+
     if ENABLE_DROPOUT:
         off_hz = off_z * HQ + off_h_q
         batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
@@ -484,16 +494,16 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         batch_philox_offset = 0
     # We can ask to return the dropout mask without actually doing any dropout. In
     # this case, we return an invalid pointer so indicate the mask is not valid.
-    # if RETURN_ENCODED_SOFTMAX:
-    #     softmax_unnormalized_offset = softmax_unnormalized + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-    #     softmax_unnormalized_ptrs = encoded_sm_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
-    # else:
-    #     encoded_sm_ptrs = None
     if RETURN_ENCODED_SOFTMAX:
-        encoded_sm_base = softmax_unnormalized + off_h_q * seqlen_q * seqlen_k
-        encoded_sm_ptrs = encoded_sm_base + offs_m[:, None] * seqlen_k + offs_n[None, :]
+        exp_scores_offset = exp_scores + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        exp_scores_ptrs = exp_scores_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
     else:
-        encoded_sm_ptrs = None
+        exp_scores_ptrs = None
+    # if RETURN_ENCODED_SOFTMAX:
+    #     exp_scores_offset = exp_scores + off_h_q * seqlen_q * seqlen_k
+    #     exp_scores_ptrs = exp_scores_offset + offs_m[:, None] * seqlen_k + offs_n[None, :]
+    # else:
+    #     exp_scores_ptrs = None
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
@@ -526,14 +536,14 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         block_max = (n_blocks - masked_blocks) * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
-                                        encoded_sm_ptrs,
+                                        exp_scores_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
-                                        block_min, block_max, 0, 0, 0, alibi_slope,
+                                        block_min, block_max, 0, 0, 0, alibi_slope, score_ptrs,
                                         # IS_CAUSAL, ....
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, False, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, sm_scale,  USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
+                                        ACTUAL_BLOCK_DMODEL, sm_scale,  USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2, RETURN_SCORES=RETURN_SCORES)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -549,15 +559,17 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         if USE_BIAS:
             bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
         if RETURN_ENCODED_SOFTMAX:
-            encoded_sm_ptrs += n_full_blocks * BLOCK_N
+            exp_scores_ptrs += n_full_blocks * BLOCK_N
+        if RETURN_SCORES:
+            score_ptrs += n_full_blocks * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
-                                        encoded_sm_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
-                                        n_extra_tokens, alibi_slope, IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m,
-                                        offs_n,
+                                        exp_scores_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
+                                        n_extra_tokens, alibi_slope, score_ptrs, 
+                                        IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL, sm_scale, USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
+                                        ACTUAL_BLOCK_DMODEL, sm_scale, USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2, RETURN_SCORES=RETURN_SCORES)
     # epilogue
     acc = acc / l_i[:, None]
     if ENABLE_DROPOUT:
@@ -970,18 +982,25 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
 
     grid = lambda META: (triton.cdiv(metadata.max_seqlens_q, META['BLOCK_M']), nheads_q, batch)
 
-    # encoded_softmax is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
+    if metadata.return_scores:
+        scores = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
+                                        dtype=torch.float16)
+        scores_strides = (scores.stride(0), scores.stride(1), scores.stride(2), scores.stride(3))
+    else:
+        scores = None
+        scores_strides = (0, 0 , 0 , 0)
+
+    print("scores before attn_fwd:", scores, scores.shape)
+
+    # exp_scores is used to validate dropout behavior vs the PyTorch SDPA math backend reference.  We zero this out
     # to give a consistent starting point and then populate it with the output of softmax with the sign bit set according
     # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
     # only.  This return holds no useful output aside from debugging.
     if metadata.return_encoded_softmax:
-        softmax_unnormalized = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
+        exp_scores = torch.zeros((batch, nheads_q, metadata.max_seqlens_q, metadata.max_seqlens_k), device=q.device,
                                         dtype=torch.float32)
-        softmax_strides = (softmax_unnormalized.stride(0), softmax_unnormalized.stride(1), softmax_unnormalized.stride(2),
-                        softmax_unnormalized.stride(3))
     else:
-        softmax_unnormalized = None
-        softmax_strides = (0, 0 , 0 , 0)
+        exp_scores = None
 
     # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
     softmax_lse = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
@@ -1002,17 +1021,17 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
         alibi_strides = (0, 0)
 
     attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
-                    *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
-                    dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
-                    softmax_unnormalized=softmax_unnormalized, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
+                    *bias_strides, *alibi_strides, *scores_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
+                    dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, scores=scores,
+                    exp_scores=exp_scores, alibi_slopes=metadata.alibi_slopes, HQ=nheads_q, HK=nheads_k,
                     ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=metadata.max_seqlens_q,
                     MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                     > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
-                    USE_EXP2=metadata.USE_EXP2, LN2=metadata.LN2, RCP_LN2=metadata.RCP_LN2)
+                    USE_EXP2=metadata.USE_EXP2, LN2=metadata.LN2, RCP_LN2=metadata.RCP_LN2, RETURN_SCORES=True)
 
-    return o, softmax_lse, softmax_unnormalized, q, k , v, grid, head_size, philox_seed, philox_offset
+    return o, softmax_lse, exp_scores, q, k , v, grid, head_size, philox_seed, philox_offset, scores
 
 
 def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_EXP2, RCP_LN2, LN2):
@@ -1556,13 +1575,13 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, USE_EX
     max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
 
     # shift scores to by subtracing max
-    shifted_scores = attention_scaled_scores - max_scores
+    attention_shifted_scaled_scores = attention_scaled_scores - max_scores
 
     # subtract max and exponentiate
     if USE_EXP2:
-        exp2_scores = torch.exp2(math.log(2) * shifted_scores)
+        exp2_scores = torch.exp2(math.log(2) * attention_shifted_scaled_scores)
     else:
-        exp_scores = torch.exp(shifted_scores)
+        exp_scores = torch.exp(attention_shifted_scaled_scores)
 
     # sum of exponentials
     if USE_EXP2:
@@ -1594,7 +1613,7 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, USE_EX
     if USE_EXP2:
         return o_exp2, softmax_exp2_lse, exp2_scores, softmax_exp2
     else:
-        return o, softmax_lse, exp_scores, softmax
+        return o, attention_scores, attention_shifted_scaled_scores, softmax_lse, exp_scores, softmax
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -1646,11 +1665,17 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_softmax, use
         input_metadata.return_encoded_softmax = True
     
     # call Triton's forward implementation directly
-    o, softmax_lse_triton, exp_scores_triton, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    o, softmax_lse_triton, exp_scores_triton, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset, scores = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
     # compute reference
-    o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", USE_EXP2=use_exp2)
+    o_ref, scores_ref, scores_scaled_shifted_ref, softmax_lse_ref, exp_scores_ref, softmax_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", USE_EXP2=use_exp2)
 
+    print("scores:", scores)
+    print("scores_ref:", scores_ref, scores_ref.shape)
+    torch.testing.assert_close(scores, scores_ref, atol=1e-2, rtol=1e-2, msg="scores don't match reference")
+
+    print("scores_scaled_shifted:")
+    print("scores_scaled_shifted_ref:", scores_scaled_shifted_ref, scores_scaled_shifted_ref.shape)
 
     # compare the outputs
     print("o:", o, o.shape)
