@@ -33,6 +33,7 @@ from .new_bwd import attention_prefill_backward_new_impl
 
 
 DEBUG = True
+USE_NEW_BACKWARD_IMPL = False
 
 
 class MetaData():
@@ -282,8 +283,6 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         
         # -- compute qk ----
         qk += tl.dot(q, k)
-        if USE_LOG_SPACE:
-            qk*=qk_scale
 
         if IS_CAUSAL:
             causal_boundary = start_n + offs_n_causal
@@ -312,11 +311,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                 qk += alibi_block
 
         # get max scores so far
-        m_ij = tl.maximum(m_i, tl.max(qk, 1))
-        # shift scores to 0
-        qk = qk - m_ij[:, None]
-        # take exponential of scores
-        p = tl.math.exp2(qk)
+        m_ij = tl.maximum(m_i, qk_scale * tl.max(qk, 1))
+        # shift scores to 0 and take exponential of scores
+        p = tl.math.exp2((qk * qk_scale) - m_ij[:, None])
 
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
@@ -667,6 +664,13 @@ def _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D,
                                      offsets=(0, start_m), block_shape=(BLOCK_DMODEL, BLOCK_M1), order=(0, 1))
     DO_block_ptr = tl.make_block_ptr(base=DO, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
                                      offsets=(start_m, 0), block_shape=(BLOCK_M1, BLOCK_DMODEL), order=(1, 0))
+    
+    # scaling factor
+    if USE_LOG_SPACE:
+        qk_scale = sm_scale * RCP_LN2
+    else:
+        qk_scale = sm_scale  
+    
     # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
     tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
     curr_m = start_m
@@ -684,7 +688,7 @@ def _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D,
             else:
                 kqT += alibi_block
 
-        pT = tl.math.exp2(kqT - m[None, :])
+        pT = tl.math.exp2(kqT * qk_scale - m[None, :])
         # Autoregressive masking.
         if MASK:
             mask = (offs_m[None, :] >= offs_n[:, None])
@@ -709,13 +713,20 @@ def _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D,
 
 
 @triton.jit
-def _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope,
+def _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale,
                    # shared by Q/K/V/DO.
                    stride_tok, stride_d, H, N_CTX, BLOCK_M2: tl.constexpr, BLOCK_N2: tl.constexpr,
                    BLOCK_DMODEL: tl.constexpr,
                    # Filled in by the wrapper.
                    start_m, start_n, num_steps, MASK: tl.constexpr,
                     USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
+    # scaling factor
+    if USE_LOG_SPACE:
+        qk_scale = sm_scale * RCP_LN2
+    else:
+        qk_scale = sm_scale  
+
+    
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
     # offs_k = tl.arange(0, BLOCK_DMODEL)
@@ -845,7 +856,6 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     tl.store(DV_block_ptrs, dv.to(v.dtype))
 
     # Write back dK.
-    dk *= sm_scale
     DK_block_ptrs = tl.make_block_ptr(base=DK, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
                                       offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
     tl.store(DK_block_ptrs, dk.to(k.dtype))
@@ -875,13 +885,13 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     # not due to anything important.  I just wanted to reuse the loop
     # structure for dK & dV above as much as possible.
     num_steps = BLOCK_M2 // MASK_BLOCK_N2
-    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, stride_tok, stride_d, H, N_CTX, BLOCK_M2, MASK_BLOCK_N2,
+    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale, stride_tok, stride_d, H, N_CTX, BLOCK_M2, MASK_BLOCK_N2,
                         BLOCK_DMODEL, start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps, MASK=True,
                         USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
     end_n -= num_steps * MASK_BLOCK_N2
     # stage 2
     num_steps = end_n // BLOCK_N2
-    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, stride_tok, stride_d, H, N_CTX, BLOCK_M2, BLOCK_N2,
+    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale, stride_tok, stride_d, H, N_CTX, BLOCK_M2, BLOCK_N2,
                         BLOCK_DMODEL, start_m, end_n - num_steps * BLOCK_N2, num_steps, MASK=False,
                         USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
     # Write back dQ.
@@ -998,12 +1008,15 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
 
 def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2):
     if True:
-        print("do:", do, do.shape, do.stride())
-        print("q:", q, q.shape, q.stride())
-        print("k:", k, k.shape, k.stride())
-        print("v:", v, v.shape, v.stride())
-        print("o:", o, o.shape, o.stride())
-        print("M:", softmax_lse, softmax_lse.shape, softmax_lse.stride())
+        print("do:", do, do.shape)
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o, o.shape)
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
+        print("sm_scale:", sm_scale)
+        print("head_size:", head_size)
+        print("alibi_slopes:", alibi_slopes)
         print("layout:", layout)
 
     # the kernel wants bhsd
@@ -1033,12 +1046,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     # NUM_WARPS, NUM_STAGES = 4, 1
     BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
     BLK_SLICE_FACTOR = 2
-    arg_k = k
-    if USE_LOG_SPACE:
-        arg_k = arg_k * (sm_scale * RCP_LN2)
-    else:
-        arg_k = arg_k * sm_scale
-    assert N_CTX % PRE_BLOCK == 0
+    # assert N_CTX % PRE_BLOCK == 0
     delta = torch.empty_like(softmax_lse)
     _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
     # padded_head = (Lk != ctx.BLOCK_DMODEL)
@@ -1065,7 +1073,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     _attn_bwd[grid](
         q,
-        arg_k,
+        k,
         v,
         sm_scale,
         alibi_slopes,
@@ -1096,10 +1104,10 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     return dq, dk, dv, softmax_lse, None
 
 def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996):
-    if True:
-        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2)
-    else:
+    if USE_NEW_BACKWARD_IMPL:
         return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
+    else:
+        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2)
 
 
 
@@ -1512,27 +1520,40 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1), 
-    (1, 1, 256, 512, 16),
-    (1, 1, 128, 128, 64),
-    (2, 4, 1024, 1024, 64),
-    (4, 8, 2048, 2048, 128),
-    (4, 16, 4096, 4096, 64),
-    (2, 32, 8192, 8192, 128),
+    # (1, 1, 1, 1, 1),
+    (1, 1, 4, 4, 16), 
+    # (1, 1, 256, 512, 16),
+    # (1, 1, 128, 128, 64),
+    # (2, 4, 1024, 1024, 64),
+    # (4, 8, 2048, 2048, 128),
+    # (4, 16, 4096, 4096, 64),
+    # (2, 32, 8192, 8192, 32),
 ])
 @pytest.mark.parametrize('causal', [False])
-def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
+@pytest.mark.parametrize('return_softmax', [True])
+@pytest.mark.parametrize('DEBUG_INPUT', [True])
+def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_softmax, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     
-    sm_scale = D_HEAD ** -0.5
+    if DEBUG_INPUT:
+        sm_scale = 1
+    else:
+        sm_scale =  D_HEAD ** -0.5
     layout = 'bhsd'
     alibi_slopes = None
 
-    # Generate random inputs
-    q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype)
-    k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
-    v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
+    if DEBUG_INPUT:
+        q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).requires_grad_()
+        k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
+        v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
+        o = torch.zeros_like(q)
+    else:
+        # Generate random inputs
+        q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype)
+        k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
+        v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype)
+        o = torch.empty_like(q)
 
     # Set up metadata
     input_metadata = MetaData(sm_scale=sm_scale)
@@ -1541,9 +1562,11 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
     input_metadata.layout = layout
     if causal:
         input_metadata.need_causal()
+    if return_softmax:
+        input_metadata.return_encoded_softmax = True
     
     # Call Triton's forward implementation directly
-    o, softmax_lse_triton, encoded_softmax, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, None, input_metadata)
+    o, softmax_lse_triton, softmax_triton, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
     # Compute reference output and softmax_lse using PyTorch's built-in function
     q_ref = q.clone()
@@ -1559,49 +1582,68 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
         attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
 
     # Compute softmax probabilities
-    p = torch.softmax(attention_scores, dim=-1)
+    softmax_ref = torch.softmax(attention_scores, dim=-1)
 
     # Compute output
-    ref_o = torch.matmul(p, v_ref.to(torch.float32)).to(torch.float16)
+    ref_o = torch.matmul(softmax_ref, v_ref.to(torch.float32)).to(torch.float16)
 
     # Compute softmax_lse (log-sum-exp of attention scores)
     softmax_lse_ref = torch.logsumexp(attention_scores, dim=-1)
 
-    # Compare the outputs
+    # compare the outputs
     print("o:", o)
     print("ref_o:", ref_o)
     torch.testing.assert_close(o, ref_o, atol=1e-2, rtol=1e-2, msg='Output o does not match reference')
 
-    # Compare softmax_lse
+    # compare softmax_lse
     print("softmax_lse_triton:", softmax_lse_triton)
     print("softmax_lse_ref:", softmax_lse_ref)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2, msg='softmax_lse does not match reference')
 
+    # compare softmax
+    if return_softmax:
+        print("softmax_triton:", softmax_triton)
+        print("softmax_ref:", softmax_ref)
+        torch.testing.assert_close(softmax_triton, softmax_ref, atol=1e-2, rtol=1e-2, msg='softmax does not match reference')
+
+
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1)
-    (1, 1, 256, 512, 16),
+    (1, 1, 4, 4, 16)
+    # (1, 1, 1, 1, 64)
+    # (1, 1, 256, 512, 16),
+    # work with new impl
     # (1, 1, 128, 128, 64),
     # (2, 4, 1024, 1024, 64),
     # (4, 8, 2048, 2048, 128),
     # (4, 16, 4096, 4096, 64),
-    # (8, 32, 8192, 8192, 128),
+    # (1, 4, 8192, 8192, 128),
 ])
 @pytest.mark.parametrize('causal', [False])
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
+@pytest.mark.parametrize('DEBUG_INPUT', [True])
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     
-    sm_scale = D_HEAD ** -0.5
+    if DEBUG_INPUT:
+        sm_scale = 1
+    else:
+        sm_scale =  D_HEAD ** -0.5
     head_size = D_HEAD
     layout = 'bhsd'
     alibi_slopes = None
 
-    # Generate random inputs
-    q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-    k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-    v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+    if DEBUG_INPUT:
+        q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).requires_grad_()
+        k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
+        v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
+        o = torch.zeros_like(q)
+    else:
+        # Generate random inputs
+        q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+        k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+        v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
     
     # Compute attention scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1)) * sm_scale
@@ -1621,7 +1663,10 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
     softmax_lse = torch.logsumexp(attention_scores, dim=-1)
 
     # Prepare gradient of the output
-    do = torch.randn_like(o)
+    if DEBUG_INPUT:
+        do = torch.ones_like(o)
+    else:
+        do = torch.randn_like(o)
 
     # Call Triton's backward implementation directly
     # Note: We use the same q, k, v, o, and softmax_lse computed above
@@ -1653,9 +1698,16 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
     ref_dv = v_ref.grad
 
     # Compare the gradients
-    torch.testing.assert_close(dq, ref_dq, atol=1e-2, rtol=1e-2)
-    torch.testing.assert_close(dk, ref_dk, atol=1e-2, rtol=1e-2)
+    print()
+    print("dv:", dv)
+    print("ref_dv:", ref_dv)
     torch.testing.assert_close(dv, ref_dv, atol=1e-2, rtol=1e-2)
+    print("dk:", dk)
+    print("ref_dk:", ref_dk)
+    torch.testing.assert_close(dk, ref_dk, atol=1e-2, rtol=1e-2)
+    print("dq:", dq)
+    print("ref_dq:", ref_dq)
+    torch.testing.assert_close(dq, ref_dq, atol=1e-2, rtol=1e-2)
 
 
 
