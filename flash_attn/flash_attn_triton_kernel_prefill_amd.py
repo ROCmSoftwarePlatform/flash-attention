@@ -369,9 +369,9 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
     use_cuda_graph=True,
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kz, stride_kh,
-             stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh, stride_om,
-             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
+def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm, stride_qk, 
+             stride_kz, stride_kh, stride_kn, stride_kk, stride_vz, stride_vh, stride_vk, stride_vn, 
+             stride_oz, stride_oh, stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az, stride_ah,
              stride_sz, stride_sh, stride_sm, stride_sn, cu_seqlens_q, cu_seqlens_k,
              dropout_p, philox_seed, philox_offset_base, encoded_softmax, alibi_slopes, HQ: tl.constexpr,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
@@ -582,12 +582,16 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
     # This is only true for the last M block. For others, overflow_size will be -ve
     overflow_size = end_m_idx - seqlen_q
+    LN2= 0.6931471824645996
+    softmax_lse = m_i + tl.math.log2(l_i)
+    if USE_LOG_SPACE:
+        softmax_lse *= LN2
     if overflow_size > 0:
         boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow_size, dtype=tl.int32)
         l_ptrs_mask = tl.arange(0, BLOCK_M) < boundary
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask) # the log of the normalization constant
+        tl.store(l_ptrs, softmax_lse, mask=l_ptrs_mask) # the log of the normalization constant
     else:
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i)) # the log of the normalization constant
+        tl.store(l_ptrs, softmax_lse) # the log of the normalization constant
 
     # write back O
     o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
@@ -980,6 +984,9 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
     else:
         alibi_strides = (0, 0)
 
+    print("metadata.USE_LOG_SPACE:", metadata.USE_LOG_SPACE)
+    print("metadata.RCP_LN2:", metadata.RCP_LN2)
+
     attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *softmax_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                     dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,
@@ -1097,7 +1104,7 @@ def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_
     if True:
         return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2)
     else:
-        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2)
+        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
 
 
 
@@ -1510,12 +1517,13 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
+    (1, 1, 1, 1, 1), 
     (1, 1, 256, 512, 16),
     (1, 1, 128, 128, 64),
     (2, 4, 1024, 1024, 64),
     (4, 8, 2048, 2048, 128),
     (4, 16, 4096, 4096, 64),
-    (8, 32, 8192, 8192, 128),
+    (2, 32, 8192, 8192, 128),
 ])
 @pytest.mark.parametrize('causal', [False])
 def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
@@ -1548,7 +1556,7 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
     v_ref = v.clone()
 
     # Compute attention scores
-    attention_scores = torch.matmul(q_ref, k_ref.transpose(-2, -1)) * sm_scale
+    attention_scores = torch.matmul(q_ref.to(torch.float32), k_ref.transpose(-2, -1).to(torch.float32)) * sm_scale
 
     # Apply causal mask if needed
     if causal:
@@ -1559,20 +1567,25 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal):
     p = torch.softmax(attention_scores, dim=-1)
 
     # Compute output
-    ref_o = torch.matmul(p, v_ref)
+    ref_o = torch.matmul(p, v_ref.to(torch.float32)).to(torch.float16)
 
     # Compute softmax_lse (log-sum-exp of attention scores)
     softmax_lse_ref = torch.logsumexp(attention_scores, dim=-1)
 
     # Compare the outputs
+    print("o:", o)
+    print("ref_o:", ref_o)
     torch.testing.assert_close(o, ref_o, atol=1e-2, rtol=1e-2, msg='Output o does not match reference')
 
     # Compare softmax_lse
+    print("softmax_lse_triton:", softmax_lse_triton)
+    print("softmax_lse_ref:", softmax_lse_ref)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2, msg='softmax_lse does not match reference')
 
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
+    # (1, 1, 1, 1, 1)
     (1, 1, 256, 512, 16),
     # (1, 1, 128, 128, 64),
     # (2, 4, 1024, 1024, 64),
