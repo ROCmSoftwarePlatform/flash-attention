@@ -53,6 +53,11 @@ class MetaData():
     k_new = None
     v_new = None
     dropout_p, return_encoded_softmax = 0.0, False
+    # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
+    USE_LOG_SPACE = True
+    RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
+    LN2= 0.6931471824645996  # = ln(2)
+    
 
     def __repr__(self) -> str:
         return (f"MetaData(\n"
@@ -240,7 +245,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr,
-                    ACTUAL_BLOCK_DMODEL: tl.constexpr):
+                    ACTUAL_BLOCK_DMODEL: tl.constexpr, USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
@@ -283,7 +288,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             # While bias is added after multiplying qk with sm_scale,
             # our optimization to use 2^x instead of e^x results in an additional
             # scale factor of log2(e) which we must also multiply the bias with.
-            qk += (bias * 1.44269504089)
+            if USE_LOG_SPACE:
+                qk += (bias * RCP_LN2)
+            else:
+                qk += bias
 
         if alibi_slope is not None:
             # Compute the global position of each token within the sequence
@@ -291,7 +299,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             global_n_positions = start_n + tl.arange(0, BLOCK_N)
             alibi_block = compute_alibi_block(alibi_slope, actual_seqlen_q, actual_seqlen_k, global_m_positions,
                                               global_n_positions)
-            qk += (alibi_block * 1.44269504089)  # scale factor of log2(e)
+            if USE_LOG_SPACE:
+                qk += (alibi_block * RCP_LN2)  # scale factor of log2(e)
+            else:
+                qk += alibi_block
 
         # get max scores so far
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
@@ -366,7 +377,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
              HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
              MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
              BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
-             ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr):
+             ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr,
+             USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
@@ -480,7 +492,10 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
 
     # scale sm_scale by log_2(e) and use 2^x in the loop as we do not
     # have native e^x support in HW.
-    qk_scale = sm_scale * 1.44269504089
+    if USE_LOG_SPACE:
+        qk_scale = sm_scale * RCP_LN2
+    else:
+        qk_scale = sm_scale 
     # Q is loaded once at the beginning and shared by all N blocks.
     q_ptrs_mask = offs_m[:, None] < seqlen_q
     if PADDED_HEAD:
@@ -517,7 +532,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, False, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL)
+                                        ACTUAL_BLOCK_DMODEL, USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
@@ -541,7 +556,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
                                         offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, RETURN_ENCODED_SOFTMAX, PADDED_HEAD,
-                                        ACTUAL_BLOCK_DMODEL)
+                                        ACTUAL_BLOCK_DMODEL, USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
     # epilogue
     acc = acc / l_i[:, None]
     if ENABLE_DROPOUT:
@@ -641,7 +656,8 @@ def _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D,
                       stride_tok, stride_d, H, N_CTX, BLOCK_M1: tl.constexpr, BLOCK_N1: tl.constexpr,
                       BLOCK_DMODEL: tl.constexpr,
                       # Filled in by the wrapper.
-                      start_n, start_m, num_steps, MASK: tl.constexpr):
+                      start_n, start_m, num_steps, MASK: tl.constexpr,
+                      USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M1)
     offs_n = start_n + tl.arange(0, BLOCK_N1)
     # offs_k = tl.arange(0, BLOCK_DMODEL)
@@ -661,7 +677,10 @@ def _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D,
         kqT = tl.dot(k, qT)
         if alibi_slope is not None:
             alibi_block = compute_alibi_block(alibi_slope, N_CTX, N_CTX, offs_m, offs_n, True)
-            kqT += alibi_block * 1.44269504089
+            if USE_LOG_SPACE:
+                kqT += alibi_block * RCP_LN2
+            else:
+                kqT += alibi_block
 
         pT = tl.math.exp2(kqT - m[None, :])
         # Autoregressive masking.
@@ -693,7 +712,8 @@ def _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope,
                    stride_tok, stride_d, H, N_CTX, BLOCK_M2: tl.constexpr, BLOCK_N2: tl.constexpr,
                    BLOCK_DMODEL: tl.constexpr,
                    # Filled in by the wrapper.
-                   start_m, start_n, num_steps, MASK: tl.constexpr):
+                   start_m, start_n, num_steps, MASK: tl.constexpr,
+                    USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
     # offs_k = tl.arange(0, BLOCK_DMODEL)
@@ -712,7 +732,10 @@ def _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope,
         qk = tl.dot(q, kT)
         if alibi_slope is not None:
             alibi_block = compute_alibi_block(alibi_slope, N_CTX, N_CTX, offs_m, offs_n)
-            qk += alibi_block * 1.44269504089
+            if USE_LOG_SPACE:
+                qk += alibi_block * RCP_LN2
+            else:
+                qk += alibi_block
 
         p = tl.math.exp2(qk - m)
         # Autoregressive masking.
@@ -741,8 +764,8 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
               stride_z, stride_h, stride_tok, stride_d,
               # H = 16, N_CTX = 1024
               H, N_CTX, BLOCK_DMODEL: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N1: tl.constexpr,
-              BLOCK_M2: tl.constexpr, BLOCK_N2: tl.constexpr, BLK_SLICE_FACTOR: tl.constexpr, USE_ALIBI: tl.constexpr):
-    LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
+              BLOCK_M2: tl.constexpr, BLOCK_N2: tl.constexpr, BLK_SLICE_FACTOR: tl.constexpr, USE_ALIBI: tl.constexpr,
+              USE_LOG_SPACE: tl.constexpr, RCP_LN2: tl.constexpr, LN2: tl.constexpr):
 
     bhid = tl.program_id(2)
     off_chz = (bhid * N_CTX).to(tl.int64)
@@ -804,14 +827,16 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     # compute dK and dV for blocks close to the diagonal that need to be masked
     num_steps = BLOCK_N1 // MASK_BLOCK_M1
     dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_tok, stride_d, H, N_CTX,
-                               MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=True)
+                               MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=True,
+                               USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
 
     # compute dK and dV for blocks that don't need masking further from the diagonal
     start_m += num_steps * MASK_BLOCK_M1
     num_steps = (N_CTX - start_m) // BLOCK_M1
 
     dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_tok, stride_d, H, N_CTX,
-                               BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=False)
+                               BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=False,
+                               USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
 
     DV_block_ptrs = tl.make_block_ptr(base=DV, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
                                       offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
@@ -849,16 +874,20 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     # structure for dK & dV above as much as possible.
     num_steps = BLOCK_M2 // MASK_BLOCK_N2
     dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, stride_tok, stride_d, H, N_CTX, BLOCK_M2, MASK_BLOCK_N2,
-                        BLOCK_DMODEL, start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps, MASK=True)
+                        BLOCK_DMODEL, start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps, MASK=True,
+                        USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
     end_n -= num_steps * MASK_BLOCK_N2
     # stage 2
     num_steps = end_n // BLOCK_N2
     dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, stride_tok, stride_d, H, N_CTX, BLOCK_M2, BLOCK_N2,
-                        BLOCK_DMODEL, start_m, end_n - num_steps * BLOCK_N2, num_steps, MASK=False)
+                        BLOCK_DMODEL, start_m, end_n - num_steps * BLOCK_N2, num_steps, MASK=False,
+                        USE_LOG_SPACE=USE_LOG_SPACE, RCP_LN2=RCP_LN2)
     # Write back dQ.
     DQ_block_ptr = tl.make_block_ptr(base=DQ, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
                                      offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
-    dq *= LN2
+    
+    if USE_LOG_SPACE:
+        dq *= LN2
     tl.store(DQ_block_ptr, dq.to(q.dtype))
 
 def get_shape_from_layout(q, k, metadata):
@@ -959,12 +988,13 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     MAX_SEQLENS_K=metadata.max_seqlens_k, IS_CAUSAL=metadata.causal, VARLEN=metadata.varlen,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
-                    > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax)
+                    > 0.0, RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
+                    USE_LOG_SPACE=metadata.USE_LOG_SPACE, RCP_LN2=metadata.RCP_LN2)
 
     return o, softmax_lse, encoded_softmax, q, k , v, grid, head_size, philox_seed, philox_offset
 
 
-def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout):
+def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2):
     if True:
         print("do:", do, do.shape, do.stride())
         print("q:", q, q.shape, q.stride())
@@ -1001,9 +1031,11 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     # NUM_WARPS, NUM_STAGES = 4, 1
     BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 64, 64, 32
     BLK_SLICE_FACTOR = 2
-    RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
     arg_k = k
-    arg_k = arg_k * (sm_scale * RCP_LN2)
+    if USE_LOG_SPACE:
+        arg_k = arg_k * (sm_scale * RCP_LN2)
+    else:
+        arg_k = arg_k * sm_scale
     assert N_CTX % PRE_BLOCK == 0
     delta = torch.empty_like(softmax_lse)
     _, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -1054,15 +1086,18 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         BLOCK_N2=BLOCK_N2,
         BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
         USE_ALIBI=False if alibi_slopes is None else True,
+        USE_LOG_SPACE=USE_LOG_SPACE, 
+        RCP_LN2=RCP_LN2,
+        LN2=LN2
     )
 
     return dq, dk, dv, softmax_lse, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout):
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996):
     if True:
-        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
+        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2)
     else:
-        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
+        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_LOG_SPACE, RCP_LN2, LN2)
 
 
 
@@ -1083,12 +1118,15 @@ class _attention_prefill(torch.autograd.Function):
         ctx.encoded_softmax = encoded_softmax
         ctx.return_encoded_softmax = metadata.return_encoded_softmax
         ctx.layout = metadata.layout
+        ctx.USE_LOG_SPACE = metadata.USE_LOG_SPACE
+        ctx.RCP_LN2 = metadata.RCP_LN2
+        ctx.LN2 = metadata.LN2
         return o, softmax_lse, encoded_softmax
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.layout)
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.layout, ctx.USE_LOG_SPACE,  ctx.RCP_LN2,  ctx.LN2)
 
 attention_prefill = _attention_prefill.apply
 
