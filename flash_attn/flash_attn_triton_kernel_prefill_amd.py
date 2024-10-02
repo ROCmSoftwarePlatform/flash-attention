@@ -1517,6 +1517,51 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dk, tri_dk, atol=ATOL, rtol=RTOL)
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
+
+def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout):
+    """compute reference output and softmax_lse using PyTorch's built-in function"""
+
+    # expects bhsd layout
+    if layout != "bhsd":
+        raise ValueError("bhsd is the only layout supported")
+
+
+    # get seqlens
+    N_CTX_Q = q.shape[2]
+    N_CTX_K = k.shape[2]
+
+    # compute attention scores
+    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32)) * sm_scale
+
+    # Apply causal mask if needed
+    if causal:
+        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device='cuda', dtype=torch.bool))
+        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
+
+
+    # ===========================  Softmax ========================================
+    # compute max for numerical stability
+    max_scores = torch.max(attention_scores, dim=-1, keepdim=True)[0]
+
+    # subtract max and exponentiate
+    exp_scores = torch.exp(attention_scores - max_scores)
+
+    # sum of exponentials
+    sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
+
+    # softmax probabilities
+    softmax = exp_scores / sum_exp_scores
+
+    # compute log-sum-exp
+    softmax_lse = max_scores.squeeze(-1) + torch.log(sum_exp_scores.squeeze(-1))
+
+    # compute output
+    o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
+
+
+    return o, softmax_lse, exp_scores, softmax
+
+
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     # (1, 1, 1, 1, 1),
     (1, 1, 4, 4, 16), 
@@ -1563,45 +1608,17 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_softmax, DEB
     if return_softmax:
         input_metadata.return_encoded_softmax = True
     
-    # Call Triton's forward implementation directly
+    # call Triton's forward implementation directly
     o, softmax_lse_triton, exp_scores_triton, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
-    # Compute reference output and softmax_lse using PyTorch's built-in function
-    q_ref = q.clone()
-    k_ref = k.clone()
-    v_ref = v.clone()
+    # compute reference
+    o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd")
 
-    # Compute attention scores
-    attention_scores = torch.matmul(q_ref.to(torch.float32), k_ref.transpose(-2, -1).to(torch.float32)) * sm_scale
-
-    # Apply causal mask if needed
-    if causal:
-        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device='cuda', dtype=torch.bool))
-        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
-
-    # ===========================  Softmax ========================================
-    # compute max for numerical stability
-    max_scores_ref = torch.max(attention_scores, dim=-1, keepdim=True)[0]
-
-    # subtract max and exponentiate
-    exp_scores_ref = torch.exp(attention_scores - max_scores_ref)
-
-    # sum of exponentials
-    sum_exp_scores_ref = torch.sum(exp_scores_ref, dim=-1, keepdim=True)
-
-    # softmax probabilities
-    softmax_ref = exp_scores_ref / sum_exp_scores_ref
-
-    # compute log-sum-exp
-    softmax_lse_ref = max_scores_ref.squeeze(-1) + torch.log(sum_exp_scores_ref.squeeze(-1))
-
-    # compute output
-    ref_o = torch.matmul(softmax_ref, v_ref.to(torch.float32)).to(torch.float16)
 
     # compare the outputs
     print("o:", o)
-    print("ref_o:", ref_o)
-    torch.testing.assert_close(o, ref_o, atol=1e-2, rtol=1e-2, msg='Output o does not match reference')
+    print("ref_o:", o_ref)
+    torch.testing.assert_close(o, o_ref, atol=1e-2, rtol=1e-2, msg='Output o does not match reference')
 
     # compare softmax_lse
     print("softmax_lse_triton:", softmax_lse_triton)
