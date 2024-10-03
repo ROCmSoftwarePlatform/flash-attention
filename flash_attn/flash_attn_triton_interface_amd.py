@@ -98,7 +98,7 @@ def bwd(
         out = torch.empty_like(q)
 
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
-    dq, dk, dv, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, "bshd")
+    dq, dk, dv, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, causal, "bshd")
 
     softmax_d = None # fill this in
     if True:

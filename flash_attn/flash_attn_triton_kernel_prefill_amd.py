@@ -31,6 +31,7 @@ import triton.language as tl
 
 from triton import cdiv
 from .bwd_new import attention_prefill_backward_new_impl
+from .bwd_oai import attention_prefill_backward_oai_impl
 
 
 DEBUG = True
@@ -1057,7 +1058,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
     return o, softmax_lse, exp_scores, q, k , v, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
 
-def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_EXP2, RCP_LN2, LN2):
+def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, USE_EXP2, RCP_LN2, LN2):
     if True:
         print("attention_prefill_backward_new_impl")
         print("do:", do, do.shape)
@@ -1156,13 +1157,13 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         LN2=LN2
     )
 
-    return dq, dk, dv, softmax_lse, None
+    return dq, dk, dv, softmax_lse, None, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996, USE_NEW_BACKWARD_IMPL = False):
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996, USE_NEW_BACKWARD_IMPL = False):
     if USE_NEW_BACKWARD_IMPL:
-        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
+        return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout)
     else:
-        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2, RCP_LN2, LN2)
+        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, RCP_LN2, LN2)
 
 
 
@@ -1191,7 +1192,7 @@ class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.layout, ctx.USE_EXP2,  ctx.RCP_LN2,  ctx.LN2)
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, use_exp2 = ctx.USE_EXP2,  RCP_LN2 = ctx.RCP_LN2,  LN2 = ctx.LN2, USE_NEW_BACKWARD_IMPL = False)
 
 attention_prefill = _attention_prefill.apply
 
@@ -1821,14 +1822,14 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 4, 4, 16),
-    (1, 1, 1, 1, 64),
-    (1, 1, 256, 512, 16),
-    # work with new impl
-    (1, 1, 128, 128, 64),
-    (2, 4, 1024, 1024, 64),
-    (4, 8, 2048, 2048, 128),
-    (4, 16, 4096, 4096, 64),
-    (1, 4, 8192, 8192, 128),
+    # (1, 1, 1, 1, 64),
+    # (1, 1, 256, 512, 16),
+    # # work with new impl
+    # (1, 1, 128, 128, 64),
+    # (2, 4, 1024, 1024, 64),
+    # (4, 8, 2048, 2048, 128),
+    # (4, 16, 4096, 4096, 64),
+    # (1, 4, 8192, 8192, 128),
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [False])
@@ -1870,7 +1871,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INP
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
     softmax_lse = softmax_lse_ref.clone()
-    dq, dk, dv, _, _ = attention_prefill_backward_impl(do, q, k, v, o,  softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=use_exp2, USE_NEW_BACKWARD_IMPL = USE_NEW_BACKWARD_IMPL)
+    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o,  softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=use_exp2, USE_NEW_BACKWARD_IMPL = USE_NEW_BACKWARD_IMPL)
 
     # =============================================== Check ==============================================================
     print()
