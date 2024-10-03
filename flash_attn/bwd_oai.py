@@ -424,28 +424,28 @@ def attention_prefill_backward_oai_impl(do, q, k, v, o, L, sm_scale, head_size, 
         BLOCK_M=BLOCK,
         D_HEAD=BLOCK_DMODEL,
     )
-    if True:
-        print("after _bwd_preprocess")
-        print("o:", o, o.shape)
-        print("do:", do, do.shape)
-        print("delta:", delta, delta.shape)
-        print("BLOCK_M:", BLOCK)
-        print("D_HEAD:", BLOCK_DMODEL)
+    # if True:
+    #     print("after _bwd_preprocess")
+    #     print("o:", o, o.shape)
+    #     print("do:", do, do.shape)
+    #     print("delta:", delta, delta.shape)
+    #     print("BLOCK_M:", BLOCK)
+    #     print("D_HEAD:", BLOCK_DMODEL)
 
 
-    if True:
-        print("before _bwd_kernel")
-        print("q:", q, q.shape)
-        print("k:", k, k.shape)
-        print("v:", v, v.shape)
-        print("sm_scale", sm_scale)
-        print("o:", o, o.shape)
-        print("do:", do, do.shape)
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
-        print("dv:", dv, dv.shape)
-        print("L:", L, L.shape)
-        print("delta:", delta, delta.shape)
+    # if True:
+    #     print("before _bwd_kernel")
+    #     print("q:", q, q.shape)
+    #     print("k:", k, k.shape)
+    #     print("v:", v, v.shape)
+    #     print("sm_scale", sm_scale)
+    #     print("o:", o, o.shape)
+    #     print("do:", do, do.shape)
+    #     print("dq:", dq, dq.shape)
+    #     print("dk:", dk, dk.shape)
+    #     print("dv:", dv, dv.shape)
+    #     print("L:", L, L.shape)
+    #     print("delta:", delta, delta.shape)
     _bwd_kernel[(grid[1], cdiv(seq_len_kv, BLOCK) if sequence_parallel else 1)](
         q,
         k,

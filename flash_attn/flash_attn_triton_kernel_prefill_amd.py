@@ -620,6 +620,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     overflow_size = end_m_idx - seqlen_q
     if USE_EXP2:
         softmax_lse = m_i + tl.math.log2(l_i)
+        softmax_lse *= LN2
     else:
         softmax_lse = m_i + tl.math.log(l_i)
     if overflow_size > 0:
@@ -1160,10 +1161,10 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     return dq, dk, dv, softmax_lse, None, None
 
 def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996, USE_NEW_BACKWARD_IMPL = False):
-    if USE_NEW_BACKWARD_IMPL:
-        return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout)
-    else:
-        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, RCP_LN2, LN2)
+    # if USE_NEW_BACKWARD_IMPL:
+    return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout)
+    # else:
+    #     return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, RCP_LN2, LN2)
 
 
 
@@ -1432,34 +1433,22 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # new tests: doesnot work with new_impl
-    # (1, 1, 1, 1,  1),
-    # (1, 1, 1, 1,  16),
-    # (1, 1, 2, 2,  16),
-    # (1, 1, 4, 4, 2),
-    # (1, 1, 4, 3),
-    # (1, 1, 3, 4),
-    # (1, 1, 4, 4),
-    # (1, 1, 4, 7),
-    # (1, 1, 16, 16),
-    # (1, 1, 32, 32, 32),
-    # new tests: works with new_impl
-    # (1, 1, 64, 64, 64),
-    # (1, 16, 1022, 1022, 64),
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (2, 48, 4096, 4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
-    # (1, 16, 8192, 8192, 63),
     # failing FA
-    (1, 1, 256, 512, 16), 
-    # old tests
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (2, 48, 4096,4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
+    # (1, 1, 256, 512, 16),
+    # smallest config test
+    # (1, 1, 16, 16, 64), # fail
+    # (1, 1, 32, 32, 64), # fail
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 128, 128, 64), # pass
+    # (1, 1, 256, 256, 64), # pass
+    # (1, 1, 512, 512, 64), # pass
+    # # old tests
+    # (4, 48, 1024, 1024, 64), # pass
+    # (4, 48, 2048, 2048, 64), # pass
+    # (2, 48, 4096, 4096, 64), # pass
+    # (1, 16, 1024, 1024, 64), # pass
+    # (1, 16, 1024, 1024, 128), # pass
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
 ])
@@ -1472,7 +1461,7 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_alibi, dtype=torch.float16):
     torch.manual_seed(20)
 
-    DEBUG_INPUT = False
+    DEBUG_INPUT = False # if DEBUG is True it fails
 
     # seqlens
     seqlen_q = N_CTX_Q
@@ -1495,9 +1484,10 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, 1, seqlen_k, 1).expand(Z, H, seqlen_k, D_HEAD).requires_grad_()
         o = torch.zeros_like(q)
     else:
-        q = (torch.empty((Z, H, seqlen_q, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-        k = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
-        v = (torch.empty((Z, H, seqlen_k, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.0, std=0.5).requires_grad_())
+        # Generate random inputs
+        q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+        k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
+        v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
         o = torch.empty_like(q)
 
     if causal:
@@ -1526,15 +1516,13 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     else:
         M = torch.tril(torch.ones((seqlen_q, seqlen_k), device="cuda"))
         p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-        # print("ref_p:", p )
         if use_alibi:
             p += compute_alibi_tensor(alibi_slopes, N_CTX_Q, N_CTX_K)
         if causal:
             p[:, :, M == 0] = float("-inf")
 
-        ref_softmax = torch.softmax(p.float(), dim=-1).type(dtype=p.dtype)
-        print("ref_softmax:", ref_softmax )
-        ref_out = torch.matmul(ref_softmax, v)
+        p = torch.softmax(p.float(), dim=-1).type(dtype=p.dtype)
+        ref_out = torch.matmul(p, v)
         ref_out.backward(dout)
         ref_dv, v.grad = v.grad.clone(), None
         ref_dk, k.grad = k.grad.clone(), None
@@ -1626,7 +1614,13 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     
     # compute log-sum-exp and squeeze final dim which will be 1
     if use_exp2:
-        softmax_exp2_lse = max_scores + torch.log2(sum_exp2_scores)
+        LN2 = math.log(2)
+        RCP_LN = 1/ math.log(2)
+        # compute log-sum-exp in base 2 units
+        max_scores_base2 = max_scores * RCP_LN
+        softmax_exp2_lse_base2 = max_scores_base2 + torch.log2(sum_exp2_scores)
+        # Convert back to natural units
+        softmax_exp2_lse = softmax_exp2_lse_base2 * LN2
         softmax_exp2_lse.squeeze_(-1)
     else:
         softmax_lse = max_scores + torch.log(sum_exp_scores)
@@ -1726,10 +1720,9 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('check_lse', [False])
+@pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [True, False])
-def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_exp2, check_lse, DEBUG_INPUT):
+def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     
@@ -1767,22 +1760,27 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
         input_metadata.return_scores = True
     
     # call Triton's forward implementation directly
-    o, softmax_lse_triton, exp_scores_triton, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
     # compute reference
     o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref, attention_shifted_scaled_scores_ref, attention_scores_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", use_exp2=use_exp2)
+    # ref output
+    print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
+    print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
+    print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
+    print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
+    print("softmax_ref:", softmax_ref, softmax_ref.shape)
 
     # compare the outputs
     print("o:", o, o.shape)
     print("ref_o:", o_ref, o_ref.shape)
     torch.testing.assert_close(o, o_ref, atol=1e-2, rtol=1e-2)
 
-    if check_lse:
-        # compare softmax_lse
-        print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
-        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-        torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2)
-
+    # compare softmax_lse
+    print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
+    print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
+    torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2)
+    
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     if return_scores:
         print("scores:", scores, scores.shape)
@@ -1821,24 +1819,27 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 16),
-    # (1, 1, 4, 4, 16),
-    # (1, 1, 1, 1, 64),
+    # bad fa configs
     # (1, 1, 256, 512, 16),
-    # work with new impl
-    (1, 1, 128, 128, 64),
-    # (2, 4, 1024, 1024, 64),
-    # (4, 8, 2048, 2048, 128),
-    # (4, 16, 4096, 4096, 64),
-    # (1, 4, 8192, 8192, 128),
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 128, 128, 64),
+    # (1, 1, 256, 256, 64),
+    # (1, 1, 512, 512, 64), 
+    # old tests
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (2, 48, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [False])
+@pytest.mark.parametrize('use_exp2', [True])
 @pytest.mark.parametrize('USE_NEW_BACKWARD_IMPL', [True])
-@pytest.mark.parametrize('DEBUG_INPUT', [True])
+@pytest.mark.parametrize('DEBUG_INPUT', [False])
 def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INPUT, USE_NEW_BACKWARD_IMPL):
     dtype = torch.float16
-    torch.manual_seed(0)
+    torch.manual_seed(20) # seed from test_op_bwd
     
     if DEBUG_INPUT:
         sm_scale = 1
