@@ -1155,11 +1155,11 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     return dq, dk, dv, softmax_lse, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_EXP2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996):
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996):
     if USE_NEW_BACKWARD_IMPL:
         return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
     else:
-        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_EXP2, RCP_LN2, LN2)
+        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2, RCP_LN2, LN2)
 
 
 
@@ -1572,7 +1572,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
 
-def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, USE_EXP2=False):
+def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2=False):
     """compute reference output and softmax_lse using PyTorch's built-in function"""
 
     # expects bhsd layout
@@ -1602,7 +1602,7 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, USE_EX
     attention_shifted_scaled_scores = attention_scaled_scores - max_scores
 
     # subtract max and exponentiate
-    if USE_EXP2:
+    if use_exp2:
         RCP_LN = 1/ math.log(2)
         print("RCP_LN:", RCP_LN)
         exp2_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
@@ -1610,19 +1610,19 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, USE_EX
         exp_scores = torch.exp(attention_shifted_scaled_scores)
 
     # sum of exponentials
-    if USE_EXP2:
+    if use_exp2:
         sum_exp2_scores = torch.sum(exp2_scores, dim=-1, keepdim=True)
     else:
         sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
 
     # softmax probabilities
-    if USE_EXP2:
+    if use_exp2:
         softmax_exp2 = exp2_scores / sum_exp2_scores
     else:
         softmax = exp_scores / sum_exp_scores
     
     # compute log-sum-exp and squeeze final dim which will be 1
-    if USE_EXP2:
+    if use_exp2:
         softmax_exp2_lse = max_scores + torch.log2(sum_exp2_scores)
         softmax_exp2_lse.squeeze_(-1)
     else:
@@ -1630,16 +1630,28 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, USE_EX
         softmax_lse.squeeze_(-1)
     
     # compute output
-    if USE_EXP2:
+    if use_exp2:
         o_exp2 = torch.matmul(softmax_exp2, v.to(torch.float32)).to(torch.float16)
     else:
         o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
 
 
-    if USE_EXP2:
-        return o_exp2, attention_scores, attention_shifted_scaled_scores, softmax_exp2_lse, exp2_scores, softmax_exp2
+    if use_exp2:
+        return o_exp2, softmax_exp2_lse, exp2_scores, softmax_exp2, attention_shifted_scaled_scores, attention_scores
     else:
-        return o, attention_scores, attention_shifted_scaled_scores, softmax_lse, exp_scores, softmax
+        return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
+
+def attention_backward_pytorch_ref_impl(do, q, k, v, softmax_lse, o, sm_scale, causal, layout, use_exp2=False):
+    # Ensure the layout is 'bhsd'
+    if layout != "bhsd":
+        raise ValueError("Only 'bhsd' layout is supported.")
+    
+    # Recompute forward pass intermediates needed for backward
+    N_CTX_Q = q.shape[2]
+    N_CTX_K = k.shape[2]
+
+
+    return dq, dk, dv
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -1701,9 +1713,7 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
     o, softmax_lse_triton, exp_scores_triton, q_out, k_out, v_out, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
     # compute reference
-    o_ref, scores_ref, scores_scaled_shifted_ref, softmax_lse_ref, exp_scores_ref, softmax_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", USE_EXP2=use_exp2)
-
-
+    o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref, attention_shifted_scaled_scores_ref, attention_scores_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", use_exp2=use_exp2)
 
     # compare the outputs
     print("o:", o, o.shape)
@@ -1719,12 +1729,12 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     if return_scores:
         print("scores:", scores, scores.shape)
-        print("scores_ref:", scores_ref, scores_ref.shape)
-        torch.testing.assert_close(scores, scores_ref, atol=1e-2, rtol=1e-2)
+        print("scores_ref:", attention_scores_ref, attention_scores_ref.shape)
+        torch.testing.assert_close(scores, attention_scores_ref, atol=1e-2, rtol=1e-2)
 
         print("scores_scaled_shifted:",  scores_scaled_shifted, scores_scaled_shifted.shape)
-        print("scores_scaled_shifted_ref:", scores_scaled_shifted_ref, scores_scaled_shifted_ref.shape)
-        torch.testing.assert_close(scores_scaled_shifted, scores_scaled_shifted_ref, atol=1e-2, rtol=1e-2)
+        print("scores_scaled_shifted_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
+        torch.testing.assert_close(scores_scaled_shifted, attention_shifted_scaled_scores_ref, atol=1e-2, rtol=1e-2)
 
         print("exp_scores_triton:", exp_scores_triton, exp_scores_triton.shape)
         print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
@@ -1765,8 +1775,9 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
     # (1, 4, 8192, 8192, 128),
 ])
 @pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('use_exp2', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [True])
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, DEBUG_INPUT):
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     
@@ -1782,76 +1793,39 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, DEBUG_INPUT):
         q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(Z, H, N_CTX_Q, D_HEAD).requires_grad_()
         k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
         v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(Z, H, N_CTX_K, D_HEAD).requires_grad_()
-        o = torch.zeros_like(q)
+        do = torch.ones_like(q)
     else:
         # Generate random inputs
         q = torch.randn(Z, H, N_CTX_Q, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
         k = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
         v = torch.randn(Z, H, N_CTX_K, D_HEAD, device='cuda', dtype=dtype, requires_grad=True)
-    
-    # Compute attention scores
-    attention_scores = torch.matmul(q, k.transpose(-2, -1)) * sm_scale
+        do = torch.randn_like(q)
 
-    # Apply causal mask if needed
-    if causal:
-        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device='cuda', dtype=torch.bool))
-        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
+    # =============================================== Reference ==============================================================
+    q_ref = q.clone() 
+    k_ref = k.clone()
+    v_ref = v.clone()    
+    o_ref, softmax_lse_ref, _, _, _, _ = attention_forward_pytorch_ref_impl(q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2=use_exp2)
 
-    # Compute softmax probabilities
-    p = torch.softmax(attention_scores, dim=-1)
+    do_ref = do.clone()
+    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2=use_exp2)
 
-    # Compute output
-    o = torch.matmul(p, v)
+    # =============================================== Triton ==============================================================
+    o = o_ref.clone()
+    softmax_lse = softmax_lse_ref.clone()
+    dq, dk, dv, _, _ = attention_prefill_backward_impl(do, q, k, v, o,  softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=use_exp2)
 
-    # Compute softmax_lse (log-sum-exp of attention scores)
-    softmax_lse = torch.logsumexp(attention_scores, dim=-1)
-
-    # Prepare gradient of the output
-    if DEBUG_INPUT:
-        do = torch.ones_like(o)
-    else:
-        do = torch.randn_like(o)
-
-    # Call Triton's backward implementation directly
-    # Note: We use the same q, k, v, o, and softmax_lse computed above
-    # Since we did not use attention_prefill_forward_impl, we need to ensure that
-    # the tensors are in the correct format and layout expected by the backward implementation
-    dq, dk, dv, _, _ = attention_prefill_backward_impl(
-        do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout
-    )
-
-    # Compute reference gradients using autograd
-    q_ref = q.clone().detach().requires_grad_(True)
-    k_ref = k.clone().detach().requires_grad_(True)
-    v_ref = v.clone().detach().requires_grad_(True)
-
-    # Compute reference output using the same steps
-    attention_scores_ref = torch.matmul(q_ref, k_ref.transpose(-2, -1)) * sm_scale
-
-    if causal:
-        attention_scores_ref = attention_scores_ref.masked_fill(~causal_mask, float('-inf'))
-
-    p_ref = torch.softmax(attention_scores_ref, dim=-1)
-    o_ref = torch.matmul(p_ref, v_ref)
-
-    # Perform backward pass
-    o_ref.backward(do)
-
-    ref_dq = q_ref.grad
-    ref_dk = k_ref.grad
-    ref_dv = v_ref.grad
-
-    # Compare the gradients
+    # =============================================== Check ==============================================================
     print()
     print("dv:", dv)
-    print("ref_dv:", ref_dv)
-    torch.testing.assert_close(dv, ref_dv, atol=1e-2, rtol=1e-2)
+    print("dv_ref:", dv_ref)
+    torch.testing.assert_close(dv, dv_ref, atol=1e-2, rtol=1e-2)
     print("dk:", dk)
-    print("ref_dk:", ref_dk)
-    torch.testing.assert_close(dk, ref_dk, atol=1e-2, rtol=1e-2)
+    print("dk_ref:", dk_ref)
+    torch.testing.assert_close(dk, dk_ref, atol=1e-2, rtol=1e-2)
     print("dq:", dq)
-    print("ref_dq:", ref_dq)
-    torch.testing.assert_close(dq, ref_dq, atol=1e-2, rtol=1e-2)
+    print("dq_ref:", dq_ref)
+    torch.testing.assert_close(dq, dq_ref, atol=1e-2, rtol=1e-2)
 
 
 
