@@ -35,6 +35,8 @@ from .bwd_oai import attention_prefill_backward_oai_impl
 
 
 DEBUG = True
+RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
+LN2= 0.6931471824645996  # = ln(2)
 
 
 class MetaData():
@@ -57,8 +59,6 @@ class MetaData():
     dropout_p, return_scores= 0.0, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     USE_EXP2 = True
-    RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
-    LN2= 0.6931471824645996  # = ln(2)
     
 
     def __repr__(self) -> str:
@@ -1054,7 +1054,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                     > 0.0, return_scores=metadata.return_scores,
-                    USE_EXP2=metadata.USE_EXP2, LN2=metadata.LN2, RCP_LN2=metadata.RCP_LN2, RETURN_SCORES=metadata.return_scores)
+                    USE_EXP2=metadata.USE_EXP2, LN2=LN2, RCP_LN2=RCP_LN2, RETURN_SCORES=metadata.return_scores)
 
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
@@ -1160,11 +1160,15 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     return dq, dk, dv, softmax_lse, None, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996, USE_NEW_BACKWARD_IMPL = False):
-    # if USE_NEW_BACKWARD_IMPL:
-    return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout)
-    # else:
-    #     return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, RCP_LN2, LN2)
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=True):
+    if True:
+        if use_exp2:
+            softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
+        else:
+            raise ValueError("openai backward kernel assumes exp2")
+        return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout)
+    else:
+        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
 
 
@@ -1186,14 +1190,12 @@ class _attention_prefill(torch.autograd.Function):
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
         ctx.USE_EXP2 = metadata.USE_EXP2
-        ctx.RCP_LN2 = metadata.RCP_LN2
-        ctx.LN2 = metadata.LN2
         return o, softmax_lse, exp_scores
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, use_exp2 = ctx.USE_EXP2,  RCP_LN2 = ctx.RCP_LN2,  LN2 = ctx.LN2, USE_NEW_BACKWARD_IMPL = False)
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, use_exp2 = ctx.USE_EXP2)
 
 attention_prefill = _attention_prefill.apply
 
@@ -1439,16 +1441,17 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
     # (1, 1, 16, 16, 64), # fail
     # (1, 1, 32, 32, 64), # fail
     (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64), # pass
-    # (1, 1, 256, 256, 64), # pass
-    # (1, 1, 512, 512, 64), # pass
-    # # old tests
-    # (4, 48, 1024, 1024, 64), # pass
-    # (4, 48, 2048, 2048, 64), # pass
-    # (2, 48, 4096, 4096, 64), # pass
-    # (1, 16, 1024, 1024, 64), # pass
-    # (1, 16, 1024, 1024, 128), # pass
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64), # pass
+    (1, 1, 256, 256, 64), # pass
+    (1, 1, 512, 512, 64), # pass
+    # old tests that work
+    (4, 48, 1024, 1024, 64), # pass
+    (4, 48, 2048, 2048, 64), # pass
+    (2, 48, 4096, 4096, 64), # pass
+    (1, 16, 1024, 1024, 64), # pass
+    (1, 16, 1024, 1024, 128), # pass
+    # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
 ])
@@ -1822,22 +1825,24 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
     # bad fa configs
     # (1, 1, 256, 512, 16),
     (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64),
-    # (1, 1, 256, 256, 64),
-    # (1, 1, 512, 512, 64), 
-    # old tests
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (2, 48, 4096, 4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64),
+    (1, 1, 256, 256, 64),
+    (1, 1, 512, 512, 64), 
+    # old tests that work
+    (4, 48, 1024, 1024, 64),
+    (4, 48, 2048, 2048, 64),
+    (1, 24, 4096, 4096, 64),
+    (1, 16, 1024, 1024, 64),
+    (1, 16, 1024, 1024, 128),
+    # old tests that were commented out
+    # (1, 16, 8192, 8192, 63),
+    # (1, 16, 1022, 1022, 64),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [True])
-@pytest.mark.parametrize('USE_NEW_BACKWARD_IMPL', [True])
+@pytest.mark.parametrize('use_exp2', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False])
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INPUT, USE_NEW_BACKWARD_IMPL):
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
     
@@ -1873,7 +1878,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INP
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
     softmax_lse = softmax_lse_ref.clone()
-    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o,  softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=use_exp2, USE_NEW_BACKWARD_IMPL = USE_NEW_BACKWARD_IMPL)
+    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o,  softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=use_exp2)
 
     # =============================================== Check ==============================================================
     print()
