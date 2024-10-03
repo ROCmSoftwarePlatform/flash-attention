@@ -54,7 +54,7 @@ class MetaData():
     seqlen_new = None
     k_new = None
     v_new = None
-    dropout_p, return_exp_scores, return_scores = 0.0, False, True
+    dropout_p, return_scores, return_exp_scores = 0.0, False, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     USE_EXP2 = True
     RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
@@ -243,7 +243,7 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn, start_m,
                     actual_seqlen_k, actual_seqlen_q, dropout_p, philox_seed, batch_philox_offset, exp_scores_ptrs,
-                    block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope, score_ptrs, score_mask,
+                    block_min, block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope, score_ptrs,
                     IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
                     OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
                     ENABLE_DROPOUT: tl.constexpr, return_exp_scores: tl.constexpr, PADDED_HEAD: tl.constexpr,
@@ -288,6 +288,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # -- compute qk ----
         qk += tl.dot(q, k)
         if RETURN_SCORES:
+            off_n_for_k = start_n + tl.arange(0, BLOCK_N)
+            score_mask = (OFFS_M[:, None] < actual_seqlen_q) & (off_n_for_k[None, :] < actual_seqlen_k)
             tl.store(score_ptrs, qk, mask=score_mask)
 
         if IS_CAUSAL:
@@ -321,10 +323,14 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if return_exp_scores:
-                tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=score_mask)
+                off_n_for_k = start_n + tl.arange(0, BLOCK_N)
+                exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & (off_n_for_k[None, :] < actual_seqlen_k)
+                tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
             p = tl.where(keep, p, 0.0)
         elif return_exp_scores:
-            tl.store(exp_scores_ptrs, p, mask=score_mask)
+            off_n_for_k = start_n + tl.arange(0, BLOCK_N)
+            exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & (off_n_for_k[None, :] < actual_seqlen_k)
+            tl.store(exp_scores_ptrs, p, mask=exp_score_mask)
         
         # -- update output accumulator --
         # alpha is an adjustment factor for acc and li as we loop and find new maxes
@@ -346,6 +352,8 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
             bias_ptrs += BLOCK_N * stride_bn
         if return_exp_scores:
             exp_scores_ptrs += BLOCK_N
+        if RETURN_SCORES:
+            score_ptrs += BLOCK_N
     return acc, l_i, m_i
 
 
@@ -484,7 +492,6 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     if RETURN_SCORES:
         scores_offset = scores + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
         score_ptrs = scores_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
-        score_mask = (offs_m[:, None] < seqlen_q) & (offs_n[None, :] < seqlen_k)
     else:
         score_ptrs = None
 
@@ -539,7 +546,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
                                         exp_scores_ptrs,
                                         # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
-                                        block_min, block_max, 0, 0, 0, alibi_slope, score_ptrs, score_mask,
+                                        block_min, block_max, 0, 0, 0, alibi_slope, score_ptrs,
                                         # IS_CAUSAL, ....
                                         False, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
@@ -566,7 +573,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk, stride_bn,
                                         start_m, seqlen_k, seqlen_q, dropout_p, philox_seed, batch_philox_offset,
                                         exp_scores_ptrs, block_min, block_max, offs_n_causal, masked_blocks,
-                                        n_extra_tokens, alibi_slope, score_ptrs, score_mask,
+                                        n_extra_tokens, alibi_slope, score_ptrs,
                                         IS_CAUSAL, BLOCK_M, BLOCK_DMODEL, BLOCK_N, offs_m, offs_n,
                                         # _, MASK_STEPS, ...
                                         PRE_LOAD_V, True, ENABLE_DROPOUT, return_exp_scores, PADDED_HEAD,
@@ -1617,18 +1624,20 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, USE_EX
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 16), 
-    # (1, 1, 256, 512, 16),
-    # (1, 1, 128, 128, 64),
-    # (2, 4, 1024, 1024, 64),
-    # (4, 8, 2048, 2048, 128),
-    # (4, 16, 4096, 4096, 64),
-    # (2, 4, 8192, 8192, 32),
+    (1, 1, 4, 4, 16),
+    (2, 2, 4, 4, 16),
+    (1, 1, 2, 128, 16),
+    (1, 1, 256, 512, 16),
+    (1, 1, 128, 128, 64),
+    (2, 4, 1024, 1024, 64),
+    (4, 8, 2048, 2048, 128),
+    (4, 16, 4096, 4096, 64),
+    (2, 4, 8192, 8192, 32),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('return_softmax', [True])
+@pytest.mark.parametrize('return_softmax', [False])
 @pytest.mark.parametrize('use_exp2', [False])
-@pytest.mark.parametrize('DEBUG_INPUT', [True])
+@pytest.mark.parametrize('DEBUG_INPUT', [True, False])
 def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_softmax, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
@@ -1660,6 +1669,8 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_softmax, use
     input_metadata.USE_EXP2 = use_exp2
     if causal:
         input_metadata.need_causal()
+
+    input_metadata.return_scores = True
     if return_softmax:
         input_metadata.return_exp_scores = True
     
