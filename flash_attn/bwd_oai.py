@@ -375,79 +375,117 @@ def _bwd_kernel(
 
 
 def attention_prefill_backward_oai_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, causal, layout, sequence_parallel=False):
-        if layout != "bhsd":
-            raise ValueError("OAI kernel expects bhsd")
-        capability = torch.cuda.get_device_capability()
-        MMA_V3 = capability[0] >= 9
-        BLOCK = 128
+    DEBUG = True
+    
+    if DEBUG:
+        print()
+        print("attention_prefill_backward_oai_impl")
+        print("do:", do, do.shape)
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o, o.shape)
+        print("L:", L, L.shape)
+        print("sm_scale", sm_scale)
+        print("head_size", head_size)
+        print("alibi_slopes", alibi_slopes)
+        print("layout", layout)
 
-        if is_hip():
-            # Bwd pass runs out of shared memory on HIP with larger block size.
-            BLOCK = 64
+    if layout != "bhsd":
+        raise ValueError("OAI kernel expects bhsd")
+    capability = torch.cuda.get_device_capability()
+    MMA_V3 = capability[0] >= 9
+    BLOCK = 128
 
-        # my changes
-        grid = (cdiv(q.shape[2], BLOCK), q.shape[0] * q.shape[1], 1)
-        BLOCK_DMODEL = head_size
+    if is_hip():
+        # Bwd pass runs out of shared memory on HIP with larger block size.
+        BLOCK = 64
 
-        sequence_parallel = sequence_parallel
-        seq_len_kv = k.shape[2]
-        do = do.contiguous()
-        if sequence_parallel:
-            replicas = cdiv(seq_len_kv, BLOCK)
-            new_dq_shape = (replicas,) + q.shape
-            dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
-        else:
-            dq = torch.zeros_like(q, dtype=q.dtype)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-        delta = torch.empty_like(L)
-        _bwd_preprocess[(cdiv(q.shape[2], BLOCK) * grid[1],)](
-            o,
-            do,
-            delta,
-            BLOCK_M=BLOCK,
-            D_HEAD=BLOCK_DMODEL,
-        )
-        _bwd_kernel[(grid[1], cdiv(seq_len_kv, BLOCK) if sequence_parallel else 1)](
-            q,
-            k,
-            v,
-            sm_scale,  #
-            o,
-            do,  #
-            dq,
-            dk,
-            dv,  #
-            L,  #
-            delta,  #
-            o.numel(),
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            q.stride(3),  #
-            k.stride(0),
-            k.stride(1),
-            k.stride(2),
-            k.stride(3),  #
-            v.stride(0),
-            v.stride(1),
-            v.stride(2),
-            v.stride(3),  #
-            q.shape[0],
-            q.shape[1],
-            q.shape[2],  #
-            q.shape[0] * q.shape[1] * q.shape[2],  #
-            cdiv(seq_len_kv, BLOCK) * q.shape[0] * q.shape[1] * q.shape[2],  #
-            BLOCK_M=BLOCK,
-            BLOCK_N=BLOCK,  #
-            BLOCK_DMODEL=BLOCK_DMODEL,  #
-            SEQUENCE_PARALLEL=sequence_parallel,  #
-            CAUSAL=causal,  #
-            MMA_V3=MMA_V3,  #
-            num_warps=8,  #
-            num_stages=1,  #
-        )
+    # my changes
+    grid = (cdiv(q.shape[2], BLOCK), q.shape[0] * q.shape[1], 1)
+    BLOCK_DMODEL = head_size
 
-        if len(dq.shape) == 5:
-            dq = dq.sum(dim=0)
-        return dq, dk, dv, None, None, None
+    sequence_parallel = sequence_parallel
+    seq_len_kv = k.shape[2]
+    do = do.contiguous()
+    if sequence_parallel:
+        replicas = cdiv(seq_len_kv, BLOCK)
+        new_dq_shape = (replicas,) + q.shape
+        dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
+    else:
+        dq = torch.zeros_like(q, dtype=q.dtype)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    delta = torch.empty_like(L)
+    _bwd_preprocess[(cdiv(q.shape[2], BLOCK) * grid[1],)](
+        o,
+        do,
+        delta,
+        BLOCK_M=BLOCK,
+        D_HEAD=BLOCK_DMODEL,
+    )
+    if True:
+        print("after _bwd_preprocess")
+        print("o:", o, o.shape)
+        print("do:", do, do.shape)
+        print("delta:", delta, delta.shape)
+        print("BLOCK_M:", BLOCK)
+        print("D_HEAD:", BLOCK_DMODEL)
+
+
+    if True:
+        print("before _bwd_kernel")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("sm_scale", sm_scale)
+        print("o:", o, o.shape)
+        print("do:", do, do.shape)
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
+        print("L:", L, L.shape)
+        print("delta:", delta, delta.shape)
+    _bwd_kernel[(grid[1], cdiv(seq_len_kv, BLOCK) if sequence_parallel else 1)](
+        q,
+        k,
+        v,
+        sm_scale,  #
+        o,
+        do,  #
+        dq,
+        dk,
+        dv,  #
+        L,  #
+        delta,  #
+        o.numel(),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),  #
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),  #
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),  #
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],  #
+        q.shape[0] * q.shape[1] * q.shape[2],  #
+        cdiv(seq_len_kv, BLOCK) * q.shape[0] * q.shape[1] * q.shape[2],  #
+        BLOCK_M=BLOCK,
+        BLOCK_N=BLOCK,  #
+        BLOCK_DMODEL=BLOCK_DMODEL,  #
+        SEQUENCE_PARALLEL=sequence_parallel,  #
+        CAUSAL=causal,  #
+        MMA_V3=MMA_V3,  #
+        num_warps=8,  #
+        num_stages=1,  #
+    )
+
+    if len(dq.shape) == 5:
+        dq = dq.sum(dim=0)
+    return dq, dk, dv, None, None, None

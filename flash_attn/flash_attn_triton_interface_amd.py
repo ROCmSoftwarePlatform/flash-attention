@@ -44,9 +44,9 @@ def fwd(q,
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
-    tri_out, softmax_lse, softmax_dmask, _, _ , _, _ , _, _, _, = attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    o_triton, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
-    return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
+    return o_triton, q , k , v, o, softmax_lse, exp_scores, None
 
 def bwd(
     dout,
@@ -98,7 +98,7 @@ def bwd(
         out = torch.empty_like(q)
 
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
-    dq, dk, dv, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, causal, "bshd")
+    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, causal, "bshd")
 
     softmax_d = None # fill this in
     if True:

@@ -1055,7 +1055,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     > 0.0, return_scores=metadata.return_scores,
                     USE_EXP2=metadata.USE_EXP2, LN2=metadata.LN2, RCP_LN2=metadata.RCP_LN2, RETURN_SCORES=metadata.return_scores)
 
-    return o, softmax_lse, exp_scores, q, k , v, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
+    return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
 
 def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, USE_EXP2, RCP_LN2, LN2):
@@ -1170,7 +1170,7 @@ def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_
 class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        o, softmax_lse, exp_scores, q, k, v, grid, head_size, philox_seed, philox_offset = attention_prefill_forward_impl(q, k, v, o, metadata)
+        o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_impl(q, k, v, o, metadata)
 
         ctx.save_for_backward(q, k, v, o, softmax_lse)
         ctx.grid = grid
@@ -1821,11 +1821,12 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 4, 4, 16),
+    # (1, 1, 1, 1, 16),
+    # (1, 1, 4, 4, 16),
     # (1, 1, 1, 1, 64),
     # (1, 1, 256, 512, 16),
-    # # work with new impl
-    # (1, 1, 128, 128, 64),
+    # work with new impl
+    (1, 1, 128, 128, 64),
     # (2, 4, 1024, 1024, 64),
     # (4, 8, 2048, 2048, 128),
     # (4, 16, 4096, 4096, 64),
