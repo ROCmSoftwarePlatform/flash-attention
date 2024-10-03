@@ -30,11 +30,10 @@ import triton
 import triton.language as tl
 
 from triton import cdiv
-from .new_bwd import attention_prefill_backward_new_impl
+from .bwd_new import attention_prefill_backward_new_impl
 
 
 DEBUG = True
-USE_NEW_BACKWARD_IMPL = False
 
 
 class MetaData():
@@ -1060,6 +1059,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
 
 def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, USE_EXP2, RCP_LN2, LN2):
     if True:
+        print("attention_prefill_backward_new_impl")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
@@ -1070,6 +1070,9 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         print("head_size:", head_size)
         print("alibi_slopes:", alibi_slopes)
         print("layout:", layout)
+        print("USE_EXP2:", USE_EXP2)
+        print("RCP_LN2:", RCP_LN2)
+        print("LN2:", LN2)
 
     # the kernel wants bhsd
     if layout == "bhsd":
@@ -1155,7 +1158,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     return dq, dk, dv, softmax_lse, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996):
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=True, RCP_LN2=1.4426950408889634, LN2=0.6931471824645996, USE_NEW_BACKWARD_IMPL = False):
     if USE_NEW_BACKWARD_IMPL:
         return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, layout)
     else:
@@ -1604,7 +1607,6 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     # subtract max and exponentiate
     if use_exp2:
         RCP_LN = 1/ math.log(2)
-        print("RCP_LN:", RCP_LN)
         exp2_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
     else:
         exp_scores = torch.exp(attention_shifted_scaled_scores)
@@ -1641,7 +1643,7 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     else:
         return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
 
-def attention_backward_pytorch_ref_impl(do, q, k, v, softmax_lse, o, sm_scale, causal, layout, use_exp2=False):
+def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2=False):
     # Ensure the layout is 'bhsd'
     if layout != "bhsd":
         raise ValueError("Only 'bhsd' layout is supported.")
@@ -1650,9 +1652,63 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, softmax_lse, o, sm_scale, c
     N_CTX_Q = q.shape[2]
     N_CTX_K = k.shape[2]
 
+    # Compute attention scores
+    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+
+    # Apply causal mask if needed
+    if causal:
+        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device=q.device, dtype=torch.bool))
+        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
+
+    # Scale scores
+    attention_scaled_scores = sm_scale * attention_scores
+
+    # Compute max for numerical stability
+    max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
+
+    # Shift scores by subtracting max
+    attention_shifted_scaled_scores = attention_scaled_scores - max_scores
+
+    # Exponentiate
+    if use_exp2:
+        RCP_LN = 1 / math.log(2)
+        exp_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
+    else:
+        exp_scores = torch.exp(attention_shifted_scaled_scores)
+
+    # Sum of exponentials
+    sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
+
+    # Softmax probabilities
+    p = exp_scores / sum_exp_scores
+
+    # Compute gradient wrt p
+    dp = torch.matmul(do.to(torch.float32), v.to(torch.float32).transpose(-2, -1))  # [Z, H, N_CTX_Q, N_CTX_K]
+
+    # Compute ds = p * (dp - (dp * p).sum(dim=-1, keepdim=True))
+    dp_dot_p = dp * p  # Element-wise multiplication
+    sum_dp_p = torch.sum(dp_dot_p, dim=-1, keepdim=True)  # Sum over last dimension
+    ds = p * (dp - sum_dp_p)
+
+    # Compute gradient wrt q
+    dq = torch.matmul(ds, k.to(torch.float32))  # [Z, H, N_CTX_Q, D_HEAD]
+    dq = dq * sm_scale
+
+    # Compute gradient wrt k
+    ds_T = ds.transpose(-2, -1)  # [Z, H, N_CTX_K, N_CTX_Q]
+    dk = torch.matmul(ds_T, q.to(torch.float32))  # [Z, H, N_CTX_K, D_HEAD]
+    dk = dk * sm_scale
+
+    # Compute gradient wrt v
+    p_T = p.transpose(-2, -1)  # [Z, H, N_CTX_K, N_CTX_Q]
+    dv = torch.matmul(p_T, do.to(torch.float32))  # [Z, H, N_CTX_K, D_HEAD]
+
+    # Cast back to original dtype
+    dq = dq.to(q.dtype)
+    dk = dk.to(k.dtype)
+    dv = dv.to(v.dtype)
 
     return dq, dk, dv
-
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 1, 1, 1),
@@ -1764,20 +1820,21 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 4, 4, 16)
-    # (1, 1, 1, 1, 64)
-    # (1, 1, 256, 512, 16),
+    (1, 1, 4, 4, 16),
+    (1, 1, 1, 1, 64),
+    (1, 1, 256, 512, 16),
     # work with new impl
-    # (1, 1, 128, 128, 64),
-    # (2, 4, 1024, 1024, 64),
-    # (4, 8, 2048, 2048, 128),
-    # (4, 16, 4096, 4096, 64),
-    # (1, 4, 8192, 8192, 128),
+    (1, 1, 128, 128, 64),
+    (2, 4, 1024, 1024, 64),
+    (4, 8, 2048, 2048, 128),
+    (4, 16, 4096, 4096, 64),
+    (1, 4, 8192, 8192, 128),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [True, False])
+@pytest.mark.parametrize('use_exp2', [False])
+@pytest.mark.parametrize('USE_NEW_BACKWARD_IMPL', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [True])
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INPUT):
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INPUT, USE_NEW_BACKWARD_IMPL):
     dtype = torch.float16
     torch.manual_seed(0)
     
@@ -1813,7 +1870,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, DEBUG_INP
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
     softmax_lse = softmax_lse_ref.clone()
-    dq, dk, dv, _, _ = attention_prefill_backward_impl(do, q, k, v, o,  softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=use_exp2)
+    dq, dk, dv, _, _ = attention_prefill_backward_impl(do, q, k, v, o,  softmax_lse, sm_scale, head_size, alibi_slopes, layout, use_exp2=use_exp2, USE_NEW_BACKWARD_IMPL = USE_NEW_BACKWARD_IMPL)
 
     # =============================================== Check ==============================================================
     print()

@@ -327,6 +327,7 @@ def _bwd_kernel(
 def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, layout):
     if DEBUG:
         print()
+        print("attention_prefill_backward_new_impl")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
