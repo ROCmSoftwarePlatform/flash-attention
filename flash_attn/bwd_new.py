@@ -442,6 +442,45 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         D_HEAD=BLOCK_DMODEL,
     )
 
+    stride_dqa = o.numel()
+    stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
+    stride_kz, stride_kh, stride_kn, stride_kk = k.stride(0),  k.stride(1), k.stride(2),  k.stride(3)
+    stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1),v.stride(2),  v.stride(3)
+    num_warps = 8
+    num_stages =1
+
+    if True:
+        print("_bwd_kernel inputs")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("sm_scale", sm_scale)
+        print("o:", o, o.shape)
+        print("do:", do, do.shape)
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
+        print("L:", softmax_lse, softmax_lse.shape)
+        print("delta:", delta, delta.shape)
+        print("stride_qz, stride_qh, stride_qm, stride_qk:",  stride_qz, stride_qh, stride_qm, stride_qk)
+        print("stride_kz, stride_kh, stride_kn, stride_kk:",  stride_kz, stride_kh, stride_kn, stride_kk)
+        print("stride_vz, stride_vh, stride_vn, stride_vk:",  stride_vz, stride_vh, stride_vn, stride_vk)
+        print("batch_q:", batch_q)
+        print("heads_q:",heads_q)
+        print("N_CTX_Q:",N_CTX_Q)
+        print("N_CTX_K:",N_CTX_K)
+        print("batch_q * head_size_q * N_CTX_Q:",batch_q * head_size_q * N_CTX_Q)
+        print("num_blocks_n * batch_q * head_size_q * N_CTX_Q:",num_blocks_n * batch_q * head_size_q * N_CTX_Q)
+        print("BLOCK_M:",BLOCK_M)
+        print("BLOCK_N:",BLOCK_M)
+        print("BLOCK_DMODEL:",BLOCK_DMODEL)
+        print("ACTUAL_BLOCK_DMODEL:",ACTUAL_BLOCK_DMODEL)
+        print("SEQUENCE_PARALLEL:",sequence_parallel)
+        print("CAUSAL:",causal)
+        print("num_warps:",8)
+        print("num_stages:", 1)
+        print("USE_EXP2:", use_exp2)
+
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
         k,
@@ -454,21 +493,12 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         dv,
         softmax_lse,
         delta,
-        o.numel(),
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        q.stride(3),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        k.stride(3),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        v.stride(3),
-        q.shape[0],
-        q.shape[1],
+        stride_dqa,
+        stride_qz, stride_qh, stride_qm, stride_qk,
+        stride_kz, stride_kh, stride_kn, stride_kk,
+        stride_vz, stride_vh, stride_vn, stride_vk,
+        batch_q,
+        heads_q,
         N_CTX_Q,
         N_CTX_K,
         batch_q * head_size_q * N_CTX_Q,

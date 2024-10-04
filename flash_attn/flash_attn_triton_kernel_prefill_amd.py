@@ -812,16 +812,18 @@ def _bwd_kernel_dq(dq, q, K, V, do, lse, D, alibi_slope, sm_scale,
 @triton.jit
 def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
               # shared by Q/K/V/DO.
-              stride_z, stride_h, stride_tok, stride_d,
+              stride_qz, stride_qh, stride_qm, stride_qd,
               # H = 16, N_CTX = 1024
               H, N_CTX, BLOCK_DMODEL: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N1: tl.constexpr,
               BLOCK_M2: tl.constexpr, BLOCK_N2: tl.constexpr, BLK_SLICE_FACTOR: tl.constexpr, USE_ALIBI: tl.constexpr,
               USE_EXP2: tl.constexpr, RCP_LN2: tl.constexpr, LN2: tl.constexpr):
 
-    bhid = tl.program_id(2)
-    off_chz = (bhid * N_CTX).to(tl.int64)
-    adj = (stride_h * (bhid % H) + stride_z * (bhid // H)).to(tl.int64)
-    pid = tl.program_id(0)
+    # grid is (num_blocks_n , 1, Batch * Heads)
+    col_block_id = tl.program_id(0)
+    bh_id = tl.program_id(2)
+    off_chz = (bh_id * N_CTX).to(tl.int64)
+    adj = (stride_qh * (bh_id % H) + stride_qz * (bh_id // H)).to(tl.int64)
+    
 
     # offset pointers for batch/head
     Q += adj
@@ -834,9 +836,8 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     M += off_chz
     D += off_chz
 
-    # offs_k = tl.arange(0, BLOCK_DMODEL)
-
-    start_n = pid * BLOCK_N1
+    # ==================================================== Diagonal processing =================================================================
+    start_n = col_block_id * BLOCK_N1
     # This assignment is important. It is what allows us to pick the diagonal
     # blocks. Later, when we want to do the lower triangular, we update start_m
     # after the first dkdv call.
@@ -851,7 +852,7 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     K_block_ptr = tl.make_block_ptr(
         base=K,
         shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
+        strides=(stride_qm, stride_qd),
         offsets=(start_n, 0),
         block_shape=(BLOCK_N1, BLOCK_DMODEL),
         order=(1, 0),
@@ -859,7 +860,7 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     V_block_ptr = tl.make_block_ptr(
         base=V,
         shape=(N_CTX, BLOCK_DMODEL),
-        strides=(stride_tok, stride_d),
+        strides=(stride_qm, stride_qd),
         offsets=(start_n, 0),
         block_shape=(BLOCK_N1, BLOCK_DMODEL),
         order=(1, 0),
@@ -870,14 +871,14 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     v = tl.load(V_block_ptr)
 
     if USE_ALIBI:
-        a_offset = bhid
+        a_offset = bh_id
         alibi_slope = tl.load(alibi_slopes + a_offset)
     else:
         alibi_slope = None
 
     # compute dK and dV for blocks close to the diagonal that need to be masked
     num_steps = BLOCK_N1 // MASK_BLOCK_M1
-    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_tok, stride_d, H, N_CTX,
+    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_qm, stride_qd, H, N_CTX,
                                MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=True,
                                USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
 
@@ -885,30 +886,31 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     start_m += num_steps * MASK_BLOCK_M1
     num_steps = (N_CTX - start_m) // BLOCK_M1
 
-    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_tok, stride_d, H, N_CTX,
+    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_qm, stride_qd, H, N_CTX,
                                BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=False,
                                USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
 
-    DV_block_ptrs = tl.make_block_ptr(base=DV, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+    DV_block_ptrs = tl.make_block_ptr(base=DV, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
                                       offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
+    # print("dv:", dv)
     tl.store(DV_block_ptrs, dv.to(v.dtype))
 
     # Write back dK.
-    DK_block_ptrs = tl.make_block_ptr(base=DK, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+    DK_block_ptrs = tl.make_block_ptr(base=DK, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
                                       offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
     tl.store(DK_block_ptrs, dk.to(k.dtype))
 
     # THIS BLOCK DOES DQ:
-    start_m = pid * BLOCK_M2
+    start_m = col_block_id * BLOCK_M2
     end_n = start_m + BLOCK_M2
 
     MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
     offs_m = start_m + tl.arange(0, BLOCK_M2)
 
-    Q_block_ptr = tl.make_block_ptr(base=Q, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+    Q_block_ptr = tl.make_block_ptr(base=Q, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
                                     offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
 
-    DO_block_ptr = tl.make_block_ptr(base=DO, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+    DO_block_ptr = tl.make_block_ptr(base=DO, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
                                      offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
     q = tl.load(Q_block_ptr)
     do = tl.load(DO_block_ptr)
@@ -923,17 +925,17 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     # not due to anything important.  I just wanted to reuse the loop
     # structure for dK & dV above as much as possible.
     num_steps = BLOCK_M2 // MASK_BLOCK_N2
-    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale, stride_tok, stride_d, H, N_CTX, BLOCK_M2, MASK_BLOCK_N2,
+    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale, stride_qm, stride_qd, H, N_CTX, BLOCK_M2, MASK_BLOCK_N2,
                         BLOCK_DMODEL, start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps, MASK=True,
                         USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
     end_n -= num_steps * MASK_BLOCK_N2
     # stage 2
     num_steps = end_n // BLOCK_N2
-    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale, stride_tok, stride_d, H, N_CTX, BLOCK_M2, BLOCK_N2,
+    dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale, stride_qm, stride_qd, H, N_CTX, BLOCK_M2, BLOCK_N2,
                         BLOCK_DMODEL, start_m, end_n - num_steps * BLOCK_N2, num_steps, MASK=False,
                         USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
     # Write back dQ.
-    DQ_block_ptr = tl.make_block_ptr(base=DQ, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_tok, stride_d),
+    DQ_block_ptr = tl.make_block_ptr(base=DQ, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
                                      offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
     tl.store(DQ_block_ptr, dq.to(q.dtype))
 
@@ -1084,9 +1086,15 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     assert do.is_contiguous()
     assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
     seqlen_q = q.shape[2]
-    dq = torch.empty_like(q)
-    dk = torch.empty_like(k)
-    dv = torch.empty_like(v)
+    if True:
+        dq = torch.zeros_like(q)
+        dk = torch.zeros_like(k)
+        dv = torch.zeros_like(v)
+    else:
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+    
     BATCH, N_HEAD, N_CTX = q.shape[:3]
     PRE_BLOCK = 128
     # NUM_WARPS, NUM_STAGES = 4, 1
@@ -1117,6 +1125,36 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     )
     grid = lambda META: (triton.cdiv(N_CTX, META['BLOCK_N1']), 1, BATCH * N_HEAD)
 
+    stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
+    use_alibi = False if alibi_slopes is None else True
+    
+    if True:
+        print("_attn_bwd inputs")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("sm_scale", sm_scale)
+        print("alibi_slopes:", alibi_slopes)
+        print("o:", o, o.shape)
+        print("do:", do, do.shape)
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
+        print("L:", softmax_lse, softmax_lse.shape)
+        print("delta:", delta, delta.shape)
+        print("stride_qz, stride_qh, stride_qm, stride_qk:", stride_qz, stride_qh, stride_qm, stride_qk)
+        print("N_HEAD:",N_HEAD)
+        print("N_CTX:",N_CTX)
+        print("BLOCK_M1:",BLOCK_M1)
+        print("BLOCK_N1:",BLOCK_N1)
+        print("BLOCK_M2:",BLOCK_M2)
+        print("BLOCK_N2:",BLOCK_N2)
+        print("BLK_SLICE_FACTOR:", BLK_SLICE_FACTOR)
+        print("USE_ALIBI:", use_alibi)
+        print("USE_EXP2:", use_exp2)
+        print("RCP_LN2:", RCP_LN2)
+        print("LN2:", LN2)
+
     _attn_bwd[grid](
         q,
         k,
@@ -1129,10 +1167,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         dv,
         softmax_lse,
         delta,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        q.stride(3),
+        stride_qz, stride_qh, stride_qm, stride_qk,
         N_HEAD,
         N_CTX,
         BLOCK_DMODEL=head_size,
@@ -1141,7 +1176,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         BLOCK_M2=BLOCK_M2,
         BLOCK_N2=BLOCK_N2,
         BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
-        USE_ALIBI=False if alibi_slopes is None else True,
+        USE_ALIBI=use_alibi,
         USE_EXP2=use_exp2, 
         RCP_LN2=RCP_LN2,
         LN2=LN2
