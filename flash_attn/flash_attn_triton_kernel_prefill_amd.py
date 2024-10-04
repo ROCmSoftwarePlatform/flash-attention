@@ -1059,9 +1059,9 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
 
-def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, USE_EXP2, RCP_LN2, LN2):
+def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
     if True:
-        print("attention_prefill_backward_new_impl")
+        print("attention_prefill_backward_old_impl")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
@@ -1072,9 +1072,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         print("head_size:", head_size)
         print("alibi_slopes:", alibi_slopes)
         print("layout:", layout)
-        print("USE_EXP2:", USE_EXP2)
-        print("RCP_LN2:", RCP_LN2)
-        print("LN2:", LN2)
+        print("use_exp2:", use_exp2)
 
     # the kernel wants bhsd
     if layout == "bhsd":
@@ -1153,20 +1151,22 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         BLOCK_N2=BLOCK_N2,
         BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
         USE_ALIBI=False if alibi_slopes is None else True,
-        USE_EXP2=USE_EXP2, 
+        USE_EXP2=use_exp2, 
         RCP_LN2=RCP_LN2,
         LN2=LN2
     )
 
     return dq, dk, dv, softmax_lse, None, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=True):
-    if True:
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
+    if False:
         if use_exp2:
             softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
         else:
             raise ValueError("openai backward kernel assumes exp2")
         return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout)
+    elif True:
+        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
     else:
         return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
@@ -1195,7 +1195,7 @@ class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, use_exp2 = ctx.USE_EXP2)
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.USE_EXP2)
 
 attention_prefill = _attention_prefill.apply
 

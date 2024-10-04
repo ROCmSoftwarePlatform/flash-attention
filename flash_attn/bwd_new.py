@@ -33,7 +33,6 @@ def _bwd_kernel_one_col_block(
     K,
     V,
     sm_scale,
-    qk_scale,
     Out,
     DO,
     DQ,
@@ -76,6 +75,7 @@ def _bwd_kernel_one_col_block(
     BLOCK_N: tl.constexpr,
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
     if CAUSAL:
         lo = start_n * BLOCK_M
@@ -127,8 +127,15 @@ def _bwd_kernel_one_col_block(
         else:
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, tl.trans(k))
-        qk *= qk_scale
         l_i = tl.load(l_ptrs + offs_m_curr)
+       
+        if USE_EXP2:
+            RCP_LN2: tl.constexpr = 1.4426950408889634
+            qk *= sm_scale * RCP_LN2
+            l_i *= RCP_LN2
+        else:
+            qk *= sm_scale
+
         p = tl.math.exp2(qk - l_i[:, None])
         # compute dv
         dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
@@ -199,9 +206,9 @@ def _bwd_kernel(
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SEQUENCE_PARALLEL: tl.constexpr,
-    CAUSAL: tl.constexpr
+    CAUSAL: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
-    qk_scale = sm_scale * 1.44269504
     off_hz = tl.program_id(0)
     off_z = off_hz // H
     off_h = off_hz % H
@@ -225,7 +232,6 @@ def _bwd_kernel(
                 K,
                 V,
                 sm_scale,
-                qk_scale,
                 Out,
                 DO,
                 DQ,
@@ -267,7 +273,8 @@ def _bwd_kernel(
                 ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
                 BLOCK_N=BLOCK_N,
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
-                CAUSAL=CAUSAL
+                CAUSAL=CAUSAL,
+                USE_EXP2=USE_EXP2
             )
     else:
         start_n = tl.program_id(1)
@@ -276,7 +283,6 @@ def _bwd_kernel(
             K,
             V,
             sm_scale,
-            qk_scale,
             Out,
             DO,
             DQ,
@@ -318,13 +324,14 @@ def _bwd_kernel(
             ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
             BLOCK_N=BLOCK_N,
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
-            CAUSAL=CAUSAL
+            CAUSAL=CAUSAL,
+            USE_EXP2=USE_EXP2
         )
 
 
 
 
-def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, layout):
+def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
     if DEBUG:
         print()
         print("attention_prefill_backward_new_impl")
@@ -333,12 +340,11 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
         print("k:", k, k.shape)
         print("v:", v, v.shape)
         print("o:", o, o.shape)
-        print("L:", L, L.shape)
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("sm_scale", sm_scale)
         print("head_size", head_size)
         print("alibi_slopes", alibi_slopes)
         print("layout", layout)
-
 
     # the kernel wants bhsd
     if layout == "bshd":
@@ -394,28 +400,13 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
     else:
         dq = torch.zeros_like(q, dtype=q.dtype)
 
-    if DEBUG:
-        dk = torch.zeros_like(k)
-        dv = torch.zeros_like(v)
-        delta = torch.zeros_like(L)
-    else:
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-        delta = torch.empty_like(L)
-    
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    delta = torch.empty_like(softmax_lse)
     
     batch_headsize = batch * heads_q
     num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
     num_blocks_n = cdiv(N_CTX_K, BLOCK_N)
-
-
-    # if DEBUG:
-    #     print("before _bwd_preprocess")
-    #     print("o:", o, o.shape)
-    #     print("do:", do, do.shape)
-    #     print("delta:", delta, delta.shape)
-    #     print("BLOCK_M:", BLOCK_M)
-    #     print("D_HEAD:", BLOCK_DMODEL)
 
     _bwd_preprocess[(num_blocks_m * batch_headsize,)](
         o,
@@ -424,29 +415,6 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
         BLOCK_M=BLOCK_M,
         D_HEAD=BLOCK_DMODEL,
     )
-
-    # if DEBUG:
-    #     print("after _bwd_preprocess")
-    #     print("o:", o, o.shape)
-    #     print("do:", do, do.shape)
-    #     print("delta:", delta, delta.shape)
-    #     print("BLOCK_M:", BLOCK_M)
-    #     print("D_HEAD:", BLOCK_DMODEL)
-
-    
-    # if DEBUG:
-    #     print("before _bwd_kernel")
-    #     print("q:", q, q.shape)
-    #     print("k:", k, k.shape)
-    #     print("v:", v, v.shape)
-    #     print("sm_scale", sm_scale)
-    #     print("o:", o, o.shape)
-    #     print("do:", do, do.shape)
-    #     print("dq:", dq, dq.shape)
-    #     print("dk:", dk, dk.shape)
-    #     print("dv:", dv, dv.shape)
-    #     print("L:", L, L.shape)
-    #     print("delta:", delta, delta.shape)
 
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
@@ -458,7 +426,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
         dq,
         dk,
         dv,
-        L,
+        softmax_lse,
         delta,
         o.numel(),
         q.stride(0),
@@ -487,6 +455,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
         CAUSAL=causal,
         num_warps=8,
         num_stages=1,
+        USE_EXP2=use_exp2
     )
 
     if len(dq.shape) == 5:
@@ -502,4 +471,4 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, L, sm_scale, head_size, 
     else:
         raise ValueError(f"Unknown layout {layout}")
 
-    return dq, dk, dv, None, None
+    return dq, dk, dv, None, None, None
