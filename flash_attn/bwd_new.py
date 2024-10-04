@@ -361,10 +361,11 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         print("v:", v, v.shape)
         print("o:", o, o.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("sm_scale", sm_scale)
-        print("head_size", head_size)
-        print("alibi_slopes", alibi_slopes)
-        print("layout", layout)
+        print("sm_scale:", sm_scale)
+        print("head_size:", head_size)
+        print("alibi_slopes:", alibi_slopes)
+        print("layout:", layout)
+        print("use_exp2:", use_exp2)
 
     # the kernel wants bhsd
     if layout == "bshd":
