@@ -133,10 +133,11 @@ def _bwd_kernel_one_col_block(
             RCP_LN2: tl.constexpr = 1.4426950408889634
             qk *= sm_scale * RCP_LN2
             l_i *= RCP_LN2
+            p = tl.math.exp2(qk - l_i[:, None])
         else:
             qk *= sm_scale
+            p = tl.math.exp(qk - l_i[:, None])
 
-        p = tl.math.exp2(qk - l_i[:, None])
         # compute dv
         dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
         # compute dp = dot(v, do)
