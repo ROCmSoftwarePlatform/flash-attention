@@ -1822,22 +1822,25 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # bad fa configs
-    # (1, 1, 256, 512, 16),
+    # (1, 1, 1, 1, 16),
+    # (1, 1, 4, 4, 16),
+    # (1, 1, 32, 32, 16),
     (1, 1, 64, 64, 16), # pass # smallest head_size = 16
     (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
     (1, 1, 128, 128, 64),
     (1, 1, 256, 256, 64),
     (1, 1, 512, 512, 64), 
-    # old tests that work
+    # # old tests that work
     (4, 48, 1024, 1024, 64),
     (4, 48, 2048, 2048, 64),
     (1, 24, 4096, 4096, 64),
     (1, 16, 1024, 1024, 64),
     (1, 16, 1024, 1024, 128),
-    # old tests that were commented out
+    # # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
+    # bad fa configs
+    # (1, 1, 256, 512, 16),
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [True, False])

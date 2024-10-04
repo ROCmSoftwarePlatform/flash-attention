@@ -68,6 +68,7 @@ def _bwd_kernel_one_col_block(
     off_z,
     off_hz,
     start_n,
+    num_block_m,
     num_block_n,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -84,50 +85,60 @@ def _bwd_kernel_one_col_block(
 
     if SEQUENCE_PARALLEL:
         dq_offset += stride_dqa * start_n
-    # initialize row/col offsets
-    offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_m = tl.arange(0, BLOCK_N)
+    # initialize col and head offsets
+    offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
-    # Apply masking for head dimension
+    # masks
+    mask_n = offs_n < N_CTX_K
     mask_d = offs_d < ACTUAL_BLOCK_DMODEL
+    k_mask = mask_n[:, None] & mask_d[None, :]
+    v_mask = mask_n[:, None] & mask_d[None, :]
+    
 
     # pointer to row-wise quantities in value-like data
     D_ptrs = D + off_hz * N_CTX_Q
     l_ptrs = L + off_hz * N_CTX_Q
 
     # initialize dv and dk accumulators
-    dv = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
-    dk = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+    dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
+    dk = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
 
     # load k and v once per column block
     k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
-    k = tl.load(k_ptrs, mask_d[None, :], other=0.0)
-    v = tl.load(v_ptrs, mask_d[None, :], other=0.0)
+    k = tl.load(k_ptrs, mask=k_mask, other=0.0)
+    v = tl.load(v_ptrs, mask=v_mask, other=0.0)
+    # print("k:", k)
 
     # loop over rows
-    # num_block_m = tl.cdiv(N_CTX, BLOCK_M)
-    for start_m in range(lo, num_block_n * BLOCK_M, BLOCK_M):
-        offs_m_curr = start_m + offs_m
-        q_ptrs = q_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
-        dq_ptrs = dq_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
-        do_ptrs = do_offset + offs_m_curr[:, None] * stride_qm + offs_d[None, :] * stride_qk
+    for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
+        offs_m = start_m +  tl.arange(0, BLOCK_M)
+        q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
+        dq_ptrs = dq_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
+        do_ptrs = do_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
+        
+        # update mask as row block changes
+        mask_m = offs_m < N_CTX_Q
+        q_mask = mask_m[:, None] & mask_d[None, :]
+        lse_mask = mask_m
+        p_mask = mask_m[:, None] & mask_n[None, :]
+
 
         # load q, k, v, do on-chip
-        q = tl.load(q_ptrs, mask=mask_d[None, :], other=0.0)
-        do = tl.load(do_ptrs, mask=mask_d[None, :], other=0.0)
+        q = tl.load(q_ptrs, mask=q_mask, other=0.0)
+        do = tl.load(do_ptrs, mask=q_mask, other=0.0)
 
         # recompute p = softmax(qk, dim=-1).T
         # NOTE: `do` is pre-divided by `l`; no normalization here
         if CAUSAL:
             qk = tl.where(
-                offs_m_curr[:, None] >= offs_n[None, :], float(0.0), float("-inf")
+                offs_m[:, None] >= offs_n[None, :], float(0.0), float("-inf")
             )
         else:
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, tl.trans(k))
-        l_i = tl.load(l_ptrs + offs_m_curr)
+        l_i = tl.load(l_ptrs + offs_m, mask=lse_mask)
        
         if USE_EXP2:
             RCP_LN2: tl.constexpr = 1.4426950408889634
@@ -137,11 +148,15 @@ def _bwd_kernel_one_col_block(
         else:
             qk *= sm_scale
             p = tl.math.exp(qk - l_i[:, None])
+        
+        # mask block in the cases where the data is smaller the block size
+        p = tl.where(p_mask, p, 0.0)
+
 
         # compute dv
         dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
         # compute dp = dot(v, do)
-        Di = tl.load(D_ptrs + offs_m_curr)
+        Di = tl.load(D_ptrs + offs_m)
         # dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
         dp = tl.dot(do, tl.trans(v))
         # compute ds = p * (dp - delta[:, None])
@@ -151,23 +166,24 @@ def _bwd_kernel_one_col_block(
 
         # compute dq
         if not SEQUENCE_PARALLEL:
-            dq = tl.load(dq_ptrs, mask_d[None, :], other=0.0)
+            dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
             dq += tl.dot(ds, k)
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask_d[None, :])
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
         elif SEQUENCE_PARALLEL:
             if False: # path for MMA_V3 in oai kernel
                 dq = tl.dot(ds, k)
             else:
                 # not work with mma v3, because M % 64 != 0
                 dq = tl.trans(tl.dot(tl.trans(k), tl.trans(ds)))
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask_d[None, :])
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
 
     # write-back dv and dk
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     # write-back
-    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=mask_d[None, :])
-    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=mask_d[None, :])
+    # print("dv:", dv)
+    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=v_mask)
+    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=k_mask)
 
 
 @triton.jit
@@ -225,6 +241,7 @@ def _bwd_kernel(
     dk_offset = DK + off_z * stride_kz + off_h * stride_kh
     dv_offset = DV + off_z * stride_vz + off_h * stride_vh
 
+    num_block_m = tl.cdiv(N_CTX_Q, BLOCK_M)
     num_block_n = tl.cdiv(N_CTX_K, BLOCK_N)
     if not SEQUENCE_PARALLEL:
         for start_n in range(0, num_block_n):
@@ -268,6 +285,7 @@ def _bwd_kernel(
                 off_z,
                 off_hz,
                 start_n,
+                num_block_m,
                 num_block_n,
                 BLOCK_M=BLOCK_M,
                 BLOCK_DMODEL=BLOCK_DMODEL,
@@ -319,6 +337,7 @@ def _bwd_kernel(
             off_z,
             off_hz,
             start_n,
+            num_block_m,
             num_block_n,
             BLOCK_M=BLOCK_M,
             BLOCK_DMODEL=BLOCK_DMODEL,
@@ -401,9 +420,14 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     else:
         dq = torch.zeros_like(q, dtype=q.dtype)
 
-    dk = torch.empty_like(k)
-    dv = torch.empty_like(v)
-    delta = torch.empty_like(softmax_lse)
+    if True:
+        dk = torch.zeros_like(k)
+        dv = torch.zeros_like(v)
+        delta = torch.zeros_like(softmax_lse)
+    else:
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+        delta = torch.empty_like(softmax_lse)
     
     batch_headsize = batch * heads_q
     num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
