@@ -816,7 +816,7 @@ def _bwd_kernel_dq(dq, q, K, V, do, lse, D, alibi_slope, sm_scale,
 
 
 @triton.jit
-def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
+def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, LSE, D,
               # shared by Q/K/V/DO.
               stride_qz, stride_qh, stride_qm, stride_qd,
               # H = 16, N_CTX = 1024
@@ -839,7 +839,7 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     DQ += adj
     DK += adj
     DV += adj
-    M += off_chz
+    LSE += off_chz
     D += off_chz
 
     # load K and V. they stay in SRAM throughout the inner loop for dk dv.
@@ -898,7 +898,7 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     # num_steps = (N_CTX - start_m) // BLOCK_M1
     start_m = 0
     num_blocks_m = N_CTX // BLOCK_M1
-    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_qm, stride_qd, H, N_CTX,
+    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, LSE, D, stride_qm, stride_qd, H, N_CTX,
                                BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_blocks_m, MASK=False,
                                USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
 
@@ -907,29 +907,29 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     # print("dv:", dv)
     tl.store(DV_block_ptrs, dv.to(v.dtype))
 
-    # # Write back dK.
-    # DK_block_ptrs = tl.make_block_ptr(base=DK, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
-    #                                   offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
-    # tl.store(DK_block_ptrs, dk.to(k.dtype))
+    # Write back dK.
+    DK_block_ptrs = tl.make_block_ptr(base=DK, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
+                                      offsets=(start_n, 0), block_shape=(BLOCK_N1, BLOCK_DMODEL), order=(1, 0))
+    tl.store(DK_block_ptrs, dk.to(k.dtype))
 
-    # # THIS BLOCK DOES DQ:
-    # start_m = col_block_id * BLOCK_M2
+    # THIS BLOCK DOES DQ:
+    start_m = n_block_id * BLOCK_M2
     # end_n = start_m + BLOCK_M2
 
     # MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
-    # offs_m = start_m + tl.arange(0, BLOCK_M2)
+    offs_m = start_m + tl.arange(0, BLOCK_M2)
 
-    # Q_block_ptr = tl.make_block_ptr(base=Q, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
-    #                                 offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
+    Q_block_ptr = tl.make_block_ptr(base=Q, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
+                                    offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
 
-    # DO_block_ptr = tl.make_block_ptr(base=DO, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
-    #                                  offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
-    # q = tl.load(Q_block_ptr)
-    # do = tl.load(DO_block_ptr)
-    # dq = tl.zeros([BLOCK_M2, BLOCK_DMODEL], dtype=tl.float32)
+    DO_block_ptr = tl.make_block_ptr(base=DO, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
+                                     offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
+    q = tl.load(Q_block_ptr)
+    do = tl.load(DO_block_ptr)
+    dq = tl.zeros([BLOCK_M2, BLOCK_DMODEL], dtype=tl.float32)
 
-    # m = tl.load(M + offs_m)
-    # m = m[:, None]
+    l = tl.load(LSE + offs_m)
+    l = l[:, None]
 
     # # Compute dQ for masked (diagonal) blocks.
     # # NOTE: This code scans each row of QK^T backward (from right to left,
@@ -941,15 +941,19 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     #                     BLOCK_DMODEL, start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps, MASK=True,
     #                     USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
     # end_n -= num_steps * MASK_BLOCK_N2
-    # # stage 2
+    # stage 2
+    # start_n = end_n - num_steps * BLOCK_N2
     # num_steps = end_n // BLOCK_N2
-    # dq = _bwd_kernel_dq(dq, q, K, V, do, m, D, alibi_slope, sm_scale, stride_qm, stride_qd, H, N_CTX, BLOCK_M2, BLOCK_N2,
-    #                     BLOCK_DMODEL, start_m, end_n - num_steps * BLOCK_N2, num_steps, MASK=False,
-    #                     USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
-    # # Write back dQ.
-    # DQ_block_ptr = tl.make_block_ptr(base=DQ, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
-    #                                  offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
-    # tl.store(DQ_block_ptr, dq.to(q.dtype))
+    # num_steps = end_n // BLOCK_N2
+    start_n = 0
+    num_blocks_m = N_CTX // BLOCK_M1
+    dq = _bwd_kernel_dq(dq, q, K, V, do, l, D, alibi_slope, sm_scale, stride_qm, stride_qd, H, N_CTX, BLOCK_M2, BLOCK_N2,
+                        BLOCK_DMODEL, start_m, start_n, num_blocks_m, MASK=False,
+                        USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
+    # Write back dQ.
+    DQ_block_ptr = tl.make_block_ptr(base=DQ, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
+                                     offsets=(start_m, 0), block_shape=(BLOCK_M2, BLOCK_DMODEL), order=(1, 0))
+    tl.store(DQ_block_ptr, dq.to(q.dtype))
 
 def get_shape_from_layout(q, k, metadata):
     if metadata.layout == 'thd':
