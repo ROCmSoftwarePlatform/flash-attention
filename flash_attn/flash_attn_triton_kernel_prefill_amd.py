@@ -729,9 +729,15 @@ def _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, LSE, D,
             kqT *= sm_scale
             pT = tl.math.exp(kqT - l[None, :])
         
+        # if tl.program_id(0) == 0:
+        #     print("pT:", pT)
+
+
         # Autoregressive masking.
         if MASK:
             mask = (offs_m[None, :] >= offs_n[:, None])
+            # if tl.program_id(0) == 0:
+            #     print("mask:", mask)
             pT = tl.where(mask, pT, 0.0)
         do = tl.load(DO_block_ptr)
         # Compute dV.
@@ -819,7 +825,7 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
               USE_EXP2: tl.constexpr, RCP_LN2: tl.constexpr, LN2: tl.constexpr):
 
     # grid is (num_blocks_n, 1, Batch * Heads)
-    col_block_id = tl.program_id(0)
+    n_block_id = tl.program_id(0)
     bh_id = tl.program_id(2)
     off_chz = (bh_id * N_CTX).to(tl.int64)
     adj = (stride_qh * (bh_id % H) + stride_qz * (bh_id // H)).to(tl.int64)
@@ -836,14 +842,8 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     M += off_chz
     D += off_chz
 
-    # ==================================================== Diagonal processing =================================================================
-    start_n = col_block_id * BLOCK_N1
-    # This assignment is important. It is what allows us to pick the diagonal
-    # blocks. Later, when we want to do the lower triangular, we update start_m
-    # after the first dkdv call.
-    start_m = start_n
-    
-    # load K and V
+    # load K and V. they stay in SRAM throughout the inner loop for dk dv.
+    start_n = n_block_id * BLOCK_N1
     K_block_ptr = tl.make_block_ptr(
         base=K,
         shape=(N_CTX, BLOCK_DMODEL),
@@ -860,8 +860,6 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
         block_shape=(BLOCK_N1, BLOCK_DMODEL),
         order=(1, 0),
     )
-
-    # load k and v blocks. they stay in SRAM throughout the inner loop for dkdv.
     k = tl.load(K_block_ptr)
     v = tl.load(V_block_ptr)
 
@@ -876,19 +874,32 @@ def _attn_bwd(Q, K, V, sm_scale, alibi_slopes, DO, DQ, DK, DV, M, D,
     else:
         alibi_slope = None
 
+    # This assignment is important. It is what allows us to pick the diagonal
+    # blocks. Later, when we want to do the lower triangular, we update start_m
+    # after the first dkdv call.
+    # start_m = start_n
     # compute dK and dV for blocks close to the diagonal that need to be masked
-    MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR # BLK_SLICE_FACTOR is a magical number 2
-    num_steps = BLOCK_N1 // MASK_BLOCK_M1
-    dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_qm, stride_qd, H, N_CTX,
-                               MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=True,
-                               USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
+    # MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR # BLK_SLICE_FACTOR is a magical number 2
+    # num_steps = BLOCK_N1 // MASK_BLOCK_M1
+    # dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_qm, stride_qd, H, N_CTX,
+    #                            MASK_BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=True,
+    #                            USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
 
     # compute dK and dV for blocks that don't need masking further from the diagonal
-    start_m += num_steps * MASK_BLOCK_M1
-    num_steps = (N_CTX - start_m) // BLOCK_M1
-
+    # start_m += num_steps * MASK_BLOCK_M1
+    # start_m += (BLOCK_N1 // (BLOCK_M1 // BLK_SLICE_FACTOR)) * (BLOCK_M1 // BLK_SLICE_FACTOR)
+    # start_m += BLOCK_N1
+    # start_m = start_m + BLOCK_N1
+    # start_m = start_n + BLOCK_N1
+    # start_m = (n_block_id * BLOCK_N1) + BLOCK_N1
+    # start_m = (n_block_id + 1) * BLOCK_N1
+    
+    # start_m = (n_block_id + 1) * BLOCK_N1
+    # num_steps = (N_CTX - start_m) // BLOCK_M1
+    start_m = 0
+    num_blocks_m = N_CTX // BLOCK_M1
     dk, dv = _bwd_kernel_dk_dv(dk, dv, Q, k, v, sm_scale, alibi_slope, DO, M, D, stride_qm, stride_qd, H, N_CTX,
-                               BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_steps, MASK=False,
+                               BLOCK_M1, BLOCK_N1, BLOCK_DMODEL, start_n, start_m, num_blocks_m, MASK=False,
                                USE_EXP2=USE_EXP2, RCP_LN2=RCP_LN2)
 
     DV_block_ptrs = tl.make_block_ptr(base=DV, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qd),
