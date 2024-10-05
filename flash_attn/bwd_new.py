@@ -451,12 +451,12 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     if True:
         print("_bwd_kernel inputs")
+        print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
         print("v:", v, v.shape)
         print("sm_scale", sm_scale)
         print("o:", o, o.shape)
-        print("do:", do, do.shape)
         print("dq:", dq, dq.shape)
         print("dk:", dk, dk.shape)
         print("dv:", dv, dv.shape)

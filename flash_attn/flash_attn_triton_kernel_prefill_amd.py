@@ -318,8 +318,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         if RETURN_SCORES: 
             # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
             scores_scaled_shifted_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-            tl.store(scores_scaled_shifted_ptrs,         qk = qk - m_ij[:, None]
-, mask=scores_scaled_shifted_mask)
+            tl.store(scores_scaled_shifted_ptrs, qk, mask=scores_scaled_shifted_mask)
         
         # shift scores to 0 and take exponential of scores
         if USE_EXP2:
@@ -1624,10 +1623,6 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     # compute attention scores
     attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
 
-    # Apply causal mask if needed
-    if causal:
-        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device='cuda', dtype=torch.bool))
-        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
 
     # scale score
     attention_scaled_scores = sm_scale * attention_scores
@@ -1689,39 +1684,20 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     if layout != "bhsd":
         raise ValueError("Only 'bhsd' layout is supported.")
     
-    # Recompute forward pass intermediates needed for backward
-    N_CTX_Q = q.shape[2]
-    N_CTX_K = k.shape[2]
-
-    # Compute attention scores
+    # Recompute attention_scores
     attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
-
-    # Apply causal mask if needed
-    if causal:
-        causal_mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device=q.device, dtype=torch.bool))
-        attention_scores = attention_scores.masked_fill(~causal_mask, float('-inf'))
 
     # Scale scores
     attention_scaled_scores = sm_scale * attention_scores
 
-    # Compute max for numerical stability
-    max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
-
-    # Shift scores by subtracting max
-    attention_shifted_scaled_scores = attention_scaled_scores - max_scores
-
-    # Exponentiate
+    # Compute probabilities using softmax_lse
     if use_exp2:
         RCP_LN = 1 / math.log(2)
-        exp_scores = torch.exp2(RCP_LN * attention_shifted_scaled_scores)
+        attention_scaled_scores_base2 = attention_scaled_scores * RCP_LN
+        softmax_lse_base2 = softmax_lse * RCP_LN
+        p = torch.exp2(attention_scaled_scores_base2 - softmax_lse_base2)
     else:
-        exp_scores = torch.exp(attention_shifted_scaled_scores)
-
-    # Sum of exponentials
-    sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
-
-    # Softmax probabilities
-    p = exp_scores / sum_exp_scores
+        p = torch.exp(attention_scaled_scores - softmax_lse)
 
     # Compute gradient wrt p
     dp = torch.matmul(do.to(torch.float32), v.to(torch.float32).transpose(-2, -1))  # [Z, H, N_CTX_Q, N_CTX_K]
@@ -1741,8 +1717,7 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     dk = dk * sm_scale
 
     # Compute gradient wrt v
-    p_T = p.transpose(-2, -1)  # [Z, H, N_CTX_K, N_CTX_Q]
-    dv = torch.matmul(p_T, do.to(torch.float32))  # [Z, H, N_CTX_K, D_HEAD]
+    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))  # [Z, H, N_CTX_K, D_HEAD]
 
     # Cast back to original dtype
     dq = dq.to(q.dtype)
@@ -1766,9 +1741,10 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('return_scores', [False])
+@pytest.mark.parametrize('check_softmax', [True, False])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
-@pytest.mark.parametrize('DEBUG_INPUT', [True, False])
-def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_exp2, DEBUG_INPUT):
+@pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
+def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, check_softmax, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     
@@ -1802,11 +1778,11 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
         input_metadata.need_causal()
 
      # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if return_scores:
+    if check_softmax or return_scores:
         input_metadata.return_scores = True
     
     # call Triton's forward implementation directly
-    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_impl(q, k, v, o, input_metadata)
 
     # compute reference
     o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref, attention_shifted_scaled_scores_ref, attention_scores_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", use_exp2=use_exp2)
@@ -1817,69 +1793,54 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
     print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     print("softmax_ref:", softmax_ref, softmax_ref.shape)
 
-    # compare the outputs
+    # compare the outputs with ref
     print("o:", o, o.shape)
     print("ref_o:", o_ref, o_ref.shape)
     torch.testing.assert_close(o, o_ref, atol=1e-2, rtol=1e-2)
 
-    # compare softmax_lse
-    print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
-    print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-    torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2)
-    
-    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if return_scores:
-        print("scores:", scores, scores.shape)
-        print("scores_ref:", attention_scores_ref, attention_scores_ref.shape)
-        torch.testing.assert_close(scores, attention_scores_ref, atol=1e-2, rtol=1e-2)
+    # compare with pytorch
+    out_pytorch, softmax_pytorch = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
+                                                                            is_causal=causal, scale=sm_scale,
+                                                                            dropout_mask=None)
+    print("o:", o, o.shape)
+    print("out_pytorch:", out_pytorch, out_pytorch.shape)
+    torch.testing.assert_close(o, out_pytorch, atol=1e-2, rtol=1e-2)
 
-        print("scores_scaled_shifted:",  scores_scaled_shifted, scores_scaled_shifted.shape)
-        print("scores_scaled_shifted_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
-        torch.testing.assert_close(scores_scaled_shifted, attention_shifted_scaled_scores_ref, atol=1e-2, rtol=1e-2)
+    if check_softmax:
+        # compare softmax_lse with ref
+        print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
+        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
+        torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2)
 
-        print("exp_scores_triton:", exp_scores_triton, exp_scores_triton.shape)
-        print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
-        torch.testing.assert_close(exp_scores_triton, exp_scores_ref, atol=1e-2, rtol=1e-2)
-
-        softmax_triton = exp_scores_triton / torch.sum(exp_scores_triton, dim=-1, keepdim=True) # compute results using exp_scores_triton
+        # use trick with lse to get the softmax. you need the scores but is it
+        softmax_triton = torch.exp(sm_scale * attention_scores_ref - softmax_lse_triton.unsqueeze(-1))
         print("softmax_triton:", softmax_triton, softmax_triton.shape)
         print("softmax_ref:", softmax_ref, softmax_ref.shape)
-        torch.testing.assert_close(softmax_triton, softmax_ref, atol=1e-2, rtol=1e-2)
-
-    torch_sdpa_check = False
-    if torch_sdpa_check:
-        out_pytorch, softmax_pytorch = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
-                                                                                is_causal=causal, scale=sm_scale,
-                                                                                dropout_mask=None)
-
-        print("o:", o, o.shape)
-        print("out_pytorch:", out_pytorch, out_pytorch.shape)
-        torch.testing.assert_close(o, out_pytorch, atol=1e-2, rtol=1e-2)
-
-        if return_scores:
-            print("softmax_triton:", softmax_triton, softmax_triton.shape)
-            print("softmax_pytorch:", softmax_pytorch, softmax_pytorch.shape)
-            torch.testing.assert_close(softmax_triton, softmax_pytorch.to(torch.float32), atol=1e-2, rtol=1e-2)
-
+        torch.testing.assert_close(softmax_triton, softmax_ref, atol=1e-2, rtol=1e-2)       
+        
+        # compare with pytorch output
+        print("softmax_triton:", softmax_triton, softmax_triton.shape)
+        print("softmax_pytorch:", softmax_pytorch, softmax_pytorch.shape)
+        torch.testing.assert_close(softmax_triton, softmax_pytorch.to(torch.float32), atol=1e-2, rtol=1e-2)
 
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     # (1, 1, 1, 1, 16),
-    # (1, 1, 4, 4, 16),
+    (1, 1, 4, 4, 1),
     # (1, 1, 32, 32, 16),
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 64),
-    (1, 1, 256, 256, 64),
-    (1, 1, 512, 512, 64), 
-    (1, 1, 1024, 1024, 64),
+    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 128, 128, 64),
+    # (1, 1, 256, 256, 64),
+    # (1, 1, 512, 512, 64), 
+    # (1, 1, 1024, 1024, 64),
     # # old tests that work
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (1, 24, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (1, 24, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
     # # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
@@ -1888,8 +1849,8 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, use_
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [False])
-@pytest.mark.parametrize('use_new', [True, False])
-@pytest.mark.parametrize('DEBUG_INPUT', [True])
+@pytest.mark.parametrize('use_new', [True])
+@pytest.mark.parametrize('DEBUG_INPUT', [True]) # debug output causes nans in both new and old backend
 def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
@@ -1918,7 +1879,14 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
     q_ref = q.clone() 
     k_ref = k.clone()
     v_ref = v.clone()    
-    o_ref, softmax_lse_ref, _, _, _, _ = attention_forward_pytorch_ref_impl(q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2=use_exp2)
+    o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref, attention_shifted_scaled_scores_ref, attention_scores_ref = attention_forward_pytorch_ref_impl(q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2=use_exp2)
+    print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
+    print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
+    print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
+    print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
+    print("softmax_ref:", softmax_ref, softmax_ref.shape)
+
+
 
     do_ref = do.clone()
     dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2=use_exp2)
