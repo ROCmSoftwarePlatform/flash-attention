@@ -950,6 +950,7 @@ def test_flash_attn_output(
 ):
     if USE_TRITON_ROCM:
         test_backward = True
+        DEBUG_INPUT= True
 
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported on AMD's Triton Backend yet")
@@ -960,8 +961,8 @@ def test_flash_attn_output(
         if local == True:
             pytest.skip("local sliding window attention not supported on AMD's Triton Backend yet")
 
-        if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
-            pytest.skip("Skipping configuration due to limited test time")
+        # if skip_config(seqlen_q=seqlen_q, seqlen_k=seqlen_k, d=d):
+        #     pytest.skip("Skipping configuration due to limited test time")
 
     if (
         max(seqlen_q, seqlen_k) >= 2048
@@ -978,7 +979,11 @@ def test_flash_attn_output(
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    if DEBUG_INPUT:
+        q = torch.arange(seqlen_q, dtype=dtype, device="cuda").view(1, seqlen_q, 1,  1).expand(batch_size, seqlen_q, nheads, d).contiguous().requires_grad_()
+    else:
+        q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
@@ -987,12 +992,16 @@ def test_flash_attn_output(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     else:
-        k = torch.randn(
-            batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
-        )
-        v = torch.randn(
-            batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
-        )
+        if DEBUG_INPUT:
+            k = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size,seqlen_k,  nheads_k, d).contiguous().requires_grad_()
+            v = torch.arange(seqlen_k, dtype=dtype, device="cuda").view(1, seqlen_k, 1, 1).expand(batch_size, seqlen_k, nheads_k,  d).contiguous().requires_grad_()
+        else:
+            k = torch.randn(
+                batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
+            )
+            v = torch.randn(
+                batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
+            )
     if alibi:
         alibi_slopes = torch.rand(batch_size, nheads, device=device, dtype=torch.float32) * 0.3
         attn_bias = attn_bias_from_alibi_slopes(alibi_slopes, seqlen_q, seqlen_k, causal=causal)
@@ -1128,7 +1137,10 @@ def test_flash_attn_output(
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
 
-    g = torch.randn_like(out)
+    if DEBUG_INPUT:
+        g = torch.ones_like(out).contiguous()
+    else:
+        g = torch.randn_like(out)
     do_o = (g.float() * out.float()).sum(-1)
     test_backward = test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90))
     if test_backward:
@@ -1179,6 +1191,8 @@ def test_flash_attn_output(
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
+    print("out:", out, out.shape)
+    print("out_ref:", out_ref, out_ref.shape)
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
     if dropout_p > 0.0:
@@ -1188,9 +1202,18 @@ def test_flash_attn_output(
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
     if test_backward:
-        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
-        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+        print("dv:", dv, dv.shape)
+        print("dv_ref:", dv_ref, dv_ref.shape)
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
+        
+        print("dk:", dk, dk.shape)
+        print("dk_ref:", dk_ref, dk_ref.shape)
+        assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
+
+        print("dq:", dq, dq.shape)
+        print("dq_ref:", dq_ref, dq_ref.shape)
+        assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
+        
 
 
 @pytest.mark.parametrize("kvpacked", [True, False])

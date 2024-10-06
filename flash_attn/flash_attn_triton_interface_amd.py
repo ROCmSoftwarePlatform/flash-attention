@@ -94,11 +94,8 @@ def bwd(
     if dropout_p != 0.0:
         raise ValueError("dropout is not supported on AMD yet")
 
-    if out is None:
-        out = torch.empty_like(q)
-
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
-    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, softmax_scale, head_size, alibi_slopes, causal, "bshd", False, True)
+    _, _, _, _, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, dq, dk, dv, softmax_scale, head_size, alibi_slopes, causal, "bshd", False, True)
 
     softmax_d = None # fill this in
     if True:

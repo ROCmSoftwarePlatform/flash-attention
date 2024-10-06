@@ -361,7 +361,10 @@ def _bwd_kernel(
 
 
 
-def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
+def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
+
+    DEBUG_INPUT=True
+
     if DEBUG:
         print()
         print("attention_prefill_backward_new_impl")
@@ -371,6 +374,9 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         print("v:", v, v.shape)
         print("o:", o, o.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
+        print("dq:", dq, dq.shape if dq else None)
+        print("dk:", dk, dk.shape if dk else None)
+        print("dv:", dv, dv.shape if dv else None)
         print("sm_scale:", sm_scale)
         print("head_size:", head_size)
         print("alibi_slopes:", alibi_slopes)
@@ -379,12 +385,12 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     # the kernel wants bhsd
     if layout == "bshd":
-        do = do.transpose(1, 2)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        o = o.transpose(1, 2)
-        # TODO: does L/M need to be transposed
+        do = do.transpose(1, 2).contiguous()
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        o = o.transpose(1, 2).contiguous()
+        # TODO: does L/M need to be transposed. possible to use strides
 
         if DEBUG:
             print("After layout change")
@@ -427,18 +433,46 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
     if sequence_parallel:
         replicas = cdiv(N_CTX_K, BLOCK_N)
         new_dq_shape = (replicas,) + q.shape
-        dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
+        if dq is None:
+            if DEBUG_INPUT:
+                dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
+            else:
+                dq = torch.empty(new_dq_shape, device=q.device, dtype=q.dtype)
     else:
-        dq = torch.zeros_like(q, dtype=q.dtype)
+        if dq is None:
+            if DEBUG_INPUT:
+                dq = torch.zeros_like(q, dtype=q.dtype)
+            else:
+                dq = torch.empty_like(q, dtype=q.dtype)
 
-    if True:
-        dk = torch.zeros_like(k)
-        dv = torch.zeros_like(v)
+    if dk is None:
+        if DEBUG_INPUT:
+            dk = torch.zeros_like(k)
+        else:
+            dk = torch.empty_like(k)
+ 
+        
+    if dv is None:
+        if DEBUG_INPUT:
+            dv = torch.zeros_like(v)
+        else:
+            dv = torch.empty_like(v)
+        
+    if DEBUG_INPUT:
         delta = torch.zeros_like(softmax_lse)
     else:
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
         delta = torch.empty_like(softmax_lse)
+
+    # assert contigious
+    assert do.is_contiguous()
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert v.is_contiguous()
+    assert o.is_contiguous()
+    assert softmax_lse.is_contiguous()
+    assert dq.is_contiguous()
+    assert dk.is_contiguous()
+    assert dv.is_contiguous()
     
     batch_headsize = batch * heads_q
     num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
@@ -489,8 +523,8 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         print("ACTUAL_BLOCK_DMODEL:",ACTUAL_BLOCK_DMODEL)
         print("SEQUENCE_PARALLEL:",sequence_parallel)
         print("CAUSAL:",causal)
-        print("num_warps:",8)
-        print("num_stages:", 1)
+        print("num_warps:",num_warps)
+        print("num_stages:", num_stages)
         print("USE_EXP2:", use_exp2)
 
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
@@ -521,8 +555,8 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
         SEQUENCE_PARALLEL=sequence_parallel,
         CAUSAL=causal,
-        num_warps=8,
-        num_stages=1,
+        num_warps=num_warps,
+        num_stages=num_stages,
         USE_EXP2=use_exp2
     )
 
