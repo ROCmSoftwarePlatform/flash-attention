@@ -1680,46 +1680,43 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
         return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
 
 def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2=False):
-    # Ensure the layout is 'bhsd'
+    # ensure the layout is 'bhsd'
     if layout != "bhsd":
         raise ValueError("Only 'bhsd' layout is supported.")
     
-    # Recompute attention_scores
+    # recompute attention_scores
     attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
 
-    # Scale scores
+    # scale scores
     attention_scaled_scores = sm_scale * attention_scores
 
-    # Compute probabilities using softmax_lse
+    # compute probabilities using softmax_lse
     if use_exp2:
         RCP_LN = 1 / math.log(2)
         attention_scaled_scores_base2 = attention_scaled_scores * RCP_LN
         softmax_lse_base2 = softmax_lse * RCP_LN
-        p = torch.exp2(attention_scaled_scores_base2 - softmax_lse_base2)
+        p = torch.exp2(attention_scaled_scores_base2 - softmax_lse_base2.unsqueeze(-1))
     else:
-        p = torch.exp(attention_scaled_scores - softmax_lse)
+        p = torch.exp(attention_scaled_scores - softmax_lse.unsqueeze(-1))
 
-    # Compute gradient wrt p
-    dp = torch.matmul(do.to(torch.float32), v.to(torch.float32).transpose(-2, -1))  # [Z, H, N_CTX_Q, N_CTX_K]
+    # compute gradient wrt v
+    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
 
-    # Compute ds = p * (dp - (dp * p).sum(dim=-1, keepdim=True))
+    # compute ds = p * (dp - (dp * p).sum(dim=-1, keepdim=True))
+    dp = torch.matmul(do.to(torch.float32), v.to(torch.float32).transpose(-2, -1))
     dp_dot_p = dp * p  # Element-wise multiplication
     sum_dp_p = torch.sum(dp_dot_p, dim=-1, keepdim=True)  # Sum over last dimension
     ds = p * (dp - sum_dp_p)
 
-    # Compute gradient wrt q
-    dq = torch.matmul(ds, k.to(torch.float32))  # [Z, H, N_CTX_Q, D_HEAD]
+    # compute gradient wrt q
+    dq = torch.matmul(ds, k.to(torch.float32))
     dq = dq * sm_scale
 
-    # Compute gradient wrt k
-    ds_T = ds.transpose(-2, -1)  # [Z, H, N_CTX_K, N_CTX_Q]
-    dk = torch.matmul(ds_T, q.to(torch.float32))  # [Z, H, N_CTX_K, D_HEAD]
+    # compute gradient wrt k
+    dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
     dk = dk * sm_scale
 
-    # Compute gradient wrt v
-    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))  # [Z, H, N_CTX_K, D_HEAD]
-
-    # Cast back to original dtype
+    # cast back to original dtype
     dq = dq.to(q.dtype)
     dk = dk.to(k.dtype)
     dv = dv.to(v.dtype)
@@ -1826,21 +1823,22 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 16),
-    (1, 1, 4, 4, 1),
+    # (1, 1, 1, 1, 1),
+    # (1, 1, 4, 4, 4),
+    # (1, 1, 4, 4, 16),
     # (1, 1, 32, 32, 16),
-    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64),
-    # (1, 1, 256, 256, 64),
-    # (1, 1, 512, 512, 64), 
-    # (1, 1, 1024, 1024, 64),
-    # # old tests that work
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (1, 24, 4096, 4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64),
+    (1, 1, 256, 256, 64),
+    (1, 1, 512, 512, 64), 
+    (1, 1, 1024, 1024, 64),
+    # old tests that work
+    (4, 48, 1024, 1024, 64),
+    (4, 48, 2048, 2048, 64),
+    (1, 24, 4096, 4096, 64),
+    (1, 16, 1024, 1024, 64),
+    (1, 16, 1024, 1024, 128),
     # # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
@@ -1848,9 +1846,9 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     # (1, 1, 256, 512, 16),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [False])
+@pytest.mark.parametrize('use_exp2', [True, False])
 @pytest.mark.parametrize('use_new', [True])
-@pytest.mark.parametrize('DEBUG_INPUT', [True]) # debug output causes nans in both new and old backend
+@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
 def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
@@ -1885,8 +1883,6 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
     print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
     print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     print("softmax_ref:", softmax_ref, softmax_ref.shape)
-
-
 
     do_ref = do.clone()
     dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2=use_exp2)
