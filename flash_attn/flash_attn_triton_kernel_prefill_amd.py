@@ -1237,7 +1237,7 @@ class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.USE_EXP2)
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.USE_EXP2, True)
 
 attention_prefill = _attention_prefill.apply
 
@@ -1477,16 +1477,16 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # failing FA
-    # (1, 1, 256, 512, 16),
     # smallest config test
-    # (1, 1, 16, 16, 64), # fail
-    # (1, 1, 32, 32, 64), # fail
+    (1, 1, 16, 16, 64), # pass on new # fail on old
+    (1, 1, 32, 32, 64), # pass on new # fail on old
     (1, 1, 64, 64, 16), # pass # smallest head_size = 16
     (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
     (1, 1, 128, 128, 64), # pass
     (1, 1, 256, 256, 64), # pass
     (1, 1, 512, 512, 64), # pass
+    # failing FA
+    (1, 1, 256, 512, 16),
     # old tests that work
     (4, 48, 1024, 1024, 64), # pass
     (4, 48, 2048, 2048, 64), # pass
