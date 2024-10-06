@@ -14,13 +14,24 @@ def _bwd_preprocess(
     DO,
     Delta,
     BLOCK_M: tl.constexpr,
-    D_HEAD: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    N_CTX_Q: tl.constexpr
 ):
     off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    off_n = tl.arange(0, D_HEAD)
+    off_d = tl.arange(0, BLOCK_DMODEL)
+    
+    # create masks
+    # mask_m = off_m < N_CTX_Q
+    mask_d = off_d < ACTUAL_BLOCK_DMODEL
+    # o_mask = None
+    # o_mask = mask_m[:, None]
+    o_mask = mask_d[None, :]
+    # o_mask = mask_m[:, None] & mask_d[None, :]
+
     # load
-    o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
-    do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
+    o = tl.load(Out + off_m[:, None] * ACTUAL_BLOCK_DMODEL + off_d[None, :], mask=o_mask).to(tl.float32)
+    do = tl.load(DO + off_m[:, None] * ACTUAL_BLOCK_DMODEL + off_d[None, :], mask=o_mask).to(tl.float32)
     # compute
     delta = tl.sum(o * do, axis=1)
     # write-back
@@ -151,8 +162,6 @@ def _bwd_kernel_one_col_block(
         
         # mask block in the cases where the data is smaller the block size
         p = tl.where(p_mask, p, 0.0)
-
-
         # compute dv
         dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
         # compute dp = dot(v, do)
@@ -160,7 +169,8 @@ def _bwd_kernel_one_col_block(
         # dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
         dp = tl.dot(do, tl.trans(v))
         # compute ds = p * (dp - delta[:, None])
-        ds = (p * (dp - Di[:, None]) * sm_scale).to(Q.dtype.element_ty)
+        ds = (p * (dp - Di[:, None]) * sm_scale)
+        ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         # compute dk = dot(ds.T, q)
         dk += tl.dot(tl.trans(ds), q)
 
@@ -439,7 +449,9 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, sm_scale, h
         do,
         delta,
         BLOCK_M=BLOCK_M,
-        D_HEAD=BLOCK_DMODEL,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+        N_CTX_Q=N_CTX_Q
     )
 
     stride_dqa = o.numel()

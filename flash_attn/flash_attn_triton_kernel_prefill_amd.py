@@ -1702,19 +1702,20 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     # compute gradient wrt v
     dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
 
-    # compute ds = p * (dp - (dp * p).sum(dim=-1, keepdim=True))
+    # compute dp
     dp = torch.matmul(do.to(torch.float32), v.to(torch.float32).transpose(-2, -1))
-    dp_dot_p = dp * p  # Element-wise multiplication
-    sum_dp_p = torch.sum(dp_dot_p, dim=-1, keepdim=True)  # Sum over last dimension
-    ds = p * (dp - sum_dp_p)
 
-    # compute gradient wrt q
-    dq = torch.matmul(ds, k.to(torch.float32))
-    dq = dq * sm_scale
+    # calculate ds
+    delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
+    ds = p * (dp - delta)
 
     # compute gradient wrt k
     dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
     dk = dk * sm_scale
+
+    # compute gradient wrt q
+    dq = torch.matmul(ds, k.to(torch.float32))
+    dq = dq * sm_scale
 
     # cast back to original dtype
     dq = dq.to(q.dtype)
@@ -1823,17 +1824,19 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1),
-    # (1, 1, 4, 4, 4),
-    # (1, 1, 4, 4, 16),
-    # (1, 1, 32, 32, 16),
+    (1, 1, 1, 1, 1),
+    (1, 1, 4, 4, 4),
+    (1, 1, 4, 4, 16),
+    (1, 1, 32, 32, 16),
     (1, 1, 64, 64, 16), # pass # smallest head_size = 16
     (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 45),
     (1, 1, 128, 128, 64),
     (1, 1, 256, 256, 64),
     (1, 1, 512, 512, 64), 
     (1, 1, 1024, 1024, 64),
     # old tests that work
+    (4, 48, 1024, 1024, 73),
     (4, 48, 1024, 1024, 64),
     (4, 48, 2048, 2048, 64),
     (1, 24, 4096, 4096, 64),
