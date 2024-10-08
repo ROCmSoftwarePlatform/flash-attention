@@ -135,7 +135,6 @@ def _bwd_kernel_one_col_block(
         lse_mask = mask_m
         p_mask = mask_m[:, None] & mask_n[None, :]
 
-
         # load q, k, v, do on-chip
         q = tl.load(q_ptrs, mask=q_mask, other=0.0)
         do = tl.load(do_ptrs, mask=q_mask, other=0.0)
@@ -176,8 +175,11 @@ def _bwd_kernel_one_col_block(
 
         # compute dq
         if not SEQUENCE_PARALLEL:
-            dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
-            dq += tl.dot(ds, k)
+            if 0: # work with bwd and bwd_impl
+                dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
+                dq += tl.dot(ds, k)
+            else:
+                dq = tl.dot(ds, k) # this works on fa for cases below 128 but breaks bwd tests. We need to accumlate dq
             tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
         elif SEQUENCE_PARALLEL:
             if False: # path for MMA_V3 in oai kernel
@@ -491,7 +493,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
     stride_dqa = o.numel()
     stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
     stride_kz, stride_kh, stride_kn, stride_kk = k.stride(0),  k.stride(1), k.stride(2),  k.stride(3)
-    stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1),v.stride(2),  v.stride(3)
+    stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1), v.stride(2),  v.stride(3)
     num_warps = 8
     num_stages =1
 

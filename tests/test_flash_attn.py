@@ -264,6 +264,11 @@ def attention_ref(
         output: (batch_size, seqlen_q, nheads, head_dim)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
     """
+    print()
+    if upcast==False and reorder_ops==True:
+        print("attention_ref_py")
+    else:
+        print("attention_ref")
     print("upcast:", upcast)
     print("reorder_ops:", reorder_ops)
     if causal:
@@ -932,8 +937,12 @@ def test_flash_attn_varlen_qkvpacked(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (2, 4)
-        # (4, 4)
+        (2, 4),
+        (4, 4),
+        (16, 16),
+        (32, 32),
+        (64, 64),
+        (128, 128),
         # (113, 203),
         # (128, 217),
         # (113, 211),
@@ -956,7 +965,7 @@ def test_flash_attn_output(
 ):
     if USE_TRITON_ROCM:
         test_backward = True
-        DEBUG_INPUT= True
+        DEBUG_INPUT= False
 
         if dropout_p != 0.0:
             pytest.skip("Dropout not supported on AMD's Triton Backend yet")
@@ -1215,10 +1224,12 @@ def test_flash_attn_output(
         
         print("dk:", dk, dk.shape)
         print("dk_ref:", dk_ref, dk_ref.shape)
+        print("dk_pt:", dk_pt, dk_pt.shape)
         assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
 
         print("dq:", dq, dq.shape)
         print("dq_ref:", dq_ref, dq_ref.shape)
+        print("dq_pt:", dq_pt, dq_pt.shape)
         assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
         
 
