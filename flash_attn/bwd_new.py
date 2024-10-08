@@ -58,7 +58,9 @@ def _bwd_kernel_one_col_block(
     dq_offset,
     dk_offset,
     dv_offset,
-    stride_dqa,
+    d_ptrs,
+    l_ptrs,
+    stride_dq_all,
     stride_qz,
     stride_qh,
     stride_qm,
@@ -94,8 +96,6 @@ def _bwd_kernel_one_col_block(
     else:
         lo = 0
 
-    if SEQUENCE_PARALLEL:
-        dq_offset += stride_dqa * start_n
     # initialize col and head offsets
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
@@ -106,10 +106,6 @@ def _bwd_kernel_one_col_block(
     k_mask = mask_n[:, None] & mask_d[None, :]
     v_mask = mask_n[:, None] & mask_d[None, :]
     
-
-    # pointer to row-wise quantities in value-like data
-    D_ptrs = D + off_hz * N_CTX_Q
-    l_ptrs = L + off_hz * N_CTX_Q
 
     # initialize dv and dk accumulators
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
@@ -164,7 +160,7 @@ def _bwd_kernel_one_col_block(
         # compute dv
         dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
         # compute dp = dot(v, do)
-        Di = tl.load(D_ptrs + offs_m)
+        Di = tl.load(d_ptrs + offs_m)
         # dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
         dp = tl.dot(do, tl.trans(v))
         # compute ds = p * (dp - delta[:, None])
@@ -175,7 +171,7 @@ def _bwd_kernel_one_col_block(
 
         # compute dq
         if not SEQUENCE_PARALLEL:
-            if 0: # work with bwd and bwd_impl
+            if 1: # work with bwd and bwd_impl
                 dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
                 dq += tl.dot(ds, k)
             else:
@@ -211,7 +207,7 @@ def _bwd_kernel(
     DV,
     L,
     D,
-    stride_dqa,
+    stride_dq_all,
     stride_qz,
     stride_qh,
     stride_qm,
@@ -228,8 +224,8 @@ def _bwd_kernel(
     H,
     N_CTX_Q,
     N_CTX_K,
-    Z_H_N_CTX,
-    SQ_Z_H_N_CTX,
+    num_block_m,
+    num_block_n,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -238,77 +234,31 @@ def _bwd_kernel(
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
 ):
+    # program ids
     off_hz = tl.program_id(0)
+    if SEQUENCE_PARALLEL:
+        start_n = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H
 
+    # input tensor offsets
     q_offset = Q + off_z * stride_qz + off_h * stride_qh
     k_offset = K + off_z * stride_kz + off_h * stride_kh
     v_offset = V + off_z * stride_vz + off_h * stride_vh
     do_offset = DO + off_z * stride_qz + off_h * stride_qh
-    if SEQUENCE_PARALLEL:
-        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh # use SQ_Z_H_N_CTX
-    else:
-        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh # use Z_H_N_CTX
+    l_ptrs = L + off_hz * N_CTX_Q # softmax lse from forward pass. used to recompute attention from forward
+    d_ptrs = D + off_hz * N_CTX_Q # delta(o*do summed for each row) TODO: explain delta
+
+    # output tensor offsets
     dk_offset = DK + off_z * stride_kz + off_h * stride_kh
     dv_offset = DV + off_z * stride_vz + off_h * stride_vh
-
-    num_block_m = tl.cdiv(N_CTX_Q, BLOCK_M)
-    num_block_n = tl.cdiv(N_CTX_K, BLOCK_N)
-    if not SEQUENCE_PARALLEL:
-        for start_n in range(0, num_block_n):
-            _bwd_kernel_one_col_block(
-                Q,
-                K,
-                V,
-                sm_scale,
-                Out,
-                DO,
-                DQ,
-                DK,
-                DV,
-                L,
-                D,
-                q_offset,
-                k_offset,
-                v_offset,
-                do_offset,
-                dq_offset,
-                dk_offset,
-                dv_offset,
-                stride_dqa,
-                stride_qz,
-                stride_qh,
-                stride_qm,
-                stride_qk,
-                stride_kz,
-                stride_kh,
-                stride_kn,
-                stride_kk,
-                stride_vz,
-                stride_vh,
-                stride_vn,
-                stride_vk,
-                Z,
-                H,
-                N_CTX_Q,
-                N_CTX_K,
-                off_h,
-                off_z,
-                off_hz,
-                start_n,
-                num_block_m,
-                num_block_n,
-                BLOCK_M=BLOCK_M,
-                BLOCK_DMODEL=BLOCK_DMODEL,
-                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-                BLOCK_N=BLOCK_N,
-                SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
-                CAUSAL=CAUSAL,
-                USE_EXP2=USE_EXP2
-            )
+    if SEQUENCE_PARALLEL:
+        dq_offset = DQ + stride_dq_all * start_n + off_z * stride_qz + off_h * stride_qh
     else:
-        start_n = tl.program_id(1)
+        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh
+
+    # inner loop 
+    if SEQUENCE_PARALLEL:
         _bwd_kernel_one_col_block(
             Q,
             K,
@@ -328,7 +278,9 @@ def _bwd_kernel(
             dq_offset,
             dk_offset,
             dv_offset,
-            stride_dqa,
+            d_ptrs,
+            l_ptrs,
+            stride_dq_all,
             stride_qz,
             stride_qh,
             stride_qm,
@@ -359,9 +311,60 @@ def _bwd_kernel(
             CAUSAL=CAUSAL,
             USE_EXP2=USE_EXP2
         )
-
-
-
+    else:
+        for start_n in range(0, num_block_n):
+            _bwd_kernel_one_col_block(
+                Q,
+                K,
+                V,
+                sm_scale,
+                Out,
+                DO,
+                DQ,
+                DK,
+                DV,
+                L,
+                D,
+                q_offset,
+                k_offset,
+                v_offset,
+                do_offset,
+                dq_offset,
+                dk_offset,
+                dv_offset,
+                d_ptrs,
+                l_ptrs,
+                stride_dq_all,
+                stride_qz,
+                stride_qh,
+                stride_qm,
+                stride_qk,
+                stride_kz,
+                stride_kh,
+                stride_kn,
+                stride_kk,
+                stride_vz,
+                stride_vh,
+                stride_vn,
+                stride_vk,
+                Z,
+                H,
+                N_CTX_Q,
+                N_CTX_K,
+                off_h,
+                off_z,
+                off_hz,
+                start_n,
+                num_block_m,
+                num_block_n,
+                BLOCK_M=BLOCK_M,
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+                BLOCK_N=BLOCK_N,
+                SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
+                CAUSAL=CAUSAL,
+                USE_EXP2=USE_EXP2
+            )
 
 def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
 
@@ -425,6 +428,11 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
     assert (head_size_q == head_size_q == head_size)
 
     batch = batch_q
+
+    # divide up the problem
+    num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
+    num_blocks_n = cdiv(N_CTX_K, BLOCK_N)
+
     # get closest power of 2 over or equal to 32.
     padded_d_model = 1 << (head_size - 1).bit_length()
     padded_d_model = max(padded_d_model, 16)
@@ -433,7 +441,8 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
 
     do = do.contiguous()
     if sequence_parallel:
-        replicas = cdiv(N_CTX_K, BLOCK_N)
+        # replicate q for each parallel sequence
+        replicas = num_blocks_n
         new_dq_shape = (replicas,) + q.shape
         if dq is None:
             if DEBUG_INPUT:
@@ -477,8 +486,6 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
     assert dv.is_contiguous()
     
     batch_headsize = batch * heads_q
-    num_blocks_m = cdiv(N_CTX_Q, BLOCK_M)
-    num_blocks_n = cdiv(N_CTX_K, BLOCK_N)
 
     _bwd_preprocess[(num_blocks_m * batch_headsize,)](
         o,
@@ -490,12 +497,12 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         N_CTX_Q=N_CTX_Q
     )
 
-    stride_dqa = o.numel()
+    stride_dq_all = dq.numel()
     stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
     stride_kz, stride_kh, stride_kn, stride_kk = k.stride(0),  k.stride(1), k.stride(2),  k.stride(3)
     stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1), v.stride(2),  v.stride(3)
     num_warps = 8
-    num_stages =1
+    num_stages = 1
 
     if False:
         print("_bwd_kernel inputs")
@@ -541,7 +548,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         dv,
         softmax_lse,
         delta,
-        stride_dqa,
+        stride_dq_all,
         stride_qz, stride_qh, stride_qm, stride_qk,
         stride_kz, stride_kh, stride_kn, stride_kk,
         stride_vz, stride_vh, stride_vn, stride_vk,
@@ -549,8 +556,8 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         heads_q,
         N_CTX_Q,
         N_CTX_K,
-        batch_q * head_size_q * N_CTX_Q,
-        num_blocks_n * batch_q * head_size_q * N_CTX_Q,
+        num_blocks_m,
+        num_blocks_n,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_DMODEL=BLOCK_DMODEL,
