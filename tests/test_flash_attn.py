@@ -264,6 +264,8 @@ def attention_ref(
         output: (batch_size, seqlen_q, nheads, head_dim)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
     """
+    print("upcast:", upcast)
+    print("reorder_ops:", reorder_ops)
     if causal:
         window_size = (window_size[0], 0)
     dtype_og = q.dtype
@@ -277,6 +279,7 @@ def attention_ref(
         scores = torch.einsum("bthd,bshd->bhts", q / math.sqrt(d), k)
     else:
         scores = torch.einsum("bthd,bshd->bhts", q, k / math.sqrt(d))
+    print("scores_ref:", scores)
     if softcap > 0:
         scores = scores / softcap
         scores = scores.tanh()
@@ -296,7 +299,9 @@ def attention_ref(
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
+    print("lse_ref:", torch.logsumexp(scores, dim=-1))
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
+    print("attention_ref:", attention)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
         attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
@@ -928,6 +933,7 @@ def test_flash_attn_varlen_qkvpacked(
     "seqlen_q,seqlen_k",
     [
         (2, 4)
+        # (4, 4)
         # (113, 203),
         # (128, 217),
         # (113, 211),
@@ -1204,6 +1210,7 @@ def test_flash_attn_output(
     if test_backward:
         print("dv:", dv, dv.shape)
         print("dv_ref:", dv_ref, dv_ref.shape)
+        print("dv_pt:", dv_pt, dv_pt.shape)
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
         
         print("dk:", dk, dk.shape)

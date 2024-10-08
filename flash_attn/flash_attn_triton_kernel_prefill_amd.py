@@ -58,7 +58,7 @@ class MetaData():
     v_new = None
     dropout_p, return_scores= 0.0, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
-    USE_EXP2 = True
+    use_exp2 = True
     
 
     def __repr__(self) -> str:
@@ -1035,7 +1035,14 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
         exp_scores = None
 
     # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
+    # if metadata.layout == "bhsd":
     softmax_lse = torch.empty((batch, nheads_q, metadata.max_seqlens_q), device=q.device, dtype=torch.float32)
+    # elif metadata.layout == "bshd":
+    #     softmax_lse = torch.empty((batch, metadata.max_seqlens_q, nheads_q), device=q.device, dtype=torch.float32)
+    # else:
+    #     print("metadat.layout:",  metadata.layout)
+    #     raise ValueError("unknown layout")
+
 
     # Seed the RNG so we get reproducible results for testing.
     philox_seed = 0x1BF52
@@ -1061,7 +1068,7 @@ def attention_prefill_forward_impl(q, k, v, o, metadata):
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if metadata.bias is None else True,
                     USE_ALIBI=False if metadata.alibi_slopes is None else True, ENABLE_DROPOUT=metadata.dropout_p
                     > 0.0, return_scores=metadata.return_scores,
-                    USE_EXP2=metadata.USE_EXP2, LN2=LN2, RCP_LN2=RCP_LN2, RETURN_SCORES=metadata.return_scores)
+                    USE_EXP2=metadata.use_exp2, LN2=LN2, RCP_LN2=RCP_LN2, RETURN_SCORES=metadata.return_scores)
 
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
@@ -1231,13 +1238,13 @@ class _attention_prefill(torch.autograd.Function):
         ctx.exp_scores = exp_scores
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
-        ctx.USE_EXP2 = metadata.USE_EXP2
+        ctx.use_exp2 = metadata.use_exp2
         return o, softmax_lse, exp_scores
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, None, None, None, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.USE_EXP2, True)
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, None, None, None, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.use_exp2, True)
 
 attention_prefill = _attention_prefill.apply
 
@@ -1771,7 +1778,7 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     input_metadata.max_seqlens_q = N_CTX_Q
     input_metadata.max_seqlens_k = N_CTX_K
     input_metadata.layout = layout
-    input_metadata.USE_EXP2 = use_exp2
+    input_metadata.use_exp2 = use_exp2
     if causal:
         input_metadata.need_causal()
 

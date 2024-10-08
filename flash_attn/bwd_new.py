@@ -392,7 +392,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         o = o.transpose(1, 2).contiguous()
         # TODO: does L/M need to be transposed. possible to use strides
 
-        if DEBUG:
+        if False:
             print("After layout change")
             print("do:", do, do.shape)
             print("q:", q, q.shape)
@@ -495,7 +495,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
     num_warps = 8
     num_stages =1
 
-    if True:
+    if False:
         print("_bwd_kernel inputs")
         print("do:", do, do.shape)
         print("q:", q, q.shape)

@@ -16,6 +16,24 @@ def fwd(q,
         softcap,
         return_softmax,
         gen_):
+    
+    if True:
+        print()
+        print("flash_attn_triton_amd.py::fwd")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o)
+        print("alibi_slopes:", alibi_slopes)
+        print("dropout_p:", dropout_p)
+        print("softmax_scale:", softmax_scale)
+        print("causal:", causal)
+        print("window_size_left:", window_size_left)
+        print("window_size_right:", window_size_right)
+        print("softcap:", softcap)
+        print("softcap:", softcap)
+        print("return_softmax:", return_softmax)
+
 
     if dropout_p != 0.0:
         raise ValueError("dropout is not supported on AMD's Triton Backend yet")
@@ -28,6 +46,7 @@ def fwd(q,
     input_metadata.max_seqlens_q = q.shape[1]
     input_metadata.max_seqlens_k = k.shape[1]
     input_metadata.layout = "bshd"
+    input_metadata.use_exp2 = False
     if return_softmax:
         input_metadata.return_encoded_softmax = True
 
@@ -72,14 +91,14 @@ def bwd(
     if True:
         print()
         print("flash_attn_triton_amd.py::bwd")
-        print("dout:", dout, dout.shape, dout.stride())
-        print("q:", q, q.shape, q.stride())
-        print("k:", k, k.shape, k.stride())
-        print("v:", v, v.shape, v.stride())
-        print("softmax_lse:", softmax_lse)
-        print("dq:", dq, dq.shape, dq.stride())
-        print("dk:", dk, dk.shape, dk.stride())
-        print("dv:", dv, dv.shape, dv.stride())
+        print("dout:", dout, dout.shape)
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
         print("out:", out)
@@ -98,7 +117,7 @@ def bwd(
     _, _, _, _, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, dq, dk, dv, softmax_scale, head_size, alibi_slopes, causal, "bshd", False, True)
 
     softmax_d = None # fill this in
-    if True:
+    if False:
         print()
         print("bwd output")
         print("dq:", dq, dq.shape)
