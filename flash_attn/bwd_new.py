@@ -119,6 +119,8 @@ def _bwd_kernel_one_col_block(
     # print("k:", k)
     # print("v:", v)
 
+    NO_PREPROCESSING = False
+
     # loop over rows
     for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
         offs_m = start_m + tl.arange(0, BLOCK_M)
@@ -148,7 +150,8 @@ def _bwd_kernel_one_col_block(
         # print("qk:", qk)
         l_i = tl.load(l_ptrs + offs_m, mask=mask_m)
         # print("l_i:", l_i)
-       
+
+        # compute p
         if USE_EXP2:
             RCP_LN2: tl.constexpr = 1.4426950408889634
             qk *= sm_scale * RCP_LN2
@@ -158,7 +161,6 @@ def _bwd_kernel_one_col_block(
             qk *= sm_scale
             p = tl.math.exp(qk - l_i[:, None])
         # print("p:", p)
-
         # mask block in the cases where the data is smaller the block size
         p_mask = mask_m[:, None] & mask_n[None, :]
         p = tl.where(p_mask, p, 0.0)
@@ -167,15 +169,19 @@ def _bwd_kernel_one_col_block(
         # compute dv
         dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
         # print("dv:", dv)
-        # compute dp = dot(v, do)
-        Di = tl.load(d_ptrs + offs_m)
-        # Di = tl.load(d_ptrs + offs_m, mask=mask_m)
-        # print("Di:", Di)
-        # dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
+
+        # compute dp
         dp = tl.dot(do, tl.trans(v))
         # print("dp:", dp)
-        # compute ds = p * (dp - delta[:, None])
-        ds = (p * (dp - Di[:, None]) * sm_scale)
+
+        # compute ds , ds = p * (dp - delta[:, None])
+        if NO_PREPROCESSING:
+            delta = tl.sum(p * dp, axis=1)
+            delta = tl.where(mask_m, delta, 0.0)
+            ds = (p * (dp - delta[:, None])) * sm_scale
+        else:
+            Di = tl.load(d_ptrs + offs_m, mask=mask_m)
+            ds = (p * (dp - Di[:, None])) * sm_scale
         # print("ds:", ds)
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         # print("ds masked:", ds)
