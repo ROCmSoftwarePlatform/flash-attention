@@ -382,7 +382,7 @@ def _bwd_kernel(
 
 def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
 
-    DEBUG_INPUT=True
+    DEBUG_INPUT=False
 
     if DEBUG:
         print()
@@ -458,25 +458,21 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         # replicate q for each parallel sequence
         replicas = num_blocks_n
         new_dq_shape = (replicas,) + q.shape
-        if dq is None:
-            if DEBUG_INPUT:
-                dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
-            else:
-                dq = torch.empty(new_dq_shape, device=q.device, dtype=q.dtype)
+        if dq is None: 
+            dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
     else:
         if dq is None:
-            if DEBUG_INPUT:
-                dq = torch.zeros_like(q, dtype=q.dtype)
-            else:
-                dq = torch.empty_like(q, dtype=q.dtype)
+            dq = torch.zeros_like(q, dtype=q.dtype)
 
+    # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
+    dq.zero_()
+    
     if dk is None:
         if DEBUG_INPUT:
             dk = torch.zeros_like(k)
         else:
             dk = torch.empty_like(k)
- 
-        
+
     if dv is None:
         if DEBUG_INPUT:
             dv = torch.zeros_like(v)

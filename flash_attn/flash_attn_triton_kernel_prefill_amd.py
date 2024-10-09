@@ -1900,12 +1900,11 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
     softmax_lse = softmax_lse_ref.clone()
-    if True: # FIXME: when zeros it works but when empty it fails
-        dq = torch.zeros_like(q, dtype=q.dtype)
+    dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
+    if DEBUG_INPUT:
         dk = torch.zeros_like(k, dtype=k.dtype)
         dv = torch.zeros_like(v, dtype=v.dtype)
     else:
-        dq = torch.empty_like(q, dtype=q.dtype)
         dk = torch.empty_like(k, dtype=k.dtype)
         dv = torch.empty_like(v, dtype=v.dtype)
     dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=use_exp2, use_new=use_new)
