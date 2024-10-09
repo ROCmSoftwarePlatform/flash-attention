@@ -1214,14 +1214,27 @@ def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm
         else:
             raise ValueError("openai backward kernel assumes exp2")
         return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout)
-    elif use_new:
-        # return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
-    
-        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse,  sm_scale, causal, layout, use_exp2=use_exp2)
-        dq.copy_(dq_ref)
-        dk.copy_(dk_ref) 
-        dv.copy_(dv_ref)
+    elif True:
+        # test pytorch impl
+        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2=use_exp2)
+        if dq is not None:
+            dq.copy_(dq_ref)
+        else:
+            dq = dq_ref
+        
+        if dk is not None:
+            dk.copy_(dk_ref)
+        else:
+            dk = dk_ref
+
+        if dv is not None:
+            dv.copy_(dv_ref)
+        else:
+            dv = dv_ref
+            
         return dq, dk, dv, None, None, None
+    elif use_new:
+        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
     else:
         return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
@@ -1936,7 +1949,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
         dv = torch.empty_like(v, dtype=v.dtype)
 
     do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, dq_ref, dk_ref, dv_ref, sm_scale, causal, layout, use_exp2=use_exp2)
+    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2=use_exp2)
 
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
