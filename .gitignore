@@ -28,3 +28,4 @@ var/
 venv
 scripts
 *.log
+core.*
