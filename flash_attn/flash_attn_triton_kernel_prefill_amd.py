@@ -1214,7 +1214,7 @@ def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm
         else:
             raise ValueError("openai backward kernel assumes exp2")
         return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout)
-    elif True:
+    elif False:
         # test pytorch impl
         dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2=use_exp2)
         if dq is not None:
@@ -1471,7 +1471,7 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v[start_k:end_k])
     attention_prefill(q, k, v, tri_out, input_metadata)
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ref_out, tri_out, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX, D_HEAD', [(2, 48, 24, 128, 64), (4, 48, 12, 256, 64), (4, 48, 4, 512, 64),
@@ -1499,7 +1499,7 @@ def test_op_varlen_mqa_fwd(Z, HQ, HK, N_CTX, D_HEAD, causal, dtype=torch.float16
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
     attention_prefill(q, k, v, tri_out, input_metadata)
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ref_out, tri_out, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -1776,6 +1776,12 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
 
     return dq, dk, dv
 
+
+# fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
+# ATOL, RTOL = 1e-2, 1e-2 # old standard. to lose. 
+ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
+# ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
+
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 1, 1, 1),
     (1, 1, 4, 4, 16),
@@ -1846,7 +1852,7 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     # compare the outputs with ref
     print("o:", o, o.shape)
     print("ref_o:", o_ref, o_ref.shape)
-    torch.testing.assert_close(o, o_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(o, o_ref, atol=ATOL, rtol=RTOL)
 
     # compare with pytorch
     out_pytorch, softmax_pytorch = torch.ops.aten._scaled_dot_product_attention_math(q, k, v, dropout_p=dropout_p,
@@ -1854,24 +1860,24 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
                                                                             dropout_mask=None)
     print("o:", o, o.shape)
     print("out_pytorch:", out_pytorch, out_pytorch.shape)
-    torch.testing.assert_close(o, out_pytorch, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(o, out_pytorch, atol=ATOL, rtol=RTOL)
 
     if check_softmax:
         # compare softmax_lse with ref
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-        torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
 
         # use trick with lse to get the softmax. you need the scores but is it
         softmax_triton = torch.exp(sm_scale * attention_scores_ref - softmax_lse_triton.unsqueeze(-1))
         print("softmax_triton:", softmax_triton, softmax_triton.shape)
         print("softmax_ref:", softmax_ref, softmax_ref.shape)
-        torch.testing.assert_close(softmax_triton, softmax_ref, atol=1e-2, rtol=1e-2)       
+        torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)       
         
         # compare with pytorch output
         print("softmax_triton:", softmax_triton, softmax_triton.shape)
         print("softmax_pytorch:", softmax_pytorch, softmax_pytorch.shape)
-        torch.testing.assert_close(softmax_triton, softmax_pytorch.to(torch.float32), atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(softmax_triton, softmax_pytorch.to(torch.float32), atol=ATOL, rtol=RTOL)
 
 
 
@@ -1960,15 +1966,13 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
     print()
     print("dv:", dv, dv.shape)
     print("dv_ref:", dv_ref, dv_ref.shape)
-    torch.testing.assert_close(dv, dv_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
     print("dk:", dk, dk.shape)
     print("dk_ref:", dk_ref, dk_ref.shape)
-    torch.testing.assert_close(dk, dk_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
     print("dq:", dq, dq.shape)
     print("dq_ref:", dq_ref, dq_ref.shape)
-    torch.testing.assert_close(dq, dq_ref, atol=1e-2, rtol=1e-2)
-
-
+    torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
 
 def nonvarlen_benchmark_configs():
     configs = [
