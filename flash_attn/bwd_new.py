@@ -186,7 +186,7 @@ def _bwd_kernel_one_col_block(
 
         # compute dq
         if SEQUENCE_PARALLEL:
-            if False: # path for MMA_V3 in oai kernel
+            if True: # path for MMA_V3 in oai kernel
                 dq = tl.dot(ds, k)
             else:
                 # not work with mma v3, because M % 64 != 0
@@ -207,7 +207,14 @@ def _bwd_kernel_one_col_block(
     tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=k_mask)
     tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=v_mask)
 
-
+# @triton.autotune(
+#     configs=[
+#         triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'waves_per_eu': 1, 'PRE_LOAD_V': False}, num_stages=1,
+#                       num_warps=4),
+#     ],
+#     key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
+#     use_cuda_graph=True,
+# )
 @triton.jit
 def _bwd_kernel(
     Q,
@@ -511,7 +518,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
     stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
     stride_kz, stride_kh, stride_kn, stride_kk = k.stride(0),  k.stride(1), k.stride(2),  k.stride(3)
     stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1), v.stride(2),  v.stride(3)
-    num_warps = 8 # NOTE: changing this to one caused issues be careful
+    num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
 
     if True:

@@ -937,6 +937,7 @@ def test_flash_attn_varlen_qkvpacked(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
+        (4, 4),
         (113, 203),
         (128, 217),
         (113, 211),
@@ -1214,16 +1215,21 @@ def test_flash_attn_output(
         print("dv:", dv, dv.shape)
         print("dv_ref:", dv_ref, dv_ref.shape)
         print("dv_pt:", dv_pt, dv_pt.shape)
+        # fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
+        ATOL, RTOL = 1e-4, 1e-3
+        # torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
         
         print("dk:", dk, dk.shape)
         print("dk_ref:", dk_ref, dk_ref.shape)
         print("dk_pt:", dk_pt, dk_pt.shape)
+        # torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
         assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
 
         print("dq:", dq, dq.shape)
         print("dq_ref:", dq_ref, dq_ref.shape)
         print("dq_pt:", dq_pt, dq_pt.shape)
+        # torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
         assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
         
 

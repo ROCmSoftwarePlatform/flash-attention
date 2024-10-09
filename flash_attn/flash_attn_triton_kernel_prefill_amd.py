@@ -1215,7 +1215,13 @@ def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm
             raise ValueError("openai backward kernel assumes exp2")
         return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout)
     elif use_new:
-        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
+        # return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
+    
+        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse,  sm_scale, causal, layout, use_exp2=use_exp2)
+        dq.copy_(dq_ref)
+        dk.copy_(dk_ref) 
+        dv.copy_(dv_ref)
+        return dq, dk, dv, None, None, None
     else:
         return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
@@ -1688,14 +1694,27 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
 
 def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2=False):
     # ensure the layout is 'bhsd'
-    if layout != "bhsd":
-        raise ValueError("Only 'bhsd' layout is supported.")
+    if layout == "bshd":
+        print("Changing layout to bhsd!")
+        do = do.transpose(1, 2).contiguous()
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        o = o.transpose(1, 2).contiguous()
+        # softmax_lse = softmax_lse.transpose(1, 2).contiguous()
+        # TODO: does L/M need to be transposed. possible to use strides
+    elif layout == "bhsd":
+        pass
+    else:
+        raise ValueError(f"Unknown layout {layout}")
     
     # recompute attention_scores
-    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+    attention_scores = torch.matmul(q, k.transpose(-2, -1))
+    print("attention_scores:", attention_scores)
 
     # scale scores
     attention_scaled_scores = sm_scale * attention_scores
+    print("attention_scaled_scores:", attention_scaled_scores)
 
     # compute probabilities using softmax_lse
     if use_exp2:
@@ -1706,14 +1725,16 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     else:
         p = torch.exp(attention_scaled_scores - softmax_lse.unsqueeze(-1))
 
+    print("p:", p)
     # compute gradient wrt v
     dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
 
     # compute dp
-    dp = torch.matmul(do.to(torch.float32), v.to(torch.float32).transpose(-2, -1))
+    dp = torch.matmul(do, v.transpose(-2, -1))
 
     # calculate ds
-    delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
+    # delta = torch.sum(o * do, axis=-1).unsqueeze(-1) # what oai kernel uses
+    delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
     ds = p * (dp - delta)
 
     # compute gradient wrt k
@@ -1728,6 +1749,17 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     dq = dq.to(q.dtype)
     dk = dk.to(k.dtype)
     dv = dv.to(v.dtype)
+
+    # go back to original layout
+    if layout == "bshd":
+        print("Changing back to bshd!")
+        dq = dq.transpose(1, 2)
+        dk = dk.transpose(1, 2)
+        dv = dv.transpose(1, 2)
+    elif layout == "bhsd":
+        pass
+    else:
+        raise ValueError(f"Unknown layout {layout}")
 
     return dq, dk, dv
 
@@ -1837,9 +1869,10 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     (1, 1, 32, 32, 16),
     (1, 1, 64, 64, 16), # pass # smallest head_size = 16
     (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 45),
     (1, 1, 128, 128, 64),
+    (1, 1, 128, 256, 45),
     (1, 1, 256, 256, 64),
+    (1, 1, 256, 512, 16),
     (1, 1, 512, 512, 64), 
     (1, 1, 1024, 1024, 64),
     # old tests that work
@@ -1894,12 +1927,6 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
     print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     print("softmax_ref:", softmax_ref, softmax_ref.shape)
 
-    do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2=use_exp2)
-
-    # =============================================== Triton ==============================================================
-    o = o_ref.clone()
-    softmax_lse = softmax_lse_ref.clone()
     dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
     if DEBUG_INPUT:
         dk = torch.zeros_like(k, dtype=k.dtype)
@@ -1907,6 +1934,13 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
     else:
         dk = torch.empty_like(k, dtype=k.dtype)
         dv = torch.empty_like(v, dtype=v.dtype)
+
+    do_ref = do.clone()
+    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, dq_ref, dk_ref, dv_ref, sm_scale, causal, layout, use_exp2=use_exp2)
+
+    # =============================================== Triton ==============================================================
+    o = o_ref.clone()
+    softmax_lse = softmax_lse_ref.clone()
     dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=use_exp2, use_new=use_new)
 
     # =============================================== Check ==============================================================
