@@ -9,7 +9,7 @@ from triton import cdiv
 DEBUG = True
 
 @triton.jit
-def _bwd_preprocess(
+def _bwd_preprocess_use_o(
     Out,
     DO,
     Delta,
@@ -37,6 +37,93 @@ def _bwd_preprocess(
     # write-back
     tl.store(Delta + off_m, delta)
 
+
+@triton.jit
+def _bwd_preprocess_use_p(
+    Q,       # Pointer to queries
+    K,       # Pointer to keys
+    V,       # Pointer to values
+    DO,      # Pointer to gradients of the output
+    LSE,     # Pointer to log-sum-exp from forward pass
+    Delta,   # Pointer to store delta
+    sm_scale,    # Softmax scaling factor
+    stride_dq_all,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    N_CTX_Q: tl.constexpr,  # Number of query tokens
+    N_CTX_K: tl.constexpr,  # Number of key tokens
+    BLOCK_M: tl.constexpr,  # Block size for M dimension
+    BLOCK_N: tl.constexpr,  # Block size for N dimension
+    BLOCK_DMODEL: tl.constexpr,  # Block size for model dimension
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    USE_EXP2: tl.constexpr,      # Whether to use exp2 for exponentials
+):
+    # Compute program IDs for blocks
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    pid_bh = tl.program_id(2)
+
+    # Compute offsets for M and N dimensions
+    off_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    off_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    off_d = tl.arange(0, BLOCK_DMODEL)
+
+    # Create masks for bounds checking
+    mask_m = off_m < N_CTX_Q
+    mask_n = off_n < N_CTX_K
+    mask_d = off_d < ACTUAL_BLOCK_DMODEL
+    q_mask = mask_m[:, None] & mask_d[None, :]
+    k_mask = mask_n[:, None] & mask_d[None, :]
+    v_mask = mask_n[:, None] & mask_d[None, :]
+
+    # Pointers to q and k
+    q_ptrs = Q + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
+    k_ptrs = K + off_n[:, None] * stride_kn + off_d[None, :] * stride_kk
+
+    # Load q and k
+    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
+    k = tl.load(k_ptrs, mask=k_mask, other=0.0)
+
+    # Compute qk = q @ k^T
+    qk = tl.dot(q, tl.trans(k))
+
+    # Load LSE
+    lse = tl.load(LSE + off_m, mask=mask_m, other=float('-inf'))
+
+    # Compute softmax probabilities
+    if USE_EXP2:
+        RCP_LN2: tl.constexpr = 1.4426950408889634
+        qk_scaled = qk * sm_scale * RCP_LN2
+        lse_scaled = lse * RCP_LN2
+        p = tl.exp2(qk_scaled - lse_scaled[:, None])
+    else:
+        qk_scaled = qk * sm_scale
+        p = tl.exp(qk_scaled - lse[:, None])
+
+    # Load DO and V
+    do_ptrs = DO + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
+    v_ptrs = V + off_n[:, None] * stride_vn + off_d[None, :] * stride_vk
+    do = tl.load(do_ptrs, mask=q_mask, other=0.0)
+    v = tl.load(v_ptrs, mask=v_mask, other=0.0)
+
+    # Compute dp = do @ V^T
+    dp = tl.dot(do, tl.trans(v))
+
+    # Compute delta = sum over n of p * dp
+    delta = tl.sum(p * dp, axis=1)
+
+    # Write back delta
+    tl.store(Delta + off_m, delta, mask=mask_m)
 
 @triton.jit
 def _bwd_kernel_one_col_block(
@@ -482,7 +569,7 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
 
     # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
     dq.zero_()
-    
+
     if dk is None:
         if DEBUG_INPUT:
             dk = torch.zeros_like(k)
@@ -494,7 +581,6 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
             dv = torch.zeros_like(v)
         else:
             dv = torch.empty_like(v)
-        
 
     # assert contigious
     assert do.is_contiguous()
@@ -506,30 +592,61 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
     assert dq.is_contiguous()
     assert dk.is_contiguous()
     assert dv.is_contiguous()
-    
+
     batch_headsize = batch * heads_q
-
-    if preprocessing:
-        if True:
-            delta = torch.zeros_like(softmax_lse)
-        else:
-            delta = torch.empty_like(softmax_lse)
-        _bwd_preprocess[(batch_headsize * num_blocks_m,)](
-            o,
-            do,
-            delta,
-            BLOCK_M=BLOCK_M,
-            BLOCK_DMODEL=BLOCK_DMODEL,
-            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-            N_CTX_Q=N_CTX_Q
-        )
-
     stride_dq_all = dq.numel()
     stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
     stride_kz, stride_kh, stride_kn, stride_kk = k.stride(0),  k.stride(1), k.stride(2),  k.stride(3)
     stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1), v.stride(2),  v.stride(3)
     num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
+
+    if preprocessing:
+        if True:
+            delta = torch.zeros_like(softmax_lse)
+        else:
+            delta = torch.empty_like(softmax_lse)
+        if True:
+            _bwd_preprocess_use_p[(num_blocks_m, num_blocks_n, batch_headsize)](
+                q,
+                k,
+                v,
+                do,
+                softmax_lse,
+                delta,
+                sm_scale,
+                stride_dq_all,
+                stride_qz,
+                stride_qh,
+                stride_qm,
+                stride_qk,
+                stride_kz,
+                stride_kh,
+                stride_kn,
+                stride_kk,
+                stride_vz,
+                stride_vh,
+                stride_vn,
+                stride_vk,
+                N_CTX_Q,
+                N_CTX_K,
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_N,
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+                USE_EXP2=use_exp2,
+            )
+        else:
+            _bwd_preprocess_use_o[(batch_headsize * num_blocks_m,)](
+                o,
+                do,
+                delta,
+                BLOCK_M=BLOCK_M,
+                BLOCK_DMODEL=BLOCK_DMODEL,
+                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+                N_CTX_Q=N_CTX_Q
+            )
+
 
     if True:
         print("_bwd_kernel inputs")
