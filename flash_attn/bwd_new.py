@@ -90,6 +90,7 @@ def _bwd_kernel_one_col_block(
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    PREPROCESSING: tl.constexpr,
 ):
     if CAUSAL:
         lo = start_n * BLOCK_M
@@ -118,8 +119,6 @@ def _bwd_kernel_one_col_block(
     v = tl.load(v_ptrs, mask=v_mask, other=0.0)
     # print("k:", k)
     # print("v:", v)
-
-    NO_PREPROCESSING = False
 
     # loop over rows
     for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
@@ -175,13 +174,13 @@ def _bwd_kernel_one_col_block(
         # print("dp:", dp)
 
         # compute ds , ds = p * (dp - delta[:, None])
-        if NO_PREPROCESSING:
+        if PREPROCESSING:
+            Di = tl.load(d_ptrs + offs_m, mask=mask_m)
+            ds = (p * (dp - Di[:, None])) * sm_scale
+        else:
             delta = tl.sum(p * dp, axis=1)
             delta = tl.where(mask_m, delta, 0.0)
             ds = (p * (dp - delta[:, None])) * sm_scale
-        else:
-            Di = tl.load(d_ptrs + offs_m, mask=mask_m)
-            ds = (p * (dp - Di[:, None])) * sm_scale
         # print("ds:", ds)
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         # print("ds masked:", ds)
@@ -260,6 +259,7 @@ def _bwd_kernel(
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    PREPROCESSING: tl.constexpr
 ):
     # program ids
     off_hz = tl.program_id(0)
@@ -336,7 +336,8 @@ def _bwd_kernel(
             BLOCK_N=BLOCK_N,
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
             CAUSAL=CAUSAL,
-            USE_EXP2=USE_EXP2
+            USE_EXP2=USE_EXP2,
+            PREPROCESSING=PREPROCESSING
         )
     else:
         for start_n in range(0, num_block_n):
@@ -390,10 +391,11 @@ def _bwd_kernel(
                 BLOCK_N=BLOCK_N,
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
                 CAUSAL=CAUSAL,
-                USE_EXP2=USE_EXP2
+                USE_EXP2=USE_EXP2,
+                PREPROCESSING=PREPROCESSING
             )
 
-def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
+def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing):
 
     DEBUG_INPUT=False
 
@@ -414,6 +416,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         print("alibi_slopes:", alibi_slopes)
         print("layout:", layout)
         print("use_exp2:", use_exp2)
+        print("preprocessing:", preprocessing)
 
     # the kernel wants bhsd
     if layout == "bshd":
@@ -510,15 +513,16 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
     
     batch_headsize = batch * heads_q
 
-    _bwd_preprocess[(batch_headsize * num_blocks_m,)](
-        o,
-        do,
-        delta,
-        BLOCK_M=BLOCK_M,
-        BLOCK_DMODEL=BLOCK_DMODEL,
-        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-        N_CTX_Q=N_CTX_Q
-    )
+    if preprocessing:
+        _bwd_preprocess[(batch_headsize * num_blocks_m,)](
+            o,
+            do,
+            delta,
+            BLOCK_M=BLOCK_M,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+            N_CTX_Q=N_CTX_Q
+        )
 
     stride_dq_all = dq.numel()
     stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
@@ -558,6 +562,7 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         print("num_warps:",num_warps)
         print("num_stages:", num_stages)
         print("USE_EXP2:", use_exp2)
+        print("preprocessing:", preprocessing)
 
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
@@ -587,9 +592,10 @@ def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv,
         ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
         SEQUENCE_PARALLEL=sequence_parallel,
         CAUSAL=causal,
+        USE_EXP2=use_exp2,
+        PREPROCESSING=preprocessing,
         num_warps=num_warps,
         num_stages=num_stages,
-        USE_EXP2=use_exp2
     )
 
     if len(dq.shape) == 5:

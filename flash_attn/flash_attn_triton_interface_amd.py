@@ -114,7 +114,7 @@ def bwd(
         raise ValueError("dropout is not supported on AMD yet")
 
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
-    _, _, _, _, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, dq, dk, dv, softmax_scale, head_size, alibi_slopes, causal, "bshd", False, True)
+    _, _, _, _, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, dq, dk, dv, softmax_scale, head_size, alibi_slopes, causal, "bshd", False, True, True)
 
     softmax_d = None # fill this in
     if False:

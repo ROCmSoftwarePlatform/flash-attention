@@ -59,6 +59,7 @@ class MetaData():
     dropout_p, return_scores= 0.0, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = True
+    bwd_preprocessing = True
     
 
     def __repr__(self) -> str:
@@ -1207,16 +1208,16 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     return dq, dk, dv, softmax_lse, None, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, use_new):
+def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing, use_new):
     if False:
         if use_exp2:
             softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
         else:
             raise ValueError("openai backward kernel assumes exp2")
         return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout)
-    elif True:
+    elif False:
         # test pytorch impl
-        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2=use_exp2)
+        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing)
         if dq is not None:
             dq.copy_(dq_ref)
         else:
@@ -1234,7 +1235,7 @@ def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm
             
         return dq, dk, dv, None, None, None
     elif use_new:
-        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
+        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing)
     else:
         return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
@@ -1258,12 +1259,13 @@ class _attention_prefill(torch.autograd.Function):
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
         ctx.use_exp2 = metadata.use_exp2
+        ctx.preprocessing = metadata.preprocessing
         return o, softmax_lse, exp_scores
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, None, None, None, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.use_exp2, True)
+        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, None, None, None, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.use_exp2, ctx.preprocessing, True)
 
 attention_prefill = _attention_prefill.apply
 
@@ -1705,7 +1707,7 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     else:
         return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
 
-def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2):
+def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing):
     # ensure the layout is 'bhsd'
     if layout == "bshd":
         print("Changing layout to bhsd!")
@@ -1745,12 +1747,11 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     # compute dp
     dp = torch.matmul(do, v.transpose(-2, -1))
 
-    NO_PREPROCESSING = True
     # calculate ds
-    if NO_PREPROCESSING:
-        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
-    else:
+    if preprocessing:
         delta = torch.sum(o * do, axis=-1).unsqueeze(-1) # what oai kernel uses
+    else:
+        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
     ds = (p * (dp - delta)) * sm_scale
 
     # compute gradient wrt k
@@ -1910,9 +1911,10 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [True, False])
+@pytest.mark.parametrize('preprocessing', [True, False])
 @pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, DEBUG_INPUT):
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preprocessing, use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
     
@@ -1956,12 +1958,12 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
         dv = torch.empty_like(v, dtype=v.dtype)
 
     do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2=use_exp2)
+    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2, preprocessing)
 
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
     softmax_lse = softmax_lse_ref.clone()
-    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2=use_exp2, use_new=use_new)
+    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing, use_new=use_new)
 
     # =============================================== Check ==============================================================
     print()
