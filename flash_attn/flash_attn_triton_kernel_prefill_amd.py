@@ -30,8 +30,8 @@ import triton
 import triton.language as tl
 
 from triton import cdiv
-from .bwd_new import attention_prefill_backward_new_impl
-from .bwd_oai import attention_prefill_backward_oai_impl
+from .bwd_new import attention_prefill_backward_triton_new_impl
+from .bwd_oai import attention_prefill_backward_triton_oai_impl
 
 
 DEBUG = True
@@ -1073,10 +1073,10 @@ def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
 
-def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
+def attention_prefill_backward_triton_old_impl(do, q, k, v, o, softmax_lse, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2):
     if True:
         print()
-        print("attention_prefill_backward_old_impl")
+        print("attention_prefill_backward_triton_old_impl")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
@@ -1213,15 +1213,32 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
             softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
         else:
             raise ValueError("openai backward kernel assumes exp2")
-        return attention_prefill_backward_oai_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout)
-    elif False:
+        return attention_prefill_backward_triton_oai_impl(
+            do,
+            q,
+            k,
+            v,
+            o,
+            softmax_lse,
+            dq,
+            dk,
+            dv,
+            sm_scale,
+            head_size,
+            alibi_slopes,
+            causal,
+            layout,
+        )
+    elif True:
         # test pytorch impl
-        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing)
+        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(
+            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing
+        )
         if dq is not None:
             dq.copy_(dq_ref)
         else:
             dq = dq_ref
-        
+
         if dk is not None:
             dk.copy_(dk_ref)
         else:
@@ -1231,12 +1248,12 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
             dv.copy_(dv_ref)
         else:
             dv = dv_ref
-            
+
         return dq, dk, dv, None, None, None
     elif use_new:
-        return attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing)
+        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing)
     else:
-        return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
+        return attention_prefill_backward_triton_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
 
 class _attention_prefill(torch.autograd.Function):

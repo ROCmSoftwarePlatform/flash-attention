@@ -374,12 +374,12 @@ def _bwd_kernel(
         )
 
 
-def attention_prefill_backward_oai_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, causal, layout, sequence_parallel=False):
+def attention_prefill_backward_triton_oai_impl(do, q, k, v, o, L, sm_scale, head_size, alibi_slopes, causal, layout, sequence_parallel=False):
     DEBUG = True
     
     if DEBUG:
         print()
-        print("attention_prefill_backward_oai_impl")
+        print("attention_prefill_backward_triton_oai_impl")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)

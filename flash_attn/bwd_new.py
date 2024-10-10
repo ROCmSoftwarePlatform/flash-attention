@@ -395,13 +395,13 @@ def _bwd_kernel(
                 PREPROCESSING=PREPROCESSING
             )
 
-def attention_prefill_backward_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing):
+def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing):
 
     DEBUG_INPUT=False
 
     if DEBUG:
         print()
-        print("attention_prefill_backward_new_impl")
+        print("attention_prefill_backward_triton_new_impl")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
