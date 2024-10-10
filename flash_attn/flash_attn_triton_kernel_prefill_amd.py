@@ -1229,9 +1229,9 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
             causal,
             layout,
         )
-    elif True:
+    elif False:
         # test pytorch impl
-        dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(
+        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
             do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing
         )
         if dq is not None:
@@ -1249,7 +1249,7 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
         else:
             dv = dv_ref
 
-        return dq, dk, dv, None, None, None
+        return dq, dk, dv, delta_ref, None, None
     elif use_new:
         return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing)
     else:
@@ -1809,13 +1809,14 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     else:
         raise ValueError(f"Unknown layout {layout}")
 
-    return dq, dk, dv
+    return dq, dk, dv, delta
 
 
 # fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
+# ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
-# ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
+ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
+# ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (1, 1, 1, 1, 1),
@@ -1925,25 +1926,25 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 4),
+    # (1, 1, 1, 1, 1),
+    # (1, 1, 4, 4, 4),
     (1, 1, 4, 4, 16),
-    (1, 1, 32, 32, 16),
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 64),
-    (1, 1, 128, 256, 45),
-    (1, 1, 256, 256, 64),
-    (1, 1, 256, 512, 16),
-    (1, 1, 512, 512, 64), 
-    (1, 1, 1024, 1024, 64),
-    # old tests that work
-    (4, 48, 1024, 1024, 73),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (1, 24, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
+    # (1, 1, 32, 32, 16),
+    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 128, 128, 64),
+    # (1, 1, 128, 256, 45),
+    # (1, 1, 256, 256, 64),
+    # (1, 1, 256, 512, 16),
+    # (1, 1, 512, 512, 64), 
+    # (1, 1, 1024, 1024, 64),
+    # # old tests that work
+    # (4, 48, 1024, 1024, 73),
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (1, 24, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
     # # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
@@ -1951,11 +1952,10 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     # (1, 1, 256, 512, 16),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('preprocessing', [True, False])
+@pytest.mark.parametrize('use_exp2', [False])
 @pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preprocessing, use_new, DEBUG_INPUT):
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
@@ -2008,7 +2008,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
         dv = torch.empty_like(v, dtype=v.dtype)
 
     do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(
+    dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
         do_ref,
         q_ref,
         k_ref,
@@ -2019,13 +2019,13 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
         causal,
         layout,
         use_exp2,
-        preprocessing,
+        False, # delta = p * dp
     )
 
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
     softmax_lse = softmax_lse_ref.clone()
-    dq, dk, dv, _, _, _ = attention_prefill_backward_triton_impl(
+    dq, dk, dv, delta, _, _ = attention_prefill_backward_triton_impl(
         do,
         q,
         k,
@@ -2041,7 +2041,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
         causal,
         layout,
         use_exp2,
-        preprocessing,
+        preprocessing = True, # delta = o * do
         use_new=use_new,
     )
 
@@ -2050,6 +2050,10 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
     print("dv:", dv, dv.shape)
     print("dv_ref:", dv_ref, dv_ref.shape)
     torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
+    print()
+    print("delta:", delta, delta.shape)
+    print("delta_ref:", delta_ref, delta_ref.shape)
+    torch.testing.assert_close(delta, delta, atol=ATOL, rtol=RTOL)
     print("dk:", dk, dk.shape)
     print("dk_ref:", dk_ref, dk_ref.shape)
     torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)

@@ -495,10 +495,6 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
         else:
             dv = torch.empty_like(v)
         
-    if DEBUG_INPUT:
-        delta = torch.zeros_like(softmax_lse)
-    else:
-        delta = torch.empty_like(softmax_lse)
 
     # assert contigious
     assert do.is_contiguous()
@@ -514,6 +510,10 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
     batch_headsize = batch * heads_q
 
     if preprocessing:
+        if True:
+            delta = torch.zeros_like(softmax_lse)
+        else:
+            delta = torch.empty_like(softmax_lse)
         _bwd_preprocess[(batch_headsize * num_blocks_m,)](
             o,
             do,
@@ -611,4 +611,4 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
     else:
         raise ValueError(f"Unknown layout {layout}")
 
-    return dq, dk, dv, None, None, None
+    return dq, dk, dv, delta, None, None
