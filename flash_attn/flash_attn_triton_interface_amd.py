@@ -1,6 +1,6 @@
 import torch
 import triton
-from .flash_attn_triton_kernel_prefill_amd import MetaData, get_shape_from_layout, attention_prefill_forward_impl, attention_prefill_backward_impl
+from .flash_attn_triton_kernel_prefill_amd import MetaData, get_shape_from_layout, attention_prefill_forward_triton_impl, attention_prefill_backward_triton_impl
 from .flash_attn_triton_kernel_decode_amd import attention_decode
 
 def fwd(q,
@@ -63,7 +63,7 @@ def fwd(q,
     
     # Check arguments
     input_metadata.check_args(q, k, v, o)
-    o_triton, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    o_triton, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_triton_impl(q, k, v, o, input_metadata)
 
     return o_triton, q , k , v, o, softmax_lse, exp_scores, None
 
@@ -114,7 +114,25 @@ def bwd(
         raise ValueError("dropout is not supported on AMD yet")
 
     batch, max_seqlens_q, nheads_q,  head_size = q.shape
-    _, _, _, _, _, _ = attention_prefill_backward_impl(dout, q, k, v, out, softmax_lse, dq, dk, dv, softmax_scale, head_size, alibi_slopes, causal, "bshd", False, True, True)
+    _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        dq,
+        dk,
+        dv,
+        softmax_scale,
+        head_size,
+        alibi_slopes,
+        causal,
+        "bshd",
+        False,
+        True,
+        True,
+    )
 
     softmax_d = None # fill this in
     if False:
@@ -177,7 +195,7 @@ def varlen_fwd(
     # Check arguments
     input_metadata.check_args(q, k, v, o)
 
-    tri_out, softmax_lse, softmax_dmask= attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    tri_out, softmax_lse, softmax_dmask = attention_prefill_forward_triton_impl(q, k, v, o, input_metadata)
 
     return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
 

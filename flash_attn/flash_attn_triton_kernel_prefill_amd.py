@@ -993,8 +993,7 @@ def get_strides_from_layout(q, k, v, o, metadata):
     return q_strides, k_strides, v_strides, o_strides
 
 
-
-def attention_prefill_forward_impl(q, k, v, o, metadata):
+def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
     # NOTE: a large bias tensor leads to overflow during pointer arithmetic
     if (metadata.bias is not None):
         assert (metadata.bias.numel() < 2**31)
@@ -1208,7 +1207,7 @@ def attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, sm_scale, h
 
     return dq, dk, dv, softmax_lse, None, None
 
-def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing, use_new):
+def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing, use_new):
     if False:
         if use_exp2:
             softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
@@ -1240,11 +1239,10 @@ def attention_prefill_backward_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm
         return attention_prefill_backward_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
 
-
 class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_impl(q, k, v, o, metadata)
+        o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, metadata)
 
         ctx.save_for_backward(q, k, v, o, softmax_lse)
         ctx.grid = grid
@@ -1265,7 +1263,25 @@ class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd
         q, k, v, o, softmax_lse = ctx.saved_tensors
-        return attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, None, None, None, ctx.sm_scale, ctx.head_size, ctx.alibi_slopes, ctx.causal, ctx.layout, ctx.use_exp2, ctx.preprocessing, True)
+        return attention_prefill_backward_triton_impl(
+            do,
+            q,
+            k,
+            v,
+            o,
+            softmax_lse,
+            None,
+            None,
+            None,
+            ctx.sm_scale,
+            ctx.head_size,
+            ctx.alibi_slopes,
+            ctx.causal,
+            ctx.layout,
+            ctx.use_exp2,
+            ctx.preprocessing,
+            True,
+        )
 
 attention_prefill = _attention_prefill.apply
 
@@ -1612,9 +1628,9 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         print("tri_out:", tri_out)
         print("ref_out:",ref_out )
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
+    
     # The current block size for MI200 series is 64x64. This results in
     # larger differences in float results due to rounding.
-
     if dtype == torch.bfloat16:
         ATOL = 1e-1 * max(1.0, (seqlen_q + D_HEAD) / 64.0)
     if dtype == torch.float32:
@@ -1637,7 +1653,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     torch.testing.assert_close(ref_dq, tri_dq, atol=ATOL, rtol=RTOL)
 
 
-def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2=False):
+def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
     """compute reference output and softmax_lse using PyTorch's built-in function"""
 
     # expects bhsd layout
@@ -1805,7 +1821,7 @@ ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose.
 def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, check_softmax, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
-    
+
     if DEBUG_INPUT:
         sm_scale = 1
     else:
@@ -1835,15 +1851,24 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     if causal:
         input_metadata.need_causal()
 
-     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
+    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
     if check_softmax or return_scores:
         input_metadata.return_scores = True
-    
+
     # call Triton's forward implementation directly
-    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_impl(q, k, v, o, input_metadata)
+    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, input_metadata)
 
     # compute reference
-    o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref, attention_shifted_scaled_scores_ref, attention_scores_ref = attention_forward_pytorch_ref_impl(q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", use_exp2=use_exp2)
+    (
+        o_ref,
+        softmax_lse_ref,
+        exp_scores_ref,
+        softmax_ref,
+        attention_shifted_scaled_scores_ref,
+        attention_scores_ref,
+    ) = attention_forward_pytorch_ref_impl(
+        q.clone(), k.clone(), v.clone(), sm_scale, causal, "bhsd", use_exp2
+    )
     # ref output
     print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
     print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
@@ -1875,12 +1900,11 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
         print("softmax_triton:", softmax_triton, softmax_triton.shape)
         print("softmax_ref:", softmax_ref, softmax_ref.shape)
         torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)       
-        
+
         # compare with pytorch output
         print("softmax_triton:", softmax_triton, softmax_triton.shape)
         print("softmax_pytorch:", softmax_pytorch, softmax_pytorch.shape)
         torch.testing.assert_close(softmax_triton, softmax_pytorch.to(torch.float32), atol=ATOL, rtol=RTOL)
-
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -1917,7 +1941,7 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
 def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preprocessing, use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
-    
+
     if DEBUG_INPUT:
         sm_scale = 1
     else:
@@ -1942,7 +1966,16 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
     q_ref = q.clone() 
     k_ref = k.clone()
     v_ref = v.clone()    
-    o_ref, softmax_lse_ref, exp_scores_ref, softmax_ref, attention_shifted_scaled_scores_ref, attention_scores_ref = attention_forward_pytorch_ref_impl(q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2=use_exp2)
+    (
+        o_ref,
+        softmax_lse_ref,
+        exp_scores_ref,
+        softmax_ref,
+        attention_shifted_scaled_scores_ref,
+        attention_scores_ref,
+    ) = attention_forward_pytorch_ref_impl(
+        q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2
+    )
     print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
     print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
     print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
@@ -1958,12 +1991,42 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
         dv = torch.empty_like(v, dtype=v.dtype)
 
     do_ref = do.clone()
-    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(do_ref, q_ref, k_ref, v_ref, o_ref, softmax_lse_ref, sm_scale, causal, layout, use_exp2, preprocessing)
+    dq_ref, dk_ref, dv_ref = attention_backward_pytorch_ref_impl(
+        do_ref,
+        q_ref,
+        k_ref,
+        v_ref,
+        o_ref,
+        softmax_lse_ref,
+        sm_scale,
+        causal,
+        layout,
+        use_exp2,
+        preprocessing,
+    )
 
     # =============================================== Triton ==============================================================
     o = o_ref.clone()
     softmax_lse = softmax_lse_ref.clone()
-    dq, dk, dv, _, _, _ = attention_prefill_backward_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing, use_new=use_new)
+    dq, dk, dv, _, _, _ = attention_prefill_backward_triton_impl(
+        do,
+        q,
+        k,
+        v,
+        o,
+        softmax_lse,
+        dq,
+        dk,
+        dv,
+        sm_scale,
+        head_size,
+        alibi_slopes,
+        causal,
+        layout,
+        use_exp2,
+        preprocessing,
+        use_new=use_new,
+    )
 
     # =============================================== Check ==============================================================
     print()
