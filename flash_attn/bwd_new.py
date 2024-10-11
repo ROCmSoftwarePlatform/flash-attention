@@ -72,59 +72,73 @@ def _bwd_preprocess_use_p(
 ):
     # Compute program IDs for blocks
     pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    pid_bh = tl.program_id(2)
+    pid_bh = tl.program_id(1)
 
     # compute batch and head indices
     batch_idx = pid_bh // H
     head_idx = pid_bh % H
 
-    # Compute offsets for M and N dimensions
+    # Compute offsets for M and D dimensions
     off_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    off_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     off_d = tl.arange(0, BLOCK_DMODEL)
 
     # Create masks for bounds checking
     mask_m = off_m < N_CTX_Q
-    mask_n = off_n < N_CTX_K
     mask_d = off_d < ACTUAL_BLOCK_DMODEL
 
-    # Compute pointers with batch and head offsets
+    # Compute pointers for Q and DO
     q_ptrs = Q + batch_idx * stride_qz + head_idx * stride_qh + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
-    k_ptrs = K + batch_idx * stride_kz + head_idx * stride_kh + off_n[:, None] * stride_kn + off_d[None, :] * stride_kk
-    v_ptrs = V + batch_idx * stride_vz + head_idx * stride_vh + off_n[:, None] * stride_vn + off_d[None, :] * stride_vk
     do_ptrs = DO + batch_idx * stride_qz + head_idx * stride_qh + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
 
-    # Load Q, K, V, DO
+    # Load Q and DO
     q = tl.load(q_ptrs, mask=mask_m[:, None] & mask_d[None, :], other=0.0)
-    k = tl.load(k_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
-    v = tl.load(v_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
     do = tl.load(do_ptrs, mask=mask_m[:, None] & mask_d[None, :], other=0.0)
 
-    # Compute QK^T
-    qk = tl.dot(q, tl.trans(k))
+    # Initialize delta accumulator
+    delta = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    # Load LSE
-    lse_ptrs = LSE + pid_bh * N_CTX_Q + off_m
-    lse = tl.load(lse_ptrs, mask=mask_m, other=float('-inf'))
+    # Loop over blocks of K and V
+    for start_n in range(0, N_CTX_K, BLOCK_N):
+        # Compute offsets for N dimension
+        off_n = start_n + tl.arange(0, BLOCK_N)
+        mask_n = off_n < N_CTX_K
 
-    # Compute softmax probabilities
-    if USE_EXP2:
-        RCP_LN2: tl.constexpr = 1.4426950408889634
-        qk_scaled = qk * sm_scale * RCP_LN2
-        lse_scaled = lse * RCP_LN2
-        p = tl.exp2(qk_scaled - lse_scaled[:, None])
-    else:
-        qk_scaled = qk * sm_scale
-        p = tl.exp(qk_scaled - lse[:, None])
+        # Compute pointers for K and V
+        k_ptrs = K + batch_idx * stride_kz + head_idx * stride_kh + off_n[:, None] * stride_kn + off_d[None, :] * stride_kk
+        v_ptrs = V + batch_idx * stride_vz + head_idx * stride_vh + off_n[:, None] * stride_vn + off_d[None, :] * stride_vk
 
-    # Compute dp = DO @ V^T
-    dp = tl.dot(do, tl.trans(v))
+        # Load K and V
+        k = tl.load(k_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
+        v = tl.load(v_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
 
-    # Compute delta = sum over n of p * dp
-    delta = tl.sum(p * dp, axis=1)
+        # Compute QK^T
+        qk = tl.dot(q, tl.trans(k))
 
-    # Write back delta
+        # Load LSE
+        lse_ptrs = LSE + pid_bh * N_CTX_Q + off_m
+        lse = tl.load(lse_ptrs, mask=mask_m, other=float('-inf'))
+
+        # Compute scaled QK and softmax probabilities
+        if USE_EXP2:
+            RCP_LN2: tl.constexpr = 1.4426950408889634
+            qk_scaled = qk * sm_scale * RCP_LN2
+            lse_scaled = lse * RCP_LN2
+            p = tl.exp2(qk_scaled - lse_scaled[:, None])
+        else:
+            qk_scaled = qk * sm_scale
+            p = tl.exp(qk_scaled - lse[:, None])
+
+        # Mask p where necessary
+        p = tl.where(mask_m[:, None] & mask_n[None, :], p, 0.0)
+
+        # Compute dp = DO @ V^T
+        v_t = tl.trans(v)
+        dp = tl.dot(do, v_t)
+
+        # Accumulate delta
+        delta += tl.sum(p * dp, axis=1)
+
+    # Write-back delta
     delta_ptrs = Delta + pid_bh * N_CTX_Q + off_m
     tl.store(delta_ptrs, delta, mask=mask_m)
 
@@ -611,7 +625,7 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
             N_CTX_Q=N_CTX_Q
         )
     else:
-        _bwd_preprocess_use_p[(num_blocks_m, num_blocks_n, batch_headsize)](
+       _bwd_preprocess_use_p[(num_blocks_m, batch_headsize)](
             q,
             k,
             v,
@@ -641,7 +655,7 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
             BLOCK_DMODEL=BLOCK_DMODEL,
             ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
             USE_EXP2=use_exp2,
-        )            
+        )
 
 
     if False:
