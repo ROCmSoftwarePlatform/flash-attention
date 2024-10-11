@@ -6,7 +6,7 @@ import triton.language as tl
 from triton import cdiv
 
 
-DEBUG = True
+DEBUG = False
 
 @triton.jit
 def _bwd_preprocess_use_o(
@@ -496,7 +496,8 @@ def _bwd_kernel(
                 USE_EXP2=USE_EXP2,
             )
 
-def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing_use_o):
+# NOTE: smaller blocks have lower accuracy. more accumlation error probably 128 * 128 seems good
+def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o, BLOCK_M=128, BLOCK_N=128):
 
     DEBUG_INPUT=False
 
@@ -517,7 +518,9 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
         print("alibi_slopes:", alibi_slopes)
         print("layout:", layout)
         print("use_exp2:", use_exp2)
-        print("preprocessing_use_o:", preprocessing_use_o)
+        print("bwd_preprocessing_use_o:", bwd_preprocessing_use_o)
+        print("BLOCK_M:", BLOCK_M)
+        print("BLOCK_N:", BLOCK_N)
 
     # the kernel wants bhsd
     if layout == "bshd":
@@ -535,14 +538,6 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
 
     sequence_parallel = False
     causal = False
-
-    # OOM issue on hip # TODO: use autotune
-    if torch.version.hip is not None:
-        BLOCK_M = 64
-        BLOCK_N = 64
-    else:
-        BLOCK_M = 128
-        BLOCK_N = 128
 
     batch_q, heads_q, N_CTX_Q, head_size_q = q.shape
     batch_k, heads_k, N_CTX_K, head_size_k = k.shape
@@ -614,7 +609,7 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
         delta = torch.empty_like(softmax_lse)
     
 
-    if preprocessing_use_o:
+    if bwd_preprocessing_use_o:
         _bwd_preprocess_use_o[(batch_headsize * num_blocks_m,)](
             o,
             do,

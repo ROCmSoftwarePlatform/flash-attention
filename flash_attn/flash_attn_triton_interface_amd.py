@@ -3,6 +3,8 @@ import triton
 from .flash_attn_triton_kernel_prefill_amd import MetaData, get_shape_from_layout, attention_prefill_forward_triton_impl, attention_prefill_backward_triton_impl
 from .flash_attn_triton_kernel_decode_amd import attention_decode
 
+DEBUG = False
+
 def fwd(q,
         k,
         v,
@@ -17,7 +19,7 @@ def fwd(q,
         return_softmax,
         gen_):
     
-    if True:
+    if DEBUG:
         print()
         print("flash_attn_triton_amd.py::fwd")
         print("q:", q, q.shape)
@@ -88,7 +90,7 @@ def bwd(
     gen_,
     rng_state,
 ):
-    if True:
+    if DEBUG:
         print()
         print("flash_attn_triton_amd.py::bwd")
         print("dout:", dout, dout.shape)
@@ -130,7 +132,7 @@ def bwd(
         causal,
         "bshd",
         False,
-        True,
+        False,
         True,
     )
 

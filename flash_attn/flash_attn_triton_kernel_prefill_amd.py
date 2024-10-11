@@ -35,7 +35,7 @@ from .bwd_old import attention_prefill_backward_triton_old_impl
 from .bwd_oai import attention_prefill_backward_triton_oai_impl
 
 
-DEBUG = True
+DEBUG = False
 RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
 LN2= 0.6931471824645996  # = ln(2)
 
@@ -60,7 +60,7 @@ class MetaData():
     dropout_p, return_scores= 0.0, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = True
-    bwd_preprocessing = True
+    bwd_preprocessing_use_o = True
     
 
     def __repr__(self) -> str:
@@ -758,7 +758,7 @@ def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
 
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
-def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing_use_o, use_new):
+def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o, use_new):
     if False:
         if use_exp2:
             softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
@@ -783,7 +783,7 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
     elif False:
         # test pytorch impl
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing_use_o
+            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o
         )
         if dq is not None:
             dq.copy_(dq_ref)
@@ -802,7 +802,7 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
 
         return dq, dk, dv, delta_ref, None, None
     elif use_new:
-        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing_use_o)
+        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o)
     else:
         return attention_prefill_backward_triton_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
@@ -825,7 +825,7 @@ class _attention_prefill(torch.autograd.Function):
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
         ctx.use_exp2 = metadata.use_exp2
-        ctx.preprocessing_use_o = metadata.preprocessing_use_o
+        ctx.bwd_preprocessing_use_o = metadata.bwd_preprocessing_use_o
         return o, softmax_lse, exp_scores
 
     @staticmethod
@@ -847,7 +847,7 @@ class _attention_prefill(torch.autograd.Function):
             ctx.causal,
             ctx.layout,
             ctx.use_exp2,
-            ctx.preprocessing_use_o,
+            ctx.bwd_preprocessing_use_o,
             True,
         )
 
@@ -1291,7 +1291,7 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     else:
         return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
 
-def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing_use_o):
+def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o):
     # ensure the layout is 'bhsd'
     if layout == "bshd":
         print("Changing layout to bhsd!")
@@ -1309,11 +1309,13 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     
     # recompute attention_scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1))
-    print("attention_scores:", attention_scores)
+    if DEBUG:
+        print("attention_scores:", attention_scores)
 
     # scale scores
     attention_scaled_scores = sm_scale * attention_scores
-    print("attention_scaled_scores:", attention_scaled_scores)
+    if DEBUG:
+        print("attention_scaled_scores:", attention_scaled_scores)
 
     # compute probabilities using softmax_lse
     if use_exp2:
@@ -1324,7 +1326,8 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     else:
         p = torch.exp(attention_scaled_scores - softmax_lse.unsqueeze(-1))
 
-    print("p:", p)
+    if DEBUG:
+        print("p:", p)
     # compute gradient wrt v
     dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
 
@@ -1332,7 +1335,7 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     dp = torch.matmul(do, v.transpose(-2, -1))
 
     # calculate ds
-    if preprocessing_use_o:
+    if bwd_preprocessing_use_o:
         delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32) # what oai kernel uses
     else:
         delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
@@ -1504,11 +1507,11 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
     # (1, 1, 256, 512, 16),
 ])
 @pytest.mark.parametrize('causal', [False])
-@pytest.mark.parametrize('use_exp2', [False])
-@pytest.mark.parametrize('preprocessing_use_o', [True, False])
+@pytest.mark.parametrize('use_exp2', [True, False])
+@pytest.mark.parametrize('bwd_preprocessing_use_o', [True, False])
 @pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preprocessing_use_o, use_new, DEBUG_INPUT):
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
@@ -1546,11 +1549,12 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
     ) = attention_forward_pytorch_ref_impl(
         q_ref, k_ref, v_ref, sm_scale, causal, layout, use_exp2
     )
-    print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
-    print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
-    print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
-    print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-    print("softmax_ref:", softmax_ref, softmax_ref.shape)
+    if DEBUG:
+        print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
+        print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
+        print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
+        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
+        print("softmax_ref:", softmax_ref, softmax_ref.shape)
 
     dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
     if DEBUG_INPUT:
@@ -1572,7 +1576,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
         causal,
         layout,
         use_exp2,
-        preprocessing_use_o, 
+        bwd_preprocessing_use_o, 
     )
 
     # =============================================== Triton ==============================================================
@@ -1594,27 +1598,30 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preproces
         causal,
         layout,
         use_exp2,
-        preprocessing_use_o=preprocessing_use_o,
+        bwd_preprocessing_use_o=bwd_preprocessing_use_o,
         use_new=use_new,
     )
 
     # =============================================== Check ==============================================================
     print()
-
-    print("delta:", delta, delta.shape)
-    print("delta_ref:", delta_ref, delta_ref.shape)
+    if DEBUG:
+        print("delta:", delta, delta.shape)
+        print("delta_ref:", delta_ref, delta_ref.shape)
     torch.testing.assert_close(delta, delta_ref, atol=ATOL, rtol=RTOL)
 
-    print("dv:", dv, dv.shape)
-    print("dv_ref:", dv_ref, dv_ref.shape)
+    if DEBUG:
+        print("dv:", dv, dv.shape)
+        print("dv_ref:", dv_ref, dv_ref.shape)
     torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
 
-    print("dk:", dk, dk.shape)
-    print("dk_ref:", dk_ref, dk_ref.shape)
+    if DEBUG:
+        print("dk:", dk, dk.shape)
+        print("dk_ref:", dk_ref, dk_ref.shape)
     torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
 
-    print("dq:", dq, dq.shape)
-    print("dq_ref:", dq_ref, dq_ref.shape)
+    if DEBUG:
+        print("dq:", dq, dq.shape)
+        print("dq_ref:", dq_ref, dq_ref.shape)
     torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
 
 def nonvarlen_benchmark_configs():

@@ -1201,8 +1201,10 @@ def test_flash_attn_output(
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
-    print("out:", out, out.shape)
-    print("out_ref:", out_ref, out_ref.shape)
+    DEBUG=False
+    if DEBUG:
+        print("out:", out, out.shape)
+        print("out_ref:", out_ref, out_ref.shape)
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
     if dropout_p > 0.0:
@@ -1212,23 +1214,26 @@ def test_flash_attn_output(
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
     if test_backward:
-        print("dv:", dv, dv.shape)
-        print("dv_ref:", dv_ref, dv_ref.shape)
-        print("dv_pt:", dv_pt, dv_pt.shape)
+        if DEBUG:
+            print("dv:", dv, dv.shape)
+            print("dv_ref:", dv_ref, dv_ref.shape)
+            print("dv_pt:", dv_pt, dv_pt.shape)
         # fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
         ATOL, RTOL = 1e-4, 1e-3
         # torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
         assert (dv - dv_ref).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()
         
-        print("dk:", dk, dk.shape)
-        print("dk_ref:", dk_ref, dk_ref.shape)
-        print("dk_pt:", dk_pt, dk_pt.shape)
+        if DEBUG:
+            print("dk:", dk, dk.shape)
+            print("dk_ref:", dk_ref, dk_ref.shape)
+            print("dk_pt:", dk_pt, dk_pt.shape)
         # torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
         assert (dk - dk_ref).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
 
-        print("dq:", dq, dq.shape)
-        print("dq_ref:", dq_ref, dq_ref.shape)
-        print("dq_pt:", dq_pt, dq_pt.shape)
+        if DEBUG:
+            print("dq:", dq, dq.shape)
+            print("dq_ref:", dq_ref, dq_ref.shape)
+            print("dq_pt:", dq_pt, dq_pt.shape)
         # torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
         assert (dq - dq_ref).abs().max().item() <= 3 * (dq_pt - dq_ref).abs().max().item()
         
