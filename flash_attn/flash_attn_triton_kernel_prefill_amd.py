@@ -758,7 +758,7 @@ def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
 
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
-def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing, use_new):
+def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing_use_o, use_new):
     if False:
         if use_exp2:
             softmax_lse *= RCP_LN2 # oai kernel expects softmax_lse to be an intermediate result of using exp2
@@ -783,7 +783,7 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
     elif False:
         # test pytorch impl
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing
+            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing_use_o
         )
         if dq is not None:
             dq.copy_(dq_ref)
@@ -802,7 +802,7 @@ def attention_prefill_backward_triton_impl(do, q, k, v, o, softmax_lse,  dq, dk,
 
         return dq, dk, dv, delta_ref, None, None
     elif use_new:
-        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing)
+        return attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing_use_o)
     else:
         return attention_prefill_backward_triton_old_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2)
 
@@ -825,7 +825,7 @@ class _attention_prefill(torch.autograd.Function):
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
         ctx.use_exp2 = metadata.use_exp2
-        ctx.preprocessing = metadata.preprocessing
+        ctx.preprocessing_use_o = metadata.preprocessing_use_o
         return o, softmax_lse, exp_scores
 
     @staticmethod
@@ -847,7 +847,7 @@ class _attention_prefill(torch.autograd.Function):
             ctx.causal,
             ctx.layout,
             ctx.use_exp2,
-            ctx.preprocessing,
+            ctx.preprocessing_use_o,
             True,
         )
 
@@ -1291,7 +1291,7 @@ def attention_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_ex
     else:
         return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
 
-def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing):
+def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, preprocessing_use_o):
     # ensure the layout is 'bhsd'
     if layout == "bshd":
         print("Changing layout to bhsd!")
@@ -1332,8 +1332,8 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     dp = torch.matmul(do, v.transpose(-2, -1))
 
     # calculate ds
-    if preprocessing:
-        delta = torch.sum(o * do, axis=-1).unsqueeze(-1) # what oai kernel uses
+    if preprocessing_use_o:
+        delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32) # what oai kernel uses
     else:
         delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
     ds = (p * (dp - delta)) * sm_scale
@@ -1360,13 +1360,13 @@ def attention_backward_pytorch_ref_impl(do, q, k, v, o, softmax_lse, sm_scale, c
     else:
         raise ValueError(f"Unknown layout {layout}")
 
-    return dq, dk, dv, delta
+    return dq, dk, dv, delta.squeeze(-1)
 
 
 # fp16 default is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-# ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
+ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
-ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
+# ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -1477,25 +1477,26 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1),
-    # (1, 1, 4, 4, 4),
+    (1, 1, 1, 1, 1),
+    (1, 1, 4, 4, 4),
     (1, 1, 4, 4, 16),
-    # (1, 1, 32, 32, 16),
-    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64),
-    # (1, 1, 128, 256, 45),
-    # (1, 1, 256, 256, 64),
-    # (1, 1, 256, 512, 16),
-    # (1, 1, 512, 512, 64), 
-    # (1, 1, 1024, 1024, 64),
-    # # old tests that work
-    # (4, 48, 1024, 1024, 73),
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (1, 24, 4096, 4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
+    (1, 1, 16, 16, 16),
+    (1, 1, 32, 32, 16),
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64),
+    (1, 1, 128, 256, 45),
+    (1, 1, 256, 256, 64),
+    (1, 1, 256, 512, 16),
+    (1, 1, 512, 512, 64), 
+    (1, 1, 1024, 1024, 64),
+    # old tests that work
+    (4, 48, 1024, 1024, 73),
+    (4, 48, 1024, 1024, 64),
+    (4, 48, 2048, 2048, 64),
+    (1, 24, 4096, 4096, 64),
+    (1, 16, 1024, 1024, 64),
+    (1, 16, 1024, 1024, 128),
     # # old tests that were commented out
     # (1, 16, 8192, 8192, 63),
     # (1, 16, 1022, 1022, 64),
@@ -1504,9 +1505,10 @@ def test_op_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, chec
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [False])
+@pytest.mark.parametrize('preprocessing_use_o', [True, False])
 @pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, DEBUG_INPUT):
+def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, preprocessing_use_o, use_new, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
@@ -1570,7 +1572,7 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
         causal,
         layout,
         use_exp2,
-        False, # delta = p * dp
+        preprocessing_use_o, 
     )
 
     # =============================================== Triton ==============================================================
@@ -1592,22 +1594,25 @@ def test_op_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, use_new, 
         causal,
         layout,
         use_exp2,
-        preprocessing = True, # delta = o * do
+        preprocessing_use_o=preprocessing_use_o,
         use_new=use_new,
     )
 
     # =============================================== Check ==============================================================
     print()
+
+    print("delta:", delta, delta.shape)
+    print("delta_ref:", delta_ref, delta_ref.shape)
+    torch.testing.assert_close(delta, delta_ref, atol=ATOL, rtol=RTOL)
+
     print("dv:", dv, dv.shape)
     print("dv_ref:", dv_ref, dv_ref.shape)
     torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
-    print()
-    print("delta:", delta, delta.shape)
-    print("delta_ref:", delta_ref, delta_ref.shape)
-    torch.testing.assert_close(delta, delta, atol=ATOL, rtol=RTOL)
+
     print("dk:", dk, dk.shape)
     print("dk_ref:", dk_ref, dk_ref.shape)
     torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
+
     print("dq:", dq, dq.shape)
     print("dq_ref:", dq_ref, dq_ref.shape)
     torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)

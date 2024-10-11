@@ -67,11 +67,17 @@ def _bwd_preprocess_use_p(
     BLOCK_DMODEL: tl.constexpr,  # Block size for model dimension
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     USE_EXP2: tl.constexpr,      # Whether to use exp2 for exponentials
+    Z: tl.constexpr,             # Batch size
+    H: tl.constexpr,             # Number of heads
 ):
     # Compute program IDs for blocks
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     pid_bh = tl.program_id(2)
+
+    # compute batch and head indices
+    batch_idx = pid_bh // H
+    head_idx = pid_bh % H
 
     # Compute offsets for M and N dimensions
     off_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -82,23 +88,25 @@ def _bwd_preprocess_use_p(
     mask_m = off_m < N_CTX_Q
     mask_n = off_n < N_CTX_K
     mask_d = off_d < ACTUAL_BLOCK_DMODEL
-    q_mask = mask_m[:, None] & mask_d[None, :]
-    k_mask = mask_n[:, None] & mask_d[None, :]
-    v_mask = mask_n[:, None] & mask_d[None, :]
 
-    # Pointers to q and k
-    q_ptrs = Q + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
-    k_ptrs = K + off_n[:, None] * stride_kn + off_d[None, :] * stride_kk
+    # Compute pointers with batch and head offsets
+    q_ptrs = Q + batch_idx * stride_qz + head_idx * stride_qh + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
+    k_ptrs = K + batch_idx * stride_kz + head_idx * stride_kh + off_n[:, None] * stride_kn + off_d[None, :] * stride_kk
+    v_ptrs = V + batch_idx * stride_vz + head_idx * stride_vh + off_n[:, None] * stride_vn + off_d[None, :] * stride_vk
+    do_ptrs = DO + batch_idx * stride_qz + head_idx * stride_qh + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
 
-    # Load q and k
-    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
-    k = tl.load(k_ptrs, mask=k_mask, other=0.0)
+    # Load Q, K, V, DO
+    q = tl.load(q_ptrs, mask=mask_m[:, None] & mask_d[None, :], other=0.0)
+    k = tl.load(k_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
+    v = tl.load(v_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
+    do = tl.load(do_ptrs, mask=mask_m[:, None] & mask_d[None, :], other=0.0)
 
-    # Compute qk = q @ k^T
+    # Compute QK^T
     qk = tl.dot(q, tl.trans(k))
 
     # Load LSE
-    lse = tl.load(LSE + off_m, mask=mask_m, other=float('-inf'))
+    lse_ptrs = LSE + pid_bh * N_CTX_Q + off_m
+    lse = tl.load(lse_ptrs, mask=mask_m, other=float('-inf'))
 
     # Compute softmax probabilities
     if USE_EXP2:
@@ -110,20 +118,16 @@ def _bwd_preprocess_use_p(
         qk_scaled = qk * sm_scale
         p = tl.exp(qk_scaled - lse[:, None])
 
-    # Load DO and V
-    do_ptrs = DO + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
-    v_ptrs = V + off_n[:, None] * stride_vn + off_d[None, :] * stride_vk
-    do = tl.load(do_ptrs, mask=q_mask, other=0.0)
-    v = tl.load(v_ptrs, mask=v_mask, other=0.0)
-
-    # Compute dp = do @ V^T
+    # Compute dp = DO @ V^T
     dp = tl.dot(do, tl.trans(v))
 
     # Compute delta = sum over n of p * dp
     delta = tl.sum(p * dp, axis=1)
 
     # Write back delta
-    tl.store(Delta + off_m, delta, mask=mask_m)
+    delta_ptrs = Delta + pid_bh * N_CTX_Q + off_m
+    tl.store(delta_ptrs, delta, mask=mask_m)
+
 
 @triton.jit
 def _bwd_kernel_one_col_block(
@@ -177,7 +181,6 @@ def _bwd_kernel_one_col_block(
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
-    PREPROCESSING: tl.constexpr,
 ):
     if CAUSAL:
         lo = start_n * BLOCK_M
@@ -261,7 +264,7 @@ def _bwd_kernel_one_col_block(
         # print("dp:", dp)
 
         # compute ds , ds = p * (dp - delta[:, None])
-        if PREPROCESSING:
+        if True:
             Di = tl.load(d_ptrs + offs_m, mask=mask_m)
             ds = (p * (dp - Di[:, None])) * sm_scale
         else:
@@ -346,7 +349,6 @@ def _bwd_kernel(
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
-    PREPROCESSING: tl.constexpr
 ):
     # program ids
     off_hz = tl.program_id(0)
@@ -424,7 +426,6 @@ def _bwd_kernel(
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
             CAUSAL=CAUSAL,
             USE_EXP2=USE_EXP2,
-            PREPROCESSING=PREPROCESSING
         )
     else:
         for start_n in range(0, num_block_n):
@@ -479,10 +480,9 @@ def _bwd_kernel(
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
                 CAUSAL=CAUSAL,
                 USE_EXP2=USE_EXP2,
-                PREPROCESSING=PREPROCESSING
             )
 
-def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing):
+def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, preprocessing_use_o):
 
     DEBUG_INPUT=False
 
@@ -503,24 +503,17 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
         print("alibi_slopes:", alibi_slopes)
         print("layout:", layout)
         print("use_exp2:", use_exp2)
-        print("preprocessing:", preprocessing)
+        print("preprocessing_use_o:", preprocessing_use_o)
 
     # the kernel wants bhsd
     if layout == "bshd":
+        print("Changing layout to bhsd!")
         do = do.transpose(1, 2).contiguous()
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
         o = o.transpose(1, 2).contiguous()
         # TODO: does L/M need to be transposed. possible to use strides
-
-        if False:
-            print("After layout change")
-            print("do:", do, do.shape)
-            print("q:", q, q.shape)
-            print("k:", k, k.shape)
-            print("v:", v, v.shape)
-            print("o:", o, o.shape)
     elif layout == "bhsd":
         pass
     else:
@@ -571,13 +564,13 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
     dq.zero_()
 
     if dk is None:
-        if DEBUG_INPUT:
+        if True:
             dk = torch.zeros_like(k)
         else:
             dk = torch.empty_like(k)
 
     if dv is None:
-        if DEBUG_INPUT:
+        if True:
             dv = torch.zeros_like(v)
         else:
             dv = torch.empty_like(v)
@@ -601,54 +594,57 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
     num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
 
-    if preprocessing:
-        if True:
-            delta = torch.zeros_like(softmax_lse)
-        else:
-            delta = torch.empty_like(softmax_lse)
-        if True:
-            _bwd_preprocess_use_p[(num_blocks_m, num_blocks_n, batch_headsize)](
-                q,
-                k,
-                v,
-                do,
-                softmax_lse,
-                delta,
-                sm_scale,
-                stride_dq_all,
-                stride_qz,
-                stride_qh,
-                stride_qm,
-                stride_qk,
-                stride_kz,
-                stride_kh,
-                stride_kn,
-                stride_kk,
-                stride_vz,
-                stride_vh,
-                stride_vn,
-                stride_vk,
-                N_CTX_Q,
-                N_CTX_K,
-                BLOCK_M=BLOCK_M,
-                BLOCK_N=BLOCK_N,
-                BLOCK_DMODEL=BLOCK_DMODEL,
-                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-                USE_EXP2=use_exp2,
-            )
-        else:
-            _bwd_preprocess_use_o[(batch_headsize * num_blocks_m,)](
-                o,
-                do,
-                delta,
-                BLOCK_M=BLOCK_M,
-                BLOCK_DMODEL=BLOCK_DMODEL,
-                ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-                N_CTX_Q=N_CTX_Q
-            )
-
-
     if True:
+        delta = torch.zeros_like(softmax_lse)
+    else:
+        delta = torch.empty_like(softmax_lse)
+    
+
+    if preprocessing_use_o:
+        _bwd_preprocess_use_o[(batch_headsize * num_blocks_m,)](
+            o,
+            do,
+            delta,
+            BLOCK_M=BLOCK_M,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+            N_CTX_Q=N_CTX_Q
+        )
+    else:
+        _bwd_preprocess_use_p[(num_blocks_m, num_blocks_n, batch_headsize)](
+            q,
+            k,
+            v,
+            do,
+            softmax_lse,
+            delta,
+            sm_scale,
+            stride_dq_all,
+            stride_qz,
+            stride_qh,
+            stride_qm,
+            stride_qk,
+            stride_kz,
+            stride_kh,
+            stride_kn,
+            stride_kk,
+            stride_vz,
+            stride_vh,
+            stride_vn,
+            stride_vk,
+            Z=batch_q,
+            H=heads_q,
+            N_CTX_Q=N_CTX_Q,
+            N_CTX_K=N_CTX_K,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+            USE_EXP2=use_exp2,
+        )            
+
+
+    if False:
         print("_bwd_kernel inputs")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
@@ -679,7 +675,6 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
         print("num_warps:",num_warps)
         print("num_stages:", num_stages)
         print("USE_EXP2:", use_exp2)
-        print("preprocessing:", preprocessing)
 
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
@@ -710,7 +705,6 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
         SEQUENCE_PARALLEL=sequence_parallel,
         CAUSAL=causal,
         USE_EXP2=use_exp2,
-        PREPROCESSING=preprocessing,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -720,6 +714,7 @@ def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, 
 
     # go back to original layout
     if layout == "bshd":
+        print("Changing back to bshd!")
         dq = dq.transpose(1, 2)
         dk = dk.transpose(1, 2)
         dv = dv.transpose(1, 2)
