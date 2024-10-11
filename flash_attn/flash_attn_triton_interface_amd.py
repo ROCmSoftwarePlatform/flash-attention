@@ -132,7 +132,7 @@ def bwd(
         causal,
         "bshd",
         False,
-        False,
+        True,
         True,
     )
 

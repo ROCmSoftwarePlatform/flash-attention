@@ -225,7 +225,7 @@ def construct_local_mask(
             col_idx > torch.minimum(row_idx + sk - sq + window_size[1], sk),
             col_idx < row_idx + sk - sq - window_size[0],
         )
-
+DEBUG = False
 
 def attention_ref(
     q,
@@ -264,13 +264,15 @@ def attention_ref(
         output: (batch_size, seqlen_q, nheads, head_dim)
         attention: (batch_size, nheads, seqlen_q, seqlen_k), softmax after dropout
     """
-    print()
-    if upcast==False and reorder_ops==True:
-        print("attention_ref_py")
-    else:
-        print("attention_ref")
-    print("upcast:", upcast)
-    print("reorder_ops:", reorder_ops)
+    if DEBUG:
+        print()
+        if upcast==False and reorder_ops==True:
+            print("attention_ref_py")
+        else:
+            print("attention_ref")
+    if DEBUG:
+        print("upcast:", upcast)
+        print("reorder_ops:", reorder_ops)
     if causal:
         window_size = (window_size[0], 0)
     dtype_og = q.dtype
@@ -284,7 +286,8 @@ def attention_ref(
         scores = torch.einsum("bthd,bshd->bhts", q / math.sqrt(d), k)
     else:
         scores = torch.einsum("bthd,bshd->bhts", q, k / math.sqrt(d))
-    print("scores_ref:", scores)
+    if DEBUG:
+        print("scores_ref:", scores)
     if softcap > 0:
         scores = scores / softcap
         scores = scores.tanh()
@@ -304,9 +307,11 @@ def attention_ref(
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
-    print("lse_ref:", torch.logsumexp(scores, dim=-1))
+    if DEBUG:
+        print("lse_ref:", torch.logsumexp(scores, dim=-1))
     attention = torch.softmax(scores, dim=-1).to(v.dtype)
-    print("attention_ref:", attention)
+    if DEBUG:
+        print("attention_ref:", attention)
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
         attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
@@ -927,17 +932,16 @@ def test_flash_attn_varlen_qkvpacked(
 # @pytest.mark.parametrize("causal", [False, True])
 # @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("causal", [False])
-# @pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
+@pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64])
-@pytest.mark.parametrize("d", [16])
+# @pytest.mark.parametrize("d", [16])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (4, 4),
         (113, 203),
         (128, 217),
         (113, 211),

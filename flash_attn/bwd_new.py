@@ -496,8 +496,8 @@ def _bwd_kernel(
                 USE_EXP2=USE_EXP2,
             )
 
-# NOTE: smaller blocks have lower accuracy. more accumlation error probably 128 * 128 seems good
-def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o, BLOCK_M=128, BLOCK_N=128):
+# NOTE: smaller blocks have lower accuracy. more accumlation error probably 128 * 128 seems good but leads to oom. 64 * 64 has accumlation errors but no oom.
+def attention_prefill_backward_triton_new_impl(do, q, k, v, o, softmax_lse, dq, dk, dv, sm_scale, head_size, alibi_slopes, causal, layout, use_exp2, bwd_preprocessing_use_o, BLOCK_M=64, BLOCK_N=64):
 
     DEBUG_INPUT=False
 
