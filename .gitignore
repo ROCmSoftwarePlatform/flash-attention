@@ -25,3 +25,7 @@ var/
 
 # Dev
 venv
+
+# AMD
+.eggs
+scripts

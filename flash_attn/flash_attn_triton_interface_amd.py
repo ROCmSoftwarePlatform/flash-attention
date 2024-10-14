@@ -46,7 +46,7 @@ def fwd(q,
     input_metadata.check_args(q, k, v, o)
     tri_out, softmax_lse, softmax_dmask= attention_prefill(q, k, v, o, input_metadata)
 
-    return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
+    return tri_out, softmax_lse, softmax_dmask, None
 
 def bwd(
     dout,
@@ -122,7 +122,7 @@ def varlen_fwd(
 
     tri_out, softmax_lse, softmax_dmask= attention_prefill(q, k, v, o, input_metadata)
 
-    return tri_out, q , k , v, o, softmax_lse, softmax_dmask, None
+    return tri_out, softmax_lse, softmax_dmask, None
 
 def varlen_bwd(
     dout,
