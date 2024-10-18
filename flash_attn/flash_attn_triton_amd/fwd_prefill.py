@@ -446,9 +446,6 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
     
     # write back LSE(Log Sum Exponents), the log of the normalization constant
     l_ptrs = LSE + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
-    # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
-    # This is only true for the last M block. For others, overflow_size will be -ve
-    overflow_size = end_m_idx - seqlen_q
     if USE_EXP2:
         RCP_LN2: tl.constexpr = 1.4426950408889634
         LN2: tl.constexpr = 0.6931471824645996
@@ -459,6 +456,16 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         softmax_lse *= LN2
     else:
         softmax_lse = m_i + tl.math.log(l_i)
+
+    if IS_CAUSAL:
+        # zero out nans caused by -infs when doing causal
+        mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
+        lse_mask = mask_m_offsets < causal_start_idx
+        softmax_lse = tl.where(lse_mask, 0.0, softmax_lse)
+
+    # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
+    # This is only true for the last M block. For others, overflow_size will be -ve
+    overflow_size = end_m_idx - seqlen_q
     if overflow_size > 0:
         boundary = tl.full((BLOCK_M, ), BLOCK_M - overflow_size, dtype=tl.int32)
         l_ptrs_mask = tl.arange(0, BLOCK_M) < boundary

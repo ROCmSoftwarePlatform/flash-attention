@@ -285,13 +285,29 @@ def _bwd_kernel_one_col_block(
 
         # recompute p = softmax(qk, dim=-1).T
         # NOTE: `do` is pre-divided by `l`; no normalization here
-        if CAUSAL:
-            qk = tl.where(
-                offs_m[:, None] >= offs_n[None, :], float(0.0), float("-inf")
-            )
-        else:
-            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        # if CAUSAL:
+        #     col_offset = N_CTX_Q - N_CTX_K
+        #     qk = tl.where(
+        #         offs_m[:, None] >= (col_offset + offs_n[None, :]), float(0.0), float("-inf")
+        #     )
+        # else:
+        #     qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, tl.trans(k))
+
+        if CAUSAL:
+            # row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+            # col_idx = start_n + tl.arange(0, BLOCK_N)
+            
+            # create a N_CTX_Q x N_CTX_K causal mask
+            col_offset = N_CTX_Q - N_CTX_K
+            causal_mask = offs_m[:, None] >= (col_offset + offs_n[None, :])
+
+            # Apply the mask
+            qk = tl.where(causal_mask, qk, float("-inf"))
+
+
+
         # print("qk:", qk)
         l_ptrs = l_offset + offs_m
         l_i = tl.load(l_ptrs, mask=mask_m)

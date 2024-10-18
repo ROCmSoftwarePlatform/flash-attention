@@ -1,28 +1,64 @@
 import torch
 import math
 
+DEBUG = True
+
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
+    if DEBUG:
+        print()
+        print("attention_forward_core_ref_impl")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("sm_scale:", sm_scale)
+        print("causal:", use_exp2)
+        print("use_exp2:", use_exp2)
+    
     # Compute attention scores
     attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+    if DEBUG:
+        print("attention_scores:", attention_scores, attention_scores.shape)
 
     # Scale scores
     attention_scaled_scores = sm_scale * attention_scores
+    if DEBUG:
+        print("attention_scaled_scores:", attention_scaled_scores, attention_scaled_scores.shape)
 
     # Apply causal mask if necessary
     if causal:
         L_q, L_k = q.shape[1], k.shape[1]
-        causal_mask = torch.triu(
-            torch.ones((L_q, L_k), device=q.device, dtype=torch.bool), diagonal=1
-        )
+        row_idx = torch.arange(L_q, device=q.device).unsqueeze(1)
+        col_idx = torch.arange(L_k, device=q.device).unsqueeze(0)
+        col_offset = L_q-L_k
+        causal_mask = row_idx >= (col_offset + col_idx)
+        if DEBUG:
+            print("row_idx:", row_idx)
+            print("col_idx:", col_idx)
+            print("causal_mask:", causal_mask)
+        # set -inf to places the causal mask is false
         attention_scaled_scores = attention_scaled_scores.masked_fill(
-            causal_mask.unsqueeze(0), float('-inf')
+             torch.logical_not(causal_mask.unsqueeze(0)), float('-inf')
         )
+        if DEBUG:
+            print("attention_scaled_scores after causal:", attention_scaled_scores, attention_scaled_scores.shape)
+
 
     # Compute max for numerical stability
     max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
+    if DEBUG:
+        print("max_scores:", max_scores, max_scores.shape)
+    if causal:
+        # Replace -inf in max_scores with zeros to avoid NaN in subtraction
+        max_scores = torch.where(
+            torch.isinf(max_scores), torch.zeros_like(max_scores), max_scores
+        )
+        if DEBUG:
+            print("max_scores if causal:", max_scores, max_scores.shape)
 
     # Shift scores
     attention_shifted_scaled_scores = attention_scaled_scores - max_scores
+    if DEBUG:
+            print("attention_shifted_scaled_scores:", attention_shifted_scaled_scores, attention_shifted_scaled_scores.shape)
 
     # Exponentiate
     if use_exp2:
@@ -31,11 +67,28 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
     else:
         exp_scores = torch.exp(attention_shifted_scaled_scores)
 
+    if DEBUG:
+        print("exp_scores:", exp_scores, exp_scores.shape)
+
     # Sum of exponentials
     sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
+    if DEBUG:
+        print("sum_exp_scores:", sum_exp_scores, sum_exp_scores.shape)
+    if causal:
+        # if sum of exp scores is 0.0 it means scores where -inf, we cannot compute softmax and softmax_lse. Setting to 1 deals with -inf case cleanly 
+        sum_exp_scores = torch.where(
+        sum_exp_scores == 0,
+        torch.ones_like(sum_exp_scores),
+        sum_exp_scores
+        )
+    if DEBUG:
+        print("sum_exp_scores:", sum_exp_scores, sum_exp_scores.shape)
 
     # Compute softmax probabilities
     softmax = exp_scores / sum_exp_scores
+
+    if DEBUG:
+        print("softmax:", softmax, softmax.shape)
 
     # Compute log-sum-exp
     if use_exp2:
@@ -49,10 +102,15 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         softmax_lse = max_scores + torch.log(sum_exp_scores)
         softmax_lse = softmax_lse.squeeze(-1)
 
+    if DEBUG:
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
+
     # Compute output
     o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
+    if DEBUG:
+        print("o:", o, o.shape)
 
-    return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
+    return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
 
 def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
@@ -75,23 +133,24 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
     v = v.reshape(batch_size * num_heads, seq_len_k, head_dim)
 
     # Call the core attention function
-    o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores = attention_forward_core_ref_impl(
+    o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores = attention_forward_core_ref_impl(
         q, k, v, sm_scale, causal, use_exp2
     )
 
     # Reshape outputs back to [batch_size, num_heads, seq_len, head_dim]
     o = o.reshape(batch_size, num_heads, seq_len_q, head_dim)
     softmax_lse = softmax_lse.reshape(batch_size, num_heads, seq_len_q)
-    attention_scores = attention_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
-    attention_shifted_scaled_scores = attention_shifted_scaled_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
     exp_scores = exp_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
     softmax = softmax.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+    attention_shifted_scaled_scores = attention_shifted_scaled_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+    attention_scaled_scores = attention_scaled_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+    attention_scores = attention_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
 
     # Restore original layout if necessary
     if layout == "bshd":
         o = o.transpose(1, 2)
 
-    return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scores
+    return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
 
 def attention_varlen_forward_pytorch_ref_impl(
     q,
@@ -120,6 +179,7 @@ def attention_varlen_forward_pytorch_ref_impl(
     exp_scores_list = []
     softmax_list = []
     attention_shifted_scaled_scores_list = []
+    attention_scaled_scores_list = []
     attention_scores_list = []
 
     for i in range(batch_size):
@@ -149,6 +209,7 @@ def attention_varlen_forward_pytorch_ref_impl(
             exp_scores_i,
             softmax_i,
             attention_shifted_scaled_scores_i,
+            attention_scaled_scores_i,
             attention_scores_i,
         ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, use_exp2)
 
@@ -161,6 +222,7 @@ def attention_varlen_forward_pytorch_ref_impl(
         exp_scores_list.append(exp_scores_i.unsqueeze(0))
         softmax_list.append(softmax_i.unsqueeze(0))
         attention_shifted_scaled_scores_list.append(attention_shifted_scaled_scores_i.unsqueeze(0))
+        attention_scaled_scores_list.append(attention_scaled_scores_i.unsqueeze(0))
         attention_scores_list.append(attention_scores_i.unsqueeze(0))
 
     # Concatenate outputs
@@ -169,6 +231,7 @@ def attention_varlen_forward_pytorch_ref_impl(
     exp_scores = torch.cat(exp_scores_list, dim=0)
     softmax = torch.cat(softmax_list, dim=0)
     attention_shifted_scaled_scores = torch.cat(attention_shifted_scaled_scores_list, dim=0)
+    attention_scaled_scores = torch.cat(attention_scaled_scores_list, dim=0)
     attention_scores = torch.cat(attention_scores_list, dim=0)
 
     return (
@@ -177,6 +240,7 @@ def attention_varlen_forward_pytorch_ref_impl(
         exp_scores,
         softmax,
         attention_shifted_scaled_scores,
+        attention_scaled_scores,
         attention_scores,
     )
 
@@ -202,6 +266,7 @@ def attention_forward_pytorch_ref_impl(
             exp_scores_ref,
             softmax_ref,
             attention_shifted_scaled_scores_ref,
+            attention_scaled_scores_ref,
             attention_scores_ref,
         ) = attention_varlen_forward_pytorch_ref_impl(
             q.clone(), 
@@ -223,6 +288,7 @@ def attention_forward_pytorch_ref_impl(
             exp_scores_ref,
             softmax_ref,
             attention_shifted_scaled_scores_ref,
+            attention_scaled_scores_ref,
             attention_scores_ref,
         ) = attention_vanilla_forward_pytorch_ref_impl(
             q.clone(), k.clone(), v.clone(), sm_scale, causal, layout, use_exp2
@@ -234,6 +300,7 @@ def attention_forward_pytorch_ref_impl(
             exp_scores_ref,
             softmax_ref,
             attention_shifted_scaled_scores_ref,
+            attention_scaled_scores_ref,
             attention_scores_ref,
     )
 
