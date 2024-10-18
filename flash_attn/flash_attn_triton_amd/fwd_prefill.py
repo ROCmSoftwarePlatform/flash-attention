@@ -297,9 +297,12 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
             # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
             # statically known.
             l_ptrs = LSE + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
-            # We store inf to LSE, not -inf because in the bwd pass, we subtract this
-            # from qk which makes it -inf, such that exp(qk - inf) = 0 for these masked blocks.
-            l = tl.full([BLOCK_M], value=float("inf"), dtype=tl.float32)
+            
+            l = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)
+           
+            # mask_m_offsets = start_m + tl.arange(0, BLOCK_M)
+            # lse_mask = mask_m_offsets < causal_start_idx
+            # softmax_lse = tl.where(lse_mask, 0.0, softmax_lse)
             l_ptrs_mask = offs_m < MAX_SEQLENS_Q
             tl.store(l_ptrs, l, mask=l_ptrs_mask)
             # TODO: Should dropout and return encoded softmax be handled here too?
@@ -456,7 +459,7 @@ def attn_fwd(Q, K, V, bias, sm_scale, LSE, Out, stride_qz, stride_qh, stride_qm,
         softmax_lse *= LN2
     else:
         softmax_lse = m_i + tl.math.log(l_i)
-
+    
     if IS_CAUSAL:
         # zero out nans caused by -infs when doing causal
         mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)

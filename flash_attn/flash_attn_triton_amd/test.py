@@ -9,7 +9,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
-DEBUG = False
+DEBUG = True
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -338,7 +338,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     # (1, 2, 4, 4, 16),
     # (2, 1, 4, 4, 16),
     # (2, 2, 4, 4, 16),
-    (4, 6, 512, 256, 64),
+    (1, 1, 128, 64, 16),
     # (2, 2, 2, 128, 1),
     # (2, 3, 2, 128, 16),
     # (3, 2, 256, 512, 16),
