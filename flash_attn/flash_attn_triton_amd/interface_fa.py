@@ -5,7 +5,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = True
+DEBUG = False
 
 def fwd(q,
         k,

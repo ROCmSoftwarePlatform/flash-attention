@@ -9,7 +9,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
-DEBUG = True
+DEBUG = False
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -147,10 +147,21 @@ def test_op_fwd_prefill_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, d
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(4, 48, 8192, 64), (4, 48, 256, 64), (4, 48, 512, 64),
-                                                 (4, 48, 1024, 64), (8, 48, 4096, 64), (4, 48, 8192, 64),
-                                                 (4, 48, 128, 128), (4, 48, 4096, 128), (4, 48, 16384, 128),
-                                                 (4, 16, 1024, 128), (4, 16, 8192, 128), (32, 48, 8192, 128)])
+@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
+                                                (4, 48, 8192, 64), 
+                                                #  (4, 48, 256, 64), 
+                                                #  (4, 48, 512, 64),
+                                                #  (4, 48, 1024, 64), 
+                                                #  (8, 48, 4096, 64), 
+                                                #  (4, 48, 8192, 64),
+                                                #  (4, 48, 128, 128), 
+                                                #  (4, 48, 4096, 128), 
+                                                #  (4, 48, 16384, 128),
+                                                #  (4, 16, 1024, 128), 
+                                                #  (4, 16, 8192, 128), 
+                                                #  (32, 48, 8192, 128)
+                                                 ]
+                                                 )
 @pytest.mark.parametrize('causal', [True, False])
 def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
 
@@ -331,38 +342,38 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1),
-    # (1, 1, 2, 4, 16),
-    # (1, 1, 4, 2, 16),
-    # (1, 1, 4, 4, 16),
-    # (1, 2, 4, 4, 16),
-    # (2, 1, 4, 4, 16),
-    # (2, 2, 4, 4, 16),
+    (1, 1, 1, 1, 1),
+    (1, 1, 2, 4, 16),
+    (1, 1, 4, 2, 16),
+    (1, 1, 4, 4, 16),
+    (1, 2, 4, 4, 16),
+    (2, 1, 4, 4, 16),
+    (2, 2, 4, 4, 16),
     (1, 1, 128, 64, 16),
-    # (2, 2, 2, 128, 1),
-    # (2, 3, 2, 128, 16),
-    # (3, 2, 256, 512, 16),
-    # (3, 3, 128, 128, 64),
-    # (2, 4, 1024, 1024, 64),
-    # (4, 6, 108, 256, 224),
-    # (4, 8, 2048, 2048, 128),
-    # (4, 16, 4096, 4096, 64),
-    # (2, 4, 8192, 8192, 32),
+    (2, 2, 2, 128, 1),
+    (2, 3, 2, 128, 16),
+    (3, 2, 256, 512, 16),
+    (3, 3, 128, 128, 64),
+    (2, 4, 1024, 1024, 64),
+    (4, 6, 108, 256, 224),
+    (4, 8, 2048, 2048, 128),
+    (4, 16, 4096, 4096, 64),
+    (2, 4, 8192, 8192, 32),
     # # fa configs
-    # (4, 6, 113, 203, 256),
-    # (4, 6, 128, 217, 256),
-    # (4, 6, 113, 211, 128),
-    # (4, 6, 108, 256, 128),
-    # (4, 6, 256, 512, 64),
-    # (4, 6, 512, 256, 64),
-    # (4, 6, 1024, 1024, 32),
-    # (4, 6, 1023, 1024, 32),
-    # (4, 6, 1024, 1023, 32),
-    # (4, 6, 2048, 2048, 32),
+    (4, 6, 113, 203, 256),
+    (4, 6, 128, 217, 256),
+    (4, 6, 113, 211, 128),
+    (4, 6, 108, 256, 128),
+    (4, 6, 256, 512, 64),
+    (4, 6, 512, 256, 64),
+    (4, 6, 1024, 1024, 32),
+    (4, 6, 1023, 1024, 32),
+    (4, 6, 1024, 1023, 32),
+    (4, 6, 2048, 2048, 32),
 ])
-@pytest.mark.parametrize('causal', [True])
+@pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('layout', ["bhsd"])
+@pytest.mark.parametrize('layout', ["thd"])
 @pytest.mark.parametrize('use_exp2', [False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):

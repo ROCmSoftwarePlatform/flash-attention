@@ -56,8 +56,8 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
     # Calculate cumulative sequence lengths
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens_q.cumsum(dim=0)])
     cu_seqlens_k = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens_k.cumsum(dim=0)])
-    cu_seqlens_q = cu_seqlens_q.to(device="cuda")
-    cu_seqlens_k = cu_seqlens_k.to(device="cuda")
+    cu_seqlens_q = cu_seqlens_q.to(device="cuda").to(torch.int32)
+    cu_seqlens_k = cu_seqlens_k.to(device="cuda").to(torch.int32)
 
     # Total lengths
     total_q = cu_seqlens_q[-1].item()
