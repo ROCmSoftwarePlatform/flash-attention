@@ -5,7 +5,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = False
+DEBUG = True
 
 def fwd(q,
         k,
@@ -137,11 +137,13 @@ def bwd(
         None,
         False,
         True,
-        True,
     )
 
-    softmax_d = None
-    return dq, dk, dv, softmax_d
+    if DEBUG:
+        print("dq:", dq, dq.shape)
+       
+
+    return dq, dk, dv, None
 
 def varlen_fwd(
         q, 
@@ -290,7 +292,6 @@ def varlen_bwd(
         max_seqlen_q,
         max_seqlen_k,
         False,
-        True,
         True,
     )
 

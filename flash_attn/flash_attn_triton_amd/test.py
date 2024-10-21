@@ -149,17 +149,17 @@ def test_op_fwd_prefill_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, d
 
 @pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
                                                 (4, 48, 8192, 64), 
-                                                #  (4, 48, 256, 64), 
-                                                #  (4, 48, 512, 64),
-                                                #  (4, 48, 1024, 64), 
-                                                #  (8, 48, 4096, 64), 
-                                                #  (4, 48, 8192, 64),
-                                                #  (4, 48, 128, 128), 
-                                                #  (4, 48, 4096, 128), 
-                                                #  (4, 48, 16384, 128),
-                                                #  (4, 16, 1024, 128), 
-                                                #  (4, 16, 8192, 128), 
-                                                #  (32, 48, 8192, 128)
+                                                 (4, 48, 256, 64), 
+                                                 (4, 48, 512, 64),
+                                                 (4, 48, 1024, 64), 
+                                                 (8, 48, 4096, 64), 
+                                                 (4, 48, 8192, 64),
+                                                 (4, 48, 128, 128), 
+                                                 (4, 48, 4096, 128), 
+                                                 (4, 48, 16384, 128),
+                                                 (4, 16, 1024, 128), 
+                                                 (4, 16, 8192, 128), 
+                                                 (32, 48, 8192, 128)
                                                  ]
                                                  )
 @pytest.mark.parametrize('causal', [True, False])
@@ -504,9 +504,8 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 @pytest.mark.parametrize('use_exp2', [False])
 @pytest.mark.parametrize('bwd_preprocessing_use_o', [True])
 @pytest.mark.parametrize('layout', ["thd"])
-@pytest.mark.parametrize('use_new', [True])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, layout,  use_new, DEBUG_INPUT):
+def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, layout, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
@@ -603,7 +602,6 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         metadata.max_seqlens_k,
         use_exp2,
         bwd_preprocessing_use_o=bwd_preprocessing_use_o,
-        use_new=use_new,
     )
 
     # =============================================== Check ==============================================================

@@ -48,7 +48,6 @@ class _attention_prefill(torch.autograd.Function):
             None,
             ctx.use_exp2,
             ctx.bwd_preprocessing_use_o,
-            True,
         )
 
 attention_prefill = _attention_prefill.apply

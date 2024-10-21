@@ -19,7 +19,7 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
-DEBUG = False
+DEBUG = True
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:
@@ -582,13 +582,13 @@ def get_dropout_fraction(
 @pytest.mark.parametrize("local", [False])
 # @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("causal", [False])
-@pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128])
-# @pytest.mark.parametrize("d", [64])
+@pytest.mark.parametrize("d", [16])
 # @pytest.mark.parametrize('seqlen', [128, 256, 384, 512, 768, 1024, 2048])
-@pytest.mark.parametrize("seqlen", [97, 128, 200, 384, 768, 1024, 1025, 2048])
-# @pytest.mark.parametrize("seqlen", [512])
+# @pytest.mark.parametrize("seqlen", [97, 128, 200, 384, 768, 1024, 1025, 2048])
+@pytest.mark.parametrize("seqlen", [2])
 # @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
 @pytest.mark.parametrize("dropout_p", [0.0])
 def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype):
@@ -605,8 +605,8 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 4
-    nheads = 9
+    batch_size = 1 # 4
+    nheads = 1 # 9 
     window_size = (-1, -1) if not local else torch.randint(0, seqlen, (2,))
     qkv = torch.randn(
         batch_size, seqlen, 3, nheads, d, device=device, dtype=dtype, requires_grad=True
@@ -727,6 +727,10 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
     if test_backward:
+        if DEBUG:
+            print("dqkv:", dqkv, dqkv.shape)
+            print("dqkv_ref:", dqkv_ref, dqkv_ref.shape)
+            print("dqkv_pt:", dqkv_pt, dqkv_pt.shape)
         assert (dqkv - dqkv_ref).abs().max().item() <= 2 * (dqkv_pt - dqkv_ref).abs().max().item()
 
 

@@ -5,7 +5,7 @@ import triton.language as tl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import get_shape_from_layout, get_strides_from_layout
 
-DEBUG = False
+DEBUG = True
 
 @triton.jit
 def _bwd_preprocess_use_o(
@@ -583,7 +583,7 @@ def _bwd_kernel(
 
 
 # NOTE: smaller blocks have lower accuracy. more accumlation error probably 128 * 128 seems good but leads to oom. 64 * 64 has accumlation errors but no oom.
-def attention_prefill_backward_triton_new_impl(
+def attention_prefill_backward_triton_impl(
     do,
     q,
     k,
@@ -665,38 +665,50 @@ def attention_prefill_backward_triton_new_impl(
     ACTUAL_BLOCK_DMODEL = head_size
 
     do = do.contiguous()
-    if sequence_parallel:
-        # replicate q for each parallel sequence
-        replicas = num_blocks_n
-        new_dq_shape = (replicas,) + q.shape
-        if dq is None: 
-            dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
-        else:
-            dq = dq.contiguous()
-    else:
-        if dq is None:
-            dq = torch.zeros_like(q, dtype=q.dtype)
-        else:
-            dq = dq.contiguous()
+    # if sequence_parallel:
+    #     # replicate q for each parallel sequence
+    #     replicas = num_blocks_n
+    #     new_dq_shape = (replicas,) + q.shape
+    #     if dq is None: 
+    #         dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
+    #     else:
+    #         dq = dq.contiguous()
+    # else:
+    #     if dq is None:
+    #         dq = torch.zeros_like(q, dtype=q.dtype)
+    #     else:
+    #         dq = dq.contiguous()
 
+
+    # if dk is None:
+    #     if True:
+    #         dk = torch.zeros_like(k)
+    #     else:
+    #         dk = torch.empty_like(k)
+    # else:
+    #     dk = dk.contiguous()
+
+    # if dv is None:
+    #     if True:
+    #         dv = torch.zeros_like(v)
+    #     else:
+    #         dv = torch.empty_like(v)
+    # else:
+    #     dv = dv.contiguous()
+
+    # qkv packed
+    is_packed = False
+    if not dq.is_contiguous():
+        is_packed = True
+        dq_og = dq
+        dq = dq.contiguous()
+        dk_og = dk
+        dk = dk.contiguous()
+        dv_og = dv
+        dv = dv.contiguous()
+    
     # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
     dq.zero_()
-
-    if dk is None:
-        if True:
-            dk = torch.zeros_like(k)
-        else:
-            dk = torch.empty_like(k)
-    else:
-        dk = dk.contiguous()
-
-    if dv is None:
-        if True:
-            dv = torch.zeros_like(v)
-        else:
-            dv = torch.empty_like(v)
-    else:
-        dv = dv.contiguous()
 
     # assert contigious
     assert do.is_contiguous()
@@ -705,9 +717,7 @@ def attention_prefill_backward_triton_new_impl(
     assert v.is_contiguous()
     assert o.is_contiguous()
     assert softmax_lse.is_contiguous()
-    assert dq.is_contiguous()
-    assert dk.is_contiguous()
-    assert dv.is_contiguous()
+
 
     num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
@@ -840,71 +850,20 @@ def attention_prefill_backward_triton_new_impl(
     if len(dq.shape) == 5:
         dq = dq.sum(dim=0)
 
-    return dq, dk, dv, delta, None, None
-
-
-def attention_prefill_backward_triton_impl(
-    do,
-    q,
-    k,
-    v,
-    o,
-    softmax_lse,
-    dq,
-    dk,
-    dv,
-    sm_scale: float,
-    alibi_slopes,
-    causal,
-    layout: str,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-    use_exp2: bool,
-    bwd_preprocessing_use_o: bool,
-    use_new,
-):
-    if use_new:
-        return attention_prefill_backward_triton_new_impl(
-            do,
-            q,
-            k,
-            v,
-            o,
-            softmax_lse,
-            dq,
-            dk,
-            dv,
-            sm_scale,
-            alibi_slopes,
-            causal,
-            layout,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            use_exp2,
-            bwd_preprocessing_use_o,
-        )
+    if DEBUG:
+        print("_bwd_kernel outputs")
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
+        print("delta:", delta, delta.shape)
+    
+    if is_packed:
+        dq_og.copy_(dq)
+        dk_og.copy_(dk)
+        dv_og.copy_(dv)
+        return dq_og, dk_og, dv_og, delta, None, None
     else:
-        # test pytorch impl
-        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-            do, q, k, v, o, softmax_lse, sm_scale, causal, layout, use_exp2, bwd_preprocessing_use_o
-        )
-        if dq is not None:
-            dq.copy_(dq_ref)
-        else:
-            dq = dq_ref
 
-        if dk is not None:
-            dk.copy_(dk_ref)
-        else:
-            dk = dk_ref
+        return dq, dk, dv, delta, None, None
 
-        if dv is not None:
-            dv.copy_(dv_ref)
-        else:
-            dv = dv_ref
 
-        return dq, dk, dv, delta_ref, None, None
