@@ -979,8 +979,6 @@ class _attention(torch.autograd.Function):
         else:
             alibi_strides = (0, 0)
 
-        print("cu_seqlens_q:", metadata.cu_seqlens_q)
-        print("cu_seqlens_k:", metadata.cu_seqlens_k)
         attn_fwd[grid](q, k, v, metadata.bias, metadata.sm_scale, M, o, *q_strides, *k_strides, *v_strides, *o_strides,
                        *bias_strides, *alibi_strides, metadata.cu_seqlens_q, metadata.cu_seqlens_k,
                        dropout_p=metadata.dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset,

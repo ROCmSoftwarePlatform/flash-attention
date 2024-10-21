@@ -371,10 +371,10 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     (4, 6, 1024, 1023, 32),
     (4, 6, 2048, 2048, 32),
 ])
-@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('layout', ["thd"])
-@pytest.mark.parametrize('use_exp2', [False]) # works when use_exp2 is false
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
