@@ -9,7 +9,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
-DEBUG = False
+DEBUG = True
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -470,10 +470,12 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     # (1, 1, 1, 1, 1),
     # (1, 1, 4, 4, 4),
     # (2, 1, 4, 4, 16),
-    # (1, 2, 4, 4, 16),
+    (1, 2, 4, 4, 16),
     # (2, 2, 4, 4, 16),
     # (1, 1, 4, 4, 16),
-    (1, 1, 4, 4, 32)
+    # (2, 1, 4, 4 , 16),
+    # (4, 6, 8, 8 , 16),
+    # (1, 1, 4, 4, 32),
     # (1, 1, 16, 16, 16),
     # (1, 1, 32, 32, 16),
     # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
@@ -484,12 +486,12 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     # (1, 1, 256, 512, 16),
     # (1, 1, 512, 512, 64), 
     # (1, 1, 1024, 1024, 64),
-    # fa configs
+    # # fa configs
     # (2, 2, 128, 128, 65),
     # (2, 2, 128, 128, 224),
     # (4, 6, 108, 256, 224),
     # (1, 1, 256, 512, 16),
-    # old tests that work
+    # # old tests that work
     # (4, 48, 1024, 1024, 73),
     # (4, 48, 1024, 1024, 64),
     # (4, 48, 2048, 2048, 64),
@@ -511,7 +513,7 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
 
     alibi_slopes = None
     if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
+        q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype)
     else:
         q, k, v, metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
     if DEBUG_INPUT:

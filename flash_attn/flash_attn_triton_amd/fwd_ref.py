@@ -173,14 +173,20 @@ def attention_varlen_forward_pytorch_ref_impl(
     num_heads = q.shape[1]
     head_dim = q.shape[2]
 
-    # Prepare lists to collect outputs
-    o_list = []
-    softmax_lse_list = []
-    exp_scores_list = []
-    softmax_list = []
-    attention_shifted_scaled_scores_list = []
-    attention_scaled_scores_list = []
-    attention_scores_list = []
+    # Pre-allocate outputs
+    total_L_q = q.shape[0]
+    total_L_k = k.shape[0]
+
+    o = torch.empty((total_L_q, num_heads, head_dim), dtype=q.dtype, device=q.device)
+    softmax_lse = torch.empty((total_L_q, num_heads), dtype=q.dtype, device=q.device)
+
+    # Pre-allocate tensors for variable-length outputs
+    # For outputs that depend on both L_q and L_k, we preallocate using total sequence lengths
+    exp_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
+    softmax = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
+    attention_shifted_scaled_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
+    attention_scaled_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
+    attention_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
 
     for i in range(batch_size):
         # Get the start and end indices for the current sequence
@@ -193,9 +199,6 @@ def attention_varlen_forward_pytorch_ref_impl(
         q_i = q[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
         k_i = k[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
         v_i = v[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
-
-        L_q_i = end_q - start_q
-        L_k_i = end_k - start_k
 
         # Permute to [num_heads, L_q_i, head_dim]
         q_i = q_i.permute(1, 0, 2)
@@ -216,23 +219,24 @@ def attention_varlen_forward_pytorch_ref_impl(
         # Convert back to 'thd' layout and float16
         o_i = o_i.permute(1, 0, 2).to(torch.float16)  # [L_q_i, num_heads, head_dim]
 
-        # Collect outputs
-        o_list.append(o_i)
-        softmax_lse_list.append(softmax_lse_i.unsqueeze(0))
-        exp_scores_list.append(exp_scores_i.unsqueeze(0))
-        softmax_list.append(softmax_i.unsqueeze(0))
-        attention_shifted_scaled_scores_list.append(attention_shifted_scaled_scores_i.unsqueeze(0))
-        attention_scaled_scores_list.append(attention_scaled_scores_i.unsqueeze(0))
-        attention_scores_list.append(attention_scores_i.unsqueeze(0))
+        # Place outputs in pre-allocated tensors
+        o[start_q:end_q, :, :] = o_i
+        softmax_lse[start_q:end_q, :] = softmax_lse_i.transpose(0, 1)  # Transpose to [L_q_i, num_heads]
 
-    # Concatenate outputs
-    o = torch.cat(o_list, dim=0)
-    softmax_lse = torch.cat(softmax_lse_list, dim=0)
-    exp_scores = torch.cat(exp_scores_list, dim=0)
-    softmax = torch.cat(softmax_list, dim=0)
-    attention_shifted_scaled_scores = torch.cat(attention_shifted_scaled_scores_list, dim=0)
-    attention_scaled_scores = torch.cat(attention_scaled_scores_list, dim=0)
-    attention_scores = torch.cat(attention_scores_list, dim=0)
+        # For variable-sized outputs, map them into the preallocated tensors
+        # exp_scores_i: [num_heads, L_q_i, L_k_i] -> [L_q_i, num_heads, L_k_i]
+        exp_scores_i = exp_scores_i.permute(1, 0, 2)
+        softmax_i = softmax_i.permute(1, 0, 2)
+        attention_shifted_scaled_scores_i = attention_shifted_scaled_scores_i.permute(1, 0, 2)
+        attention_scaled_scores_i = attention_scaled_scores_i.permute(1, 0, 2)
+        attention_scores_i = attention_scores_i.permute(1, 0, 2)
+
+        # Place into pre-allocated tensors
+        exp_scores[start_q:end_q, :, start_k:end_k] = exp_scores_i
+        softmax[start_q:end_q, :, start_k:end_k] = softmax_i
+        attention_shifted_scaled_scores[start_q:end_q, :, start_k:end_k] = attention_shifted_scaled_scores_i
+        attention_scaled_scores[start_q:end_q, :, start_k:end_k] = attention_scaled_scores_i
+        attention_scores[start_q:end_q, :, start_k:end_k] = attention_scores_i
 
     return (
         o,
@@ -258,6 +262,20 @@ def attention_forward_pytorch_ref_impl(
     max_seqlen_k,
     use_exp2
     ):
+    if DEBUG:
+        print()
+        print("attention_forward_pytorch_ref_impl")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("sm_scale:", sm_scale)
+        print("causal:", causal)
+        print("cu_seqlens_q:", cu_seqlens_q)
+        print("cu_seqlens_k:", cu_seqlens_k)
+        print("max_seqlen_q:", max_seqlen_q)
+        print("max_seqlen_k:", max_seqlen_k)
+        print("use_exp2:", use_exp2)
+
      # compute reference
     if layout == "thd":
         (

@@ -28,7 +28,7 @@ def attention_backward_core_ref_impl(
     if DEBUG:
         print("p:", p)
     # compute gradient wrt v
-    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
+    dv = torch.matmul(p.transpose(-2, -1), do)
 
     # compute dp
     dp = torch.matmul(do, v.transpose(-2, -1))
@@ -78,11 +78,15 @@ def attention_varlen_backward_pytorch_ref_impl(
     num_heads = q.shape[1]
     head_dim = q.shape[2]
 
-    # Prepare lists to collect outputs
-    dq_list = []
-    dk_list = []
-    dv_list = []
-    delta_list = []
+    # Pre-allocate outputs
+    total_L_q = q.shape[0]
+    total_L_k = k.shape[0]
+
+    dq = torch.zeros_like(q)
+    dk = torch.zeros_like(k)
+    dv = torch.zeros_like(v)
+    # delta has the same shape as softmax_lse: [total_L_q, num_heads]
+    delta = torch.zeros((total_L_q, num_heads), dtype=o.dtype, device=o.device)
 
     for i in range(batch_size):
         # Get the start and end indices for the current sequence
@@ -92,12 +96,14 @@ def attention_varlen_backward_pytorch_ref_impl(
         end_k = cu_seqlens_k[i + 1].item()
 
         # Extract q_i, k_i, v_i, do_i, o_i, softmax_lse_i
-        q_i = q[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
-        k_i = k[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
-        v_i = v[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
-        do_i = do[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
-        o_i = o[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
-        softmax_lse_i = softmax_lse[i, :, :]  # [num_heads, L_q_i]
+        q_i = q[start_q:end_q, :, :]      # [L_q_i, num_heads, head_dim]
+        k_i = k[start_k:end_k, :, :]      # [L_k_i, num_heads, head_dim]
+        v_i = v[start_k:end_k, :, :]      # [L_k_i, num_heads, head_dim]
+        do_i = do[start_q:end_q, :, :]    # [L_q_i, num_heads, head_dim]
+        o_i = o[start_q:end_q, :, :]      # [L_q_i, num_heads, head_dim]
+        # softmax_lse has shape [total_L_q, num_heads]
+        softmax_lse_i = softmax_lse[start_q:end_q, :]  # [L_q_i, num_heads]
+        softmax_lse_i = softmax_lse_i.transpose(0, 1)  # [num_heads, L_q_i]
 
         # Permute to [num_heads, L_q_i, head_dim]
         q_i = q_i.permute(1, 0, 2)
@@ -105,7 +111,7 @@ def attention_varlen_backward_pytorch_ref_impl(
         v_i = v_i.permute(1, 0, 2)
         do_i = do_i.permute(1, 0, 2)
         o_i = o_i.permute(1, 0, 2)
-        softmax_lse_i = softmax_lse_i  # Already in [num_heads, L_q_i]
+        # softmax_lse_i is already in [num_heads, L_q_i]
 
         # Call the core backward function for this sequence
         dq_i, dk_i, dv_i, delta_i = attention_backward_core_ref_impl(
@@ -121,22 +127,18 @@ def attention_varlen_backward_pytorch_ref_impl(
             bwd_preprocessing_use_o,
         )
 
-        # Convert back to 'thd' layout and float16
+        # Convert back to 'thd' layout
         dq_i = dq_i.permute(1, 0, 2)  # [L_q_i, num_heads, head_dim]
         dk_i = dk_i.permute(1, 0, 2)  # [L_k_i, num_heads, head_dim]
         dv_i = dv_i.permute(1, 0, 2)  # [L_k_i, num_heads, head_dim]
 
-        # Collect outputs
-        dq_list.append(dq_i)
-        dk_list.append(dk_i)
-        dv_list.append(dv_i)
-        delta_list.append(delta_i.unsqueeze(0))
-
-    # Concatenate outputs
-    dq = torch.cat(dq_list, dim=0)
-    dk = torch.cat(dk_list, dim=0)
-    dv = torch.cat(dv_list, dim=0)
-    delta = torch.cat(delta_list, dim=0)  # Shape: [batch_size, num_heads, L_q_i]
+        # Place outputs in pre-allocated tensors
+        dq[start_q:end_q, :, :] = dq_i
+        dk[start_k:end_k, :, :] += dk_i  # Accumulate gradients for shared keys
+        dv[start_k:end_k, :, :] += dv_i  # Accumulate gradients for shared values
+        # delta_i has shape [num_heads, L_q_i]
+        delta_i = delta_i.transpose(1, 0)  # [L_q_i, num_heads]
+        delta[start_q:end_q, :] = delta_i
 
     return dq, dk, dv, delta
 
