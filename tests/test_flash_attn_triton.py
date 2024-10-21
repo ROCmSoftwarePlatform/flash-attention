@@ -19,7 +19,7 @@ from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
 
-DEBUG = False
+DEBUG = True
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:
@@ -1643,9 +1643,23 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
     # of a Pytorch implementation.
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item() + 1e-5
 
-    assert (dq - dq_ref).abs().max().item() <= 2 * (dq_pt - dq_ref).abs().max().item() + 1e-5
-    assert (dk - dk_ref).abs().max().item() <= 2 * (dk_pt - dk_ref).abs().max().item() + 1e-5
+    if DEBUG:
+        print("dv:", dv, dv.shape)
+        print("dv_ref:", dv_ref, dv_ref.shape)
+        print("dv_pt:", dv_pt, dv_pt.shape)
     assert (dv - dv_ref).abs().max().item() <= 2 * (dv_pt - dv_ref).abs().max().item() + 1e-5
+    
+    if DEBUG:
+        print("dk:", dk, dk.shape)
+        print("dk_ref:", dk_ref, dk_ref.shape)
+        print("dk_pt:", dk_pt, dk_pt.shape)
+    assert (dk - dk_ref).abs().max().item() <= 2 * (dk_pt - dk_ref).abs().max().item() + 1e-5
+
+    if DEBUG:
+        print("dq:", dq, dq.shape)
+        print("dq_ref:", dq_ref, dq_ref.shape)
+        print("dq_pt:", dq_pt, dq_pt.shape)
+    assert (dq - dq_ref).abs().max().item() <= 2 * (dq_pt - dq_ref).abs().max().item() + 1e-5
 
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
