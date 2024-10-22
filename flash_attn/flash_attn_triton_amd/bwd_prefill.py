@@ -80,110 +80,6 @@ def _bwd_preprocess_use_o(
     tl.store(delta_ptrs, delta, mask=mask_m)
 
 
-@triton.jit
-def _bwd_preprocess_use_p(
-    Q,       # Pointer to queries
-    K,       # Pointer to keys
-    V,       # Pointer to values
-    DO,      # Pointer to gradients of the output
-    LSE,     # Pointer to log-sum-exp from forward pass
-    Delta,   # Pointer to store delta
-    sm_scale,    # Softmax scaling factor
-    stride_dq_all,
-    stride_qz,
-    stride_qh,
-    stride_qm,
-    stride_qk,
-    stride_kz,
-    stride_kh,
-    stride_kn,
-    stride_kk,
-    stride_vz,
-    stride_vh,
-    stride_vn,
-    stride_vk,
-    N_CTX_Q: tl.constexpr,  # Number of query tokens
-    N_CTX_K: tl.constexpr,  # Number of key tokens
-    BLOCK_M: tl.constexpr,  # Block size for M dimension
-    BLOCK_N: tl.constexpr,  # Block size for N dimension
-    BLOCK_DMODEL: tl.constexpr,  # Block size for model dimension
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
-    USE_EXP2: tl.constexpr,      # Whether to use exp2 for exponentials
-    Z: tl.constexpr,             # Batch size
-    H: tl.constexpr,             # Number of heads
-):
-    # Compute program IDs for blocks
-    pid_m = tl.program_id(0)
-    pid_bh = tl.program_id(1)
-
-    # compute batch and head indices
-    batch_idx = pid_bh // H
-    head_idx = pid_bh % H
-
-    # Compute offsets for M and D dimensions
-    off_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    off_d = tl.arange(0, BLOCK_DMODEL)
-
-    # Create masks for bounds checking
-    mask_m = off_m < N_CTX_Q
-    mask_d = off_d < ACTUAL_BLOCK_DMODEL
-
-    # Compute pointers for Q and DO
-    q_ptrs = Q + batch_idx * stride_qz + head_idx * stride_qh + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
-    do_ptrs = DO + batch_idx * stride_qz + head_idx * stride_qh + off_m[:, None] * stride_qm + off_d[None, :] * stride_qk
-
-    # Load Q and DO
-    q = tl.load(q_ptrs, mask=mask_m[:, None] & mask_d[None, :], other=0.0)
-    do = tl.load(do_ptrs, mask=mask_m[:, None] & mask_d[None, :], other=0.0)
-
-    # Initialize delta accumulator
-    delta = tl.zeros([BLOCK_M], dtype=tl.float32)
-
-    # Loop over blocks of K and V
-    for start_n in range(0, N_CTX_K, BLOCK_N):
-        # Compute offsets for N dimension
-        off_n = start_n + tl.arange(0, BLOCK_N)
-        mask_n = off_n < N_CTX_K
-
-        # Compute pointers for K and V
-        k_ptrs = K + batch_idx * stride_kz + head_idx * stride_kh + off_n[:, None] * stride_kn + off_d[None, :] * stride_kk
-        v_ptrs = V + batch_idx * stride_vz + head_idx * stride_vh + off_n[:, None] * stride_vn + off_d[None, :] * stride_vk
-
-        # Load K and V
-        k = tl.load(k_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
-        v = tl.load(v_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
-
-        # Compute QK^T
-        qk = tl.dot(q, tl.trans(k))
-
-        # Load LSE
-        lse_ptrs = LSE + pid_bh * N_CTX_Q + off_m
-        lse = tl.load(lse_ptrs, mask=mask_m, other=float('-inf'))
-
-        # Compute scaled QK and softmax probabilities
-        if USE_EXP2:
-            RCP_LN2: tl.constexpr = 1.4426950408889634
-            qk_scaled = qk * sm_scale * RCP_LN2
-            lse_scaled = lse * RCP_LN2
-            p = tl.exp2(qk_scaled - lse_scaled[:, None])
-        else:
-            qk_scaled = qk * sm_scale
-            p = tl.exp(qk_scaled - lse[:, None])
-
-        # Mask p where necessary
-        p = tl.where(mask_m[:, None] & mask_n[None, :], p, 0.0)
-
-        # Compute dp = DO @ V^T
-        v_t = tl.trans(v)
-        dp = tl.dot(do, v_t)
-
-        # Accumulate delta
-        delta += tl.sum(p * dp, axis=1)
-
-    # Write-back delta
-    delta_ptrs = Delta + pid_bh * N_CTX_Q + off_m
-    tl.store(delta_ptrs, delta, mask=mask_m)
-
 
 @triton.jit
 def _bwd_kernel_one_col_block(
@@ -729,57 +625,24 @@ def attention_prefill_backward_triton_impl(
 
     is_varlen = layout == "thd"
 
-    if bwd_preprocessing_use_o:
-        _bwd_preprocess_use_o[(num_blocks_m, batch_headsize)](
-            o,
-            do,
-            delta,
-            stride_oz, stride_oh, stride_om, stride_ok,
-            stride_oz, stride_oh, stride_om, stride_ok,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            BLOCK_M=BLOCK_M,
-            BLOCK_DMODEL=BLOCK_DMODEL,
-            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-            N_CTX_Q=max_seqlen_q,
-            Z=batch,
-            H=nheads_q,
-            IS_VARLEN=is_varlen
-        )
-    else:
-        _bwd_preprocess_use_p[(num_blocks_m, batch_headsize)](
-            q,
-            k,
-            v,
-            do,
-            softmax_lse,
-            delta,
-            sm_scale,
-            stride_dq_all,
-            stride_qz,
-            stride_qh,
-            stride_qm,
-            stride_qk,
-            stride_kz,
-            stride_kh,
-            stride_kn,
-            stride_kk,
-            stride_vz,
-            stride_vh,
-            stride_vn,
-            stride_vk,
-            Z=batch,
-            H=nheads_q,
-            N_CTX_Q=max_seqlen_q,
-            N_CTX_K=max_seqlen_k,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_DMODEL=BLOCK_DMODEL,
-            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-            USE_EXP2=use_exp2,
-        )
+    _bwd_preprocess_use_o[(num_blocks_m, batch_headsize)](
+        o,
+        do,
+        delta,
+        stride_oz, stride_oh, stride_om, stride_ok,
+        stride_oz, stride_oh, stride_om, stride_ok,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        BLOCK_M=BLOCK_M,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+        N_CTX_Q=max_seqlen_q,
+        Z=batch,
+        H=nheads_q,
+        IS_VARLEN=is_varlen
+    )
 
     if DEBUG:
         print("_bwd_kernel inputs")

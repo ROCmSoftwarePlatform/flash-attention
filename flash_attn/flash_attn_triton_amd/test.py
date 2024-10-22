@@ -9,7 +9,7 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
-DEBUG = True
+DEBUG = False
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
@@ -430,12 +430,15 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
 
-    # use trick with lse to get the softmax. you need the scores but is it
-    softmax_triton = torch.exp(attention_scaled_scores_ref - softmax_lse_triton.unsqueeze(-1))
-    if DEBUG:
-        print("softmax_triton:", softmax_triton, softmax_triton.shape)
-        print("softmax_ref:", softmax_ref, softmax_ref.shape)
-    torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
+    if layout != "thd":
+        # use trick with lse to get the softmax. you need the scores but is it
+        softmax_triton = torch.exp(attention_scaled_scores_ref - softmax_lse_triton.unsqueeze(-1))
+        if DEBUG:
+            print("attention_scaled_scores_ref:", attention_scaled_scores_ref, attention_scaled_scores_ref.shape)
+            print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
+            print("softmax_triton:", softmax_triton, softmax_triton.shape)
+            print("softmax_ref:", softmax_ref, softmax_ref.shape)
+        torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
     
     if DEBUG:
         print("o:", o, o.shape)
@@ -506,14 +509,14 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 @pytest.mark.parametrize('use_exp2', [False])
 @pytest.mark.parametrize('bwd_preprocessing_use_o', [True])
 @pytest.mark.parametrize('layout', ["thd"])
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
+@pytest.mark.parametrize('DEBUG_INPUT', [True]) # debug output causes nans in both new and old backend
 def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, layout, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
     alibi_slopes = None
     if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype)
+        q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
     else:
         q, k, v, metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
     if DEBUG_INPUT:

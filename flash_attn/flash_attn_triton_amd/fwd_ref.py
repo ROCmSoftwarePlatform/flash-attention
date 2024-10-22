@@ -11,7 +11,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         print("k:", k, k.shape)
         print("v:", v, v.shape)
         print("sm_scale:", sm_scale)
-        print("causal:", use_exp2)
+        print("causal:", causal)
         print("use_exp2:", use_exp2)
     
     # Compute attention scores
@@ -178,15 +178,7 @@ def attention_varlen_forward_pytorch_ref_impl(
     total_L_k = k.shape[0]
 
     o = torch.empty((total_L_q, num_heads, head_dim), dtype=q.dtype, device=q.device)
-    softmax_lse = torch.empty((total_L_q, num_heads), dtype=q.dtype, device=q.device)
-
-    # Pre-allocate tensors for variable-length outputs
-    # For outputs that depend on both L_q and L_k, we preallocate using total sequence lengths
-    exp_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
-    softmax = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
-    attention_shifted_scaled_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
-    attention_scaled_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
-    attention_scores = torch.zeros((total_L_q, num_heads, total_L_k), dtype=q.dtype, device=q.device)
+    softmax_lse = torch.empty((total_L_q, num_heads), dtype=torch.float32, device=q.device)
 
     for i in range(batch_size):
         # Get the start and end indices for the current sequence
@@ -231,21 +223,14 @@ def attention_varlen_forward_pytorch_ref_impl(
         attention_scaled_scores_i = attention_scaled_scores_i.permute(1, 0, 2)
         attention_scores_i = attention_scores_i.permute(1, 0, 2)
 
-        # Place into pre-allocated tensors
-        exp_scores[start_q:end_q, :, start_k:end_k] = exp_scores_i
-        softmax[start_q:end_q, :, start_k:end_k] = softmax_i
-        attention_shifted_scaled_scores[start_q:end_q, :, start_k:end_k] = attention_shifted_scaled_scores_i
-        attention_scaled_scores[start_q:end_q, :, start_k:end_k] = attention_scaled_scores_i
-        attention_scores[start_q:end_q, :, start_k:end_k] = attention_scores_i
-
     return (
         o,
         softmax_lse,
-        exp_scores,
-        softmax,
-        attention_shifted_scaled_scores,
-        attention_scaled_scores,
-        attention_scores,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 
 

@@ -6,6 +6,19 @@ DEBUG = False
 def attention_backward_core_ref_impl(
     do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2, bwd_preprocessing_use_o
 ):
+    if DEBUG:
+        print()
+        print("attention_backward_core_ref_impl")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o, o.shape)
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
+        print("sm_scale:", sm_scale)
+        print("causal:", causal)
+        print("use_exp2:", use_exp2)
+        print("bwd_preprocessing_use_o:", bwd_preprocessing_use_o)
+
     # recompute attention_scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if DEBUG:

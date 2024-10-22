@@ -531,6 +531,8 @@ def attention_prefill_forward_triton_impl_explicit(
         print("return_scores:", return_scores)
         print("use_exp2:", use_exp2)
 
+    # check if varlen
+    is_varlen = layout == "thd"
 
     # NOTE: a large bias tensor leads to overflow during pointer arithmetic
     if (bias is not None):
@@ -563,7 +565,7 @@ def attention_prefill_forward_triton_impl_explicit(
     # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
     # only.  This return holds no useful output aside from debugging.
     if return_scores:
-        exp_scores = torch.zeros((batch, nheads_q, max_seqlens_q,max_seqlens_k), device=q.device,
+        exp_scores = torch.zeros((batch, nheads_q, max_seqlens_q, max_seqlens_k), device=q.device,
                                         dtype=torch.float32)
     else:
         exp_scores = None
@@ -587,7 +589,6 @@ def attention_prefill_forward_triton_impl_explicit(
         alibi_strides = (0, 0)
 
 
-    is_varlen = layout == "thd"
     attn_fwd[grid](q, k, v, bias, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, cu_seqlens_q, cu_seqlens_k,
                     dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, scores=scores, 
@@ -597,6 +598,9 @@ def attention_prefill_forward_triton_impl_explicit(
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
                     > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_scores)
+
+    if is_varlen:
+        softmax_lse = softmax_lse.transpose(2, 1).reshape(-1, nheads_q).contiguous()
 
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
 
