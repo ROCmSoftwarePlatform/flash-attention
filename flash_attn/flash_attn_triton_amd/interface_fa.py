@@ -6,7 +6,7 @@ from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = True
+DEBUG = False
 
 def fwd(q,
         k,
@@ -289,7 +289,7 @@ def varlen_bwd(
 ):
     if DEBUG:
         print()
-        print("flash_attn_triton_amd.py::varlen_bwd")
+        print("varlen_bwd")
         print("dout:", dout, dout.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
@@ -357,9 +357,16 @@ def varlen_bwd(
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)
         dv.copy_(dv_ref)
-        softmax_d = delta_ref
 
-    return dq, dk, dv, softmax_d
+    
+    if DEBUG:
+        print("varlen_bwd outputs")
+        print("delta_ref:", delta_ref, delta_ref.shape)
+        print("dv:", dv, dv.shape)
+        print("dk:", dk, dk.shape)
+        print("dq:", dq, dq.shape)
+
+    return dq, dk, dv, delta_ref
 
 def fwd_kvcache(
         q,

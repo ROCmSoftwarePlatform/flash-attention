@@ -504,10 +504,9 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 ])
 @pytest.mark.parametrize('causal', [False]) # bwd causal needs more work
 @pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('bwd_preprocessing_use_o', [True])
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, bwd_preprocessing_use_o, layout, DEBUG_INPUT):
+def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
@@ -570,8 +569,7 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
-        use_exp2,
-        bwd_preprocessing_use_o, 
+        use_exp2
     )
 
     # =============================================== Triton ==============================================================
@@ -595,8 +593,7 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
-        use_exp2,
-        bwd_preprocessing_use_o=bwd_preprocessing_use_o,
+        use_exp2
     )
 
     # =============================================== Check ==============================================================

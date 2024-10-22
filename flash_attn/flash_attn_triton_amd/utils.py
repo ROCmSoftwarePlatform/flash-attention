@@ -168,7 +168,6 @@ class MetaData():
     dropout_p, return_scores= 0.0, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = True
-    bwd_preprocessing_use_o = True
     
 
     def __repr__(self) -> str:

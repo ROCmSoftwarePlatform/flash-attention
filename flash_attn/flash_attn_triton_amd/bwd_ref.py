@@ -4,7 +4,7 @@ import math
 DEBUG = False
 
 def attention_backward_core_ref_impl(
-    do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2, bwd_preprocessing_use_o
+    do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2
 ):
     if DEBUG:
         print()
@@ -17,60 +17,64 @@ def attention_backward_core_ref_impl(
         print("sm_scale:", sm_scale)
         print("causal:", causal)
         print("use_exp2:", use_exp2)
-        print("bwd_preprocessing_use_o:", bwd_preprocessing_use_o)
 
     # recompute attention_scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if DEBUG:
-        print("attention_scores:", attention_scores)
+        print("attention_scores:", attention_scores, attention_scores.shape)
 
     # scale scores
     attention_scaled_scores = sm_scale * attention_scores
     if DEBUG:
-        print("attention_scaled_scores:", attention_scaled_scores)
+        print("attention_scaled_scores:", attention_scaled_scores, attention_scaled_scores.shape)
 
     # compute probabilities using softmax_lse
     if use_exp2:
         RCP_LN = 1 / math.log(2)
         attention_scaled_scores_base2 = attention_scaled_scores * RCP_LN
         softmax_lse_base2 = softmax_lse * RCP_LN
-        p = torch.exp2(attention_scaled_scores_base2 - softmax_lse_base2.unsqueeze(-1))
+        softmax_lse_3d =  softmax_lse_base2.unsqueeze(-1)
+        p = torch.exp2(attention_scaled_scores_base2 - softmax_lse_3d)
     else:
-        p = torch.exp(attention_scaled_scores - softmax_lse.unsqueeze(-1))
+        softmax_lse_3d =  softmax_lse.unsqueeze(-1)
+        p = torch.exp(attention_scaled_scores - softmax_lse_3d)
 
     if DEBUG:
-        print("p:", p)
+        print("softmax_lse_3d:", softmax_lse_3d, softmax_lse_3d.shape)
+        print("p:", p, p.shape)
     # compute gradient wrt v
     dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
     if DEBUG:
-        print("dv:", dv)
+        print("dv:", dv, dv.shape)
 
     # compute dp
     dp = torch.matmul(do, v.transpose(-2, -1))
     if DEBUG:
-        print("dp:", dp)
+        print("dp:", dp, dp.shape)
 
-    # calculate ds
-    if bwd_preprocessing_use_o:
-        delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32)  # what OAI kernel uses
+    # calculate ds using dp
+    if False:
+        delta = torch.sum(o * do, axis=-1).to(torch.float32)  # what OAI kernel uses
+        delta_3d = delta.unsqueeze(-1)
     else:
-        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
+        delta = torch.sum(p * dp, axis=-1) # what the math says you should use
+        delta_3d = delta.unsqueeze(-1)
     if DEBUG:
-        print("delta:", delta)
-    ds = (p * (dp - delta)) * sm_scale
+        print("delta_3d:", delta_3d, delta_3d.shape)
+    ds = (p * (dp - delta_3d)) * sm_scale
     if DEBUG:
-        print("ds:", ds)
+        print("ds:", ds, ds.shape)
    
 
     # compute gradient wrt k
     dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
     if DEBUG:
-        print("dk:", dk)
+        print("dk:", dk, dk.shape)
 
     # compute gradient wrt q
     dq = torch.matmul(ds, k.to(torch.float32))
     if DEBUG:
-        print("dq:", dq)
+        print("dq:", dq, dq.shape)
 
     # cast back to original dtype
     dq = dq.to(q.dtype)
@@ -78,7 +82,7 @@ def attention_backward_core_ref_impl(
     dv = dv.to(v.dtype)
 
     # remove d dim with size 1
-    delta = delta.squeeze(-1)
+    delta = delta_3d.squeeze(-1)
 
     if DEBUG:
         print("attention_backward_core_ref_impl output")
@@ -104,7 +108,6 @@ def attention_varlen_backward_pytorch_ref_impl(
     max_seqlen_q,
     max_seqlen_k,
     use_exp2,
-    bwd_preprocessing_use_o,
 ):
     # Ensure the layout is 'thd'
     if layout != 'thd':
@@ -159,8 +162,7 @@ def attention_varlen_backward_pytorch_ref_impl(
             softmax_lse_i,
             sm_scale,
             causal,
-            use_exp2,
-            bwd_preprocessing_use_o,
+            use_exp2
         )
 
         # Convert back to 'thd' layout
@@ -189,7 +191,6 @@ def attention_vanilla_backward_pytorch_ref_impl(
     causal,
     layout,
     use_exp2,
-    bwd_preprocessing_use_o,
 ):
     if layout == "bshd":
         if DEBUG:
@@ -214,8 +215,7 @@ def attention_vanilla_backward_pytorch_ref_impl(
         softmax_lse,
         sm_scale,
         causal,
-        use_exp2,
-        bwd_preprocessing_use_o,
+        use_exp2
     )
 
     # Go back to original layout
@@ -250,8 +250,7 @@ def attention_backward_pytorch_ref_impl(
     max_seqlen_k,
     use_exp2
 ):
-    bwd_preprocessing_use_o = True
-    
+
     if layout == "thd":
         dq, dk, dv, delta = attention_varlen_backward_pytorch_ref_impl(
             do,
@@ -268,7 +267,6 @@ def attention_backward_pytorch_ref_impl(
             max_seqlen_q,
             max_seqlen_k,
             use_exp2,
-            bwd_preprocessing_use_o,
         )
     else:
         dq, dk, dv, delta = attention_vanilla_backward_pytorch_ref_impl(
@@ -282,7 +280,6 @@ def attention_backward_pytorch_ref_impl(
             causal,
             layout,
             use_exp2,
-            bwd_preprocessing_use_o,
         )
         
 

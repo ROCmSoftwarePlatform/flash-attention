@@ -22,7 +22,6 @@ class _attention_prefill(torch.autograd.Function):
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
         ctx.use_exp2 = metadata.use_exp2
-        ctx.bwd_preprocessing_use_o = metadata.bwd_preprocessing_use_o
         return o, softmax_lse, exp_scores
 
     @staticmethod
@@ -46,8 +45,7 @@ class _attention_prefill(torch.autograd.Function):
             None,
             None,
             None,
-            ctx.use_exp2,
-            ctx.bwd_preprocessing_use_o,
+            ctx.use_exp2
         )
 
 attention_prefill = _attention_prefill.apply
