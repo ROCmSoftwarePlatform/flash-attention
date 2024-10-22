@@ -42,29 +42,52 @@ def attention_backward_core_ref_impl(
         print("p:", p)
     # compute gradient wrt v
     dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
+    if DEBUG:
+        print("dv:", dv)
 
     # compute dp
     dp = torch.matmul(do, v.transpose(-2, -1))
+    if DEBUG:
+        print("dp:", dp)
 
     # calculate ds
     if bwd_preprocessing_use_o:
         delta = torch.sum(o * do, axis=-1).unsqueeze(-1).to(torch.float32)  # what OAI kernel uses
     else:
         delta = torch.sum(p * dp, axis=-1).unsqueeze(-1) # what the math says you should use
+    if DEBUG:
+        print("delta:", delta)
     ds = (p * (dp - delta)) * sm_scale
+    if DEBUG:
+        print("ds:", ds)
+   
 
     # compute gradient wrt k
     dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
+    if DEBUG:
+        print("dk:", dk)
 
     # compute gradient wrt q
     dq = torch.matmul(ds, k.to(torch.float32))
+    if DEBUG:
+        print("dq:", dq)
 
     # cast back to original dtype
     dq = dq.to(q.dtype)
     dk = dk.to(k.dtype)
     dv = dv.to(v.dtype)
 
-    return dq, dk, dv, delta.squeeze(-1)
+    # remove d dim with size 1
+    delta = delta.squeeze(-1)
+
+    if DEBUG:
+        print("attention_backward_core_ref_impl output")
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
+        print("delta:", delta, delta.shape)
+
+    return dq, dk, dv, delta
 
 def attention_varlen_backward_pytorch_ref_impl(
     do,
@@ -225,9 +248,9 @@ def attention_backward_pytorch_ref_impl(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    use_exp2,
-    bwd_preprocessing_use_o,
+    use_exp2
 ):
+    bwd_preprocessing_use_o = True
     
     if layout == "thd":
         dq, dk, dv, delta = attention_varlen_backward_pytorch_ref_impl(

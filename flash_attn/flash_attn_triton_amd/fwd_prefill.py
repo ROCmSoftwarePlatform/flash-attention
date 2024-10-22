@@ -5,7 +5,6 @@ from .utils import get_shape_from_layout, get_strides_from_layout
 
 DEBUG = False
 
-
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
@@ -603,27 +602,3 @@ def attention_prefill_forward_triton_impl_explicit(
         softmax_lse = softmax_lse.transpose(2, 1).reshape(-1, nheads_q).contiguous()
 
     return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
-
-
-def attention_prefill_forward_triton_impl(q, k, v, o, metadata):
-    if o is None:
-        o = torch.empty_like(q, dtype=v.dtype)
-    metadata.check_args(q, k, v, o)
-
-    return attention_prefill_forward_triton_impl_explicit(
-                                                        q, 
-                                                        k, 
-                                                        v, 
-                                                        o, 
-                                                        metadata.sm_scale, 
-                                                        metadata.alibi_slopes, 
-                                                        metadata.causal, 
-                                                        metadata.bias, 
-                                                        metadata.dropout_p, 
-                                                        metadata.layout, 
-                                                        metadata.cu_seqlens_q, 
-                                                        metadata.cu_seqlens_k,
-                                                        metadata.max_seqlens_q, 
-                                                        metadata.max_seqlens_k, 
-                                                        metadata.return_scores, 
-                                                        metadata.use_exp2)

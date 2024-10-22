@@ -1,11 +1,12 @@
 import torch
-import triton
-from .fwd_prefill import attention_prefill_forward_triton_impl
+from .fwd_prefill import attention_prefill_forward_triton_impl_explicit
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
+from .fwd_ref import attention_forward_pytorch_ref_impl
+from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = False
+DEBUG = True
 
 def fwd(q,
         k,
@@ -135,13 +136,8 @@ def bwd(
         None,
         None,
         None,
-        False,
-        True,
+        False
     )
-
-    if DEBUG:
-        print("dq:", dq, dq.shape)
-       
 
     return dq, dk, dv, None
 
@@ -193,28 +189,75 @@ def varlen_fwd(
         o = torch.empty_like(q)
 
     # Setup metadata
-    input_metadata = MetaData(sm_scale=softmax_scale)
-    input_metadata.use_exp2 = False
+    metadata = MetaData(sm_scale=softmax_scale)
+    metadata.use_exp2 = False
     if return_softmax:
-        input_metadata.return_encoded_softmax = True
-    input_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)  # set layout to "thd" and other metdata
+        metadata.return_encoded_softmax = True
+    metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)  # set layout to "thd" and other metdata
 
     # get shapes
-    batch, nheads_q, nheads_k, head_size , seqlen_q, seqlen_k = get_shape_from_layout(q, k, input_metadata.layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    batch, nheads_q, nheads_k, head_size , seqlen_q, seqlen_k = get_shape_from_layout(q, k, metadata.layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
 
     if causal:
-        input_metadata.need_causal()
+        metadata.need_causal()
 
     if alibi_slopes is not None:
-        input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
+        metadata.need_alibi(alibi_slopes, batch, nheads_q)
     
     if dropout_p > 0.0:
-        input_metadata.need_dropout(dropout_p, return_softmax)
+        metadata.need_dropout(dropout_p, return_softmax)
     
     # Check arguments
-    input_metadata.check_args(q, k, v, o)
+    metadata.check_args(q, k, v, o)
+    if o is None:
+        o = torch.empty_like(q, dtype=v.dtype)
 
-    o_triton, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_triton_impl(q, k, v, o, input_metadata)
+    if False:
+        (o_triton, 
+        softmax_lse, 
+        exp_scores, 
+        grid, 
+        head_size, 
+        philox_seed, 
+        philox_offset, 
+        scores, 
+        scores_scaled_shifted) = attention_prefill_forward_triton_impl_explicit(
+                                                            q, 
+                                                            k, 
+                                                            v, 
+                                                            o, 
+                                                            metadata.sm_scale, 
+                                                            metadata.alibi_slopes, 
+                                                            metadata.causal, 
+                                                            metadata.bias, 
+                                                            metadata.dropout_p, 
+                                                            metadata.layout, 
+                                                            metadata.cu_seqlens_q, 
+                                                            metadata.cu_seqlens_k,
+                                                            metadata.max_seqlens_q, 
+                                                            metadata.max_seqlens_k, 
+                                                            metadata.return_scores, 
+                                                            metadata.use_exp2)
+    else:
+        (o_triton, 
+        softmax_lse, 
+        exp_scores, 
+        _, 
+        _,
+        _, 
+        _) = attention_forward_pytorch_ref_impl(
+                                                q, 
+                                                k, 
+                                                v,
+                                                metadata.sm_scale, 
+                                                metadata.causal,
+                                                metadata.layout, 
+                                                metadata.cu_seqlens_q, 
+                                                metadata.cu_seqlens_k,
+                                                metadata.max_seqlens_q, 
+                                                metadata.max_seqlens_k,
+                                                metadata.use_exp2)
+
 
     return o_triton, q , k , v, o, softmax_lse, exp_scores, None
 
@@ -273,29 +316,49 @@ def varlen_bwd(
     if dropout_p != 0.0:
         raise ValueError("dropout is not supported on AMD yet")
 
-    _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
-        dout,
-        q,
-        k,
-        v,
-        out,
-        softmax_lse,
-        dq,
-        dk,
-        dv,
-        softmax_scale,
-        alibi_slopes,
-        causal,
-        "thd",
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        False,
-        True,
-    )
+    if False:
+        _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            dq,
+            dk,
+            dv,
+            softmax_scale,
+            alibi_slopes,
+            causal,
+            "thd",
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            False,
+        )
+    else:
+        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            softmax_scale,
+            causal,
+            "thd",
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            False,
+        )
+        dq.copy_(dq_ref)
+        dk.copy_(dk_ref)
+        dv.copy_(dv_ref)
+        softmax_d = delta_ref
 
-    softmax_d = None
     return dq, dk, dv, softmax_d
 
 def fwd_kvcache(

@@ -498,7 +498,6 @@ def attention_prefill_backward_triton_impl(
     max_seqlen_q: int,
     max_seqlen_k: int,
     use_exp2: bool,
-    bwd_preprocessing_use_o: bool,
     BLOCK_M=64,
     BLOCK_N=64,
 ):
@@ -522,7 +521,6 @@ def attention_prefill_backward_triton_impl(
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
         print("use_exp2:", use_exp2)
-        print("bwd_preprocessing_use_o:", bwd_preprocessing_use_o)
         print("BLOCK_M:", BLOCK_M)
         print("BLOCK_N:", BLOCK_N)
 
