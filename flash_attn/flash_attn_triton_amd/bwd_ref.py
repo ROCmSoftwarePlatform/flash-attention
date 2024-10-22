@@ -41,7 +41,7 @@ def attention_backward_core_ref_impl(
     if DEBUG:
         print("p:", p)
     # compute gradient wrt v
-    dv = torch.matmul(p.transpose(-2, -1), do)
+    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
 
     # compute dp
     dp = torch.matmul(do, v.transpose(-2, -1))
@@ -99,7 +99,7 @@ def attention_varlen_backward_pytorch_ref_impl(
     dk = torch.zeros_like(k)
     dv = torch.zeros_like(v)
     # delta has the same shape as softmax_lse: [total_L_q, num_heads]
-    delta = torch.zeros((total_L_q, num_heads), dtype=o.dtype, device=o.device)
+    delta = torch.zeros((total_L_q, num_heads), dtype=torch.float32, device=o.device)
 
     for i in range(batch_size):
         # Get the start and end indices for the current sequence

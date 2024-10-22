@@ -14,6 +14,7 @@ def _bwd_preprocess_use_o(
     Delta,
     stride_oz, stride_oh, stride_om, stride_ok,
     stride_doz, stride_doh, stride_dom, stride_dok,
+    stride_deltaz, stride_deltah, stride_deltam,
     cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q,
@@ -72,11 +73,8 @@ def _bwd_preprocess_use_o(
     delta = tl.sum(o * do, axis=1)
 
     # write-back delta
-    if IS_VARLEN:
-        delta_offset = tl.load(cu_seqlens_q + off_z) * H + off_h * N_CTX_Q + off_m
-        delta_ptrs = Delta + delta_offset
-    else:
-        delta_ptrs = Delta + pid_bh * N_CTX_Q + off_m
+    delta_offset = Delta + off_z * stride_deltaz + off_h * stride_deltah + q_start * stride_deltam
+    delta_ptrs = delta_offset + off_m * stride_deltam
     tl.store(delta_ptrs, delta, mask=mask_m)
 
 
@@ -116,6 +114,9 @@ def _bwd_kernel_one_col_block(
     stride_vh,
     stride_vn,
     stride_vk,
+    stride_deltaz, 
+    stride_deltah, 
+    stride_deltam,
     Z,
     H,
     N_CTX_Q,
@@ -205,7 +206,7 @@ def _bwd_kernel_one_col_block(
 
 
         # print("qk:", qk)
-        l_ptrs = l_offset + offs_m
+        l_ptrs = l_offset + offs_m * stride_deltam
         l_i = tl.load(l_ptrs, mask=mask_m)
         # print("l_i:", l_i)
 
@@ -233,14 +234,9 @@ def _bwd_kernel_one_col_block(
         # print("dp:", dp)
 
         # compute ds , ds = p * (dp - delta[:, None])
-        if True:
-            d_ptrs = d_offset + offs_m
-            Di = tl.load(d_ptrs, mask=mask_m)
-            ds = (p * (dp - Di[:, None])) * sm_scale
-        else:
-            delta = tl.sum(p * dp, axis=1)
-            delta = tl.where(mask_m, delta, 0.0)
-            ds = (p * (dp - delta[:, None])) * sm_scale
+        d_ptrs = d_offset + offs_m * stride_deltam
+        Di = tl.load(d_ptrs, mask=mask_m)
+        ds = (p * (dp - Di[:, None])) * sm_scale
         # print("ds:", ds)
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         # print("ds masked:", ds)
@@ -306,6 +302,9 @@ def _bwd_kernel(
     stride_vh,
     stride_vn,
     stride_vk,
+    stride_deltaz, 
+    stride_deltah, 
+    stride_deltam,
     Z,
     H,
     num_block_m,
@@ -352,13 +351,8 @@ def _bwd_kernel(
     k_offset = K + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
     v_offset = V + off_z * stride_vz + off_h * stride_vh + k_start * stride_vn
     do_offset = DO + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
-    if IS_VARLEN:
-        delta_offset = tl.load(cu_seqlens_q + off_z) * H + off_h * N_CTX_Q
-        l_offset = L + delta_offset
-        d_offset = D + delta_offset
-    else:
-        l_offset = L + off_hz * N_CTX_Q 
-        d_offset = D + off_hz * N_CTX_Q
+    l_offset = L + off_z * stride_deltaz + off_h * stride_deltah + q_start * stride_deltam
+    d_offset = D + off_z * stride_deltaz + off_h * stride_deltah + q_start * stride_deltam
 
     # output tensor offsets
     dk_offset = DK + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
@@ -404,6 +398,9 @@ def _bwd_kernel(
             stride_vh,
             stride_vn,
             stride_vk,
+            stride_deltaz, 
+            stride_deltah, 
+            stride_deltam,
             Z,
             H,
             N_CTX_Q,
@@ -458,6 +455,9 @@ def _bwd_kernel(
                 stride_vh,
                 stride_vn,
                 stride_vk,
+                stride_deltaz, 
+                stride_deltah, 
+                stride_deltam,
                 Z,
                 H,
                 N_CTX_Q,
@@ -517,6 +517,10 @@ def attention_prefill_backward_triton_impl(
         print("sm_scale:", sm_scale)
         print("alibi_slopes:", alibi_slopes)
         print("layout:", layout)
+        print("cu_seqlens_q:", cu_seqlens_q)
+        print("cu_seqlens_k:", cu_seqlens_k)
+        print("max_seqlen_q:", max_seqlen_q)
+        print("max_seqlen_k:", max_seqlen_k)
         print("use_exp2:", use_exp2)
         print("bwd_preprocessing_use_o:", bwd_preprocessing_use_o)
         print("BLOCK_M:", BLOCK_M)
@@ -624,6 +628,11 @@ def attention_prefill_backward_triton_impl(
         delta = torch.empty_like(softmax_lse)
 
     is_varlen = layout == "thd"
+    if is_varlen:
+        stride_deltam, stride_deltah = delta.stride()
+        stride_deltaz = 0
+    else:
+        stride_deltaz, stride_deltah, stride_deltam = delta.stride()
 
     _bwd_preprocess_use_o[(num_blocks_m, batch_headsize)](
         o,
@@ -631,6 +640,7 @@ def attention_prefill_backward_triton_impl(
         delta,
         stride_oz, stride_oh, stride_om, stride_ok,
         stride_oz, stride_oh, stride_om, stride_ok,
+        stride_deltaz, stride_deltah, stride_deltam,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,
@@ -690,6 +700,7 @@ def attention_prefill_backward_triton_impl(
         stride_qz, stride_qh, stride_qm, stride_qk,
         stride_kz, stride_kh, stride_kn, stride_kk,
         stride_vz, stride_vh, stride_vn, stride_vk,
+        stride_deltaz, stride_deltah, stride_deltam,
         batch,
         nheads_q,
         num_blocks_m,

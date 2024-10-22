@@ -470,40 +470,40 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1),
-    # (1, 1, 4, 4, 4),
-    # (2, 1, 4, 4, 16),
+    (1, 1, 1, 1, 1),
+    (1, 1, 4, 4, 4),
+    (2, 1, 4, 4, 16),
     (1, 2, 4, 4, 16),
-    # (2, 2, 4, 4, 16),
-    # (1, 1, 4, 4, 16),
-    # (2, 1, 4, 4 , 16),
-    # (4, 6, 8, 8 , 16),
-    # (1, 1, 4, 4, 32),
-    # (1, 1, 16, 16, 16),
-    # (1, 1, 32, 32, 16),
-    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    # (1, 1, 128, 128, 64),
-    # (1, 1, 128, 256, 45),
-    # (1, 1, 256, 256, 64),
-    # (1, 1, 256, 512, 16),
-    # (1, 1, 512, 512, 64), 
-    # (1, 1, 1024, 1024, 64),
-    # # fa configs
-    # (2, 2, 128, 128, 65),
-    # (2, 2, 128, 128, 224),
-    # (4, 6, 108, 256, 224),
-    # (1, 1, 256, 512, 16),
-    # # old tests that work
-    # (4, 48, 1024, 1024, 73),
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (1, 24, 4096, 4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
-    # # old tests that were commented out
-    # (1, 16, 8192, 8192, 63),
-    # (1, 16, 1022, 1022, 64),
+    (2, 2, 4, 4, 16),
+    (1, 1, 4, 4, 16),
+    (2, 1, 4, 4 , 16),
+    (4, 6, 8, 8 , 16),
+    (1, 1, 4, 4, 32),
+    (1, 1, 16, 16, 16),
+    (1, 1, 32, 32, 16),
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 128, 128, 64),
+    (1, 1, 128, 256, 45),
+    (1, 1, 256, 256, 64),
+    (1, 1, 256, 512, 16),
+    (1, 1, 512, 512, 64), 
+    (1, 1, 1024, 1024, 64),
+    # fa configs
+    (2, 2, 128, 128, 65),
+    (2, 2, 128, 128, 224),
+    (4, 6, 108, 256, 224),
+    (1, 1, 256, 512, 16),
+    # old tests that work
+    (4, 48, 1024, 1024, 73),
+    (4, 48, 1024, 1024, 64),
+    (4, 48, 2048, 2048, 64),
+    (1, 24, 4096, 4096, 64),
+    (1, 16, 1024, 1024, 64),
+    (1, 16, 1024, 1024, 128),
+    # old tests that were commented out
+    (1, 16, 8192, 8192, 63),
+    (1, 16, 1022, 1022, 64),
 ])
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [False])
@@ -531,11 +531,11 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
     (
         o_ref,
         softmax_lse_ref,
-        exp_scores_ref,
-        softmax_ref,
-        attention_shifted_scaled_scores_ref,
-        attention_scaled_scores_ref,
-        attention_scores_ref,
+        _,
+        _,
+        _,
+        _,
+        _,
     ) = attention_forward_pytorch_ref_impl(
         q_ref,
         k_ref, 
@@ -549,13 +549,6 @@ def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, b
         metadata.max_seqlens_k,
         use_exp2
     )
-    if DEBUG:
-        print()
-        print("attention_scores_ref:", attention_scores_ref, attention_scores_ref.shape)
-        print("attention_shifted_scaled_scores_ref:", attention_shifted_scaled_scores_ref, attention_shifted_scaled_scores_ref.shape)
-        print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
-        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-        print("softmax_ref:", softmax_ref, softmax_ref.shape)
 
     dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
     if DEBUG_INPUT:

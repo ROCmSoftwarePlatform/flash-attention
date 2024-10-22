@@ -92,8 +92,8 @@ def get_shape_from_layout(q, k, layout, cu_seqlens_q = None, cu_seqlens_k = None
         batch_q, max_seqlen_q, nheads_q, head_size_q = q.shape
         batch_k, max_seqlen_k, nheads_k, head_size_k = k.shape
     elif  layout == 'thd':
-        batch_q, max_seqlen_q, nheads_q,  head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
-        batch_k, max_seqlen_k, nheads_k,  head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
+        batch_q, max_seqlen_q, nheads_q, head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
+        batch_k, max_seqlen_k, nheads_k, head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
     else:
         assert False, "Got unsupported layout."
     
