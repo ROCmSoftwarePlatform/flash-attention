@@ -1208,7 +1208,7 @@ def test_flash_attn_output(
 @pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
-# @pytest.mark.parametrize('d', [32])
+# @pytest.mark.parametrize('d', [160])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [

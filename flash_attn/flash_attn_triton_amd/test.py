@@ -374,7 +374,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
-def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
+def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     alibi_slopes = None
@@ -385,9 +385,9 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
     else:
         q, k, v, metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT)
     if DEBUG_INPUT:
-        o = torch.zeros_like(q).contiguous()
+        output_triton = torch.zeros_like(q).contiguous()
     else:
-        o = torch.empty_like(q)
+        output_triton = torch.empty_like(q)
 
     # update metadata
     metadata.use_exp2 = use_exp2
@@ -399,10 +399,34 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
         metadata.return_scores = True
 
     # call Triton's forward implementation directly
-    o, softmax_lse_triton, exp_scores_triton, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, metadata)
+    ( output_triton, 
+        softmax_lse_triton, 
+        exp_scores_triton, 
+        _, 
+        _, 
+        _, 
+        _, 
+        _, 
+        _) = attention_prefill_forward_triton_impl(
+                                                q, 
+                                                k, 
+                                                v, 
+                                                output_triton, 
+                                                metadata.sm_scale, 
+                                                metadata.alibi_slopes, 
+                                                metadata.causal, 
+                                                metadata.bias, 
+                                                metadata.dropout_p, 
+                                                metadata.layout, 
+                                                metadata.cu_seqlens_q, 
+                                                metadata.cu_seqlens_k,
+                                                metadata.max_seqlens_q, 
+                                                metadata.max_seqlens_k, 
+                                                metadata.return_scores, 
+                                                metadata.use_exp2)
 
     (
-        o_ref,
+        output_ref,
         softmax_lse_ref,
         exp_scores_ref,
         softmax_ref,
@@ -439,9 +463,9 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
         torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
     
     if DEBUG:
-        print("o:", o, o.shape)
-        print("ref_o:", o_ref, o_ref.shape)
-    torch.testing.assert_close(o, o_ref, atol=ATOL, rtol=RTOL)
+        print("output_triton:", output_triton, output_triton.shape)
+        print("output_ref:", output_ref, output_ref.shape)
+    torch.testing.assert_close(output_triton, output_ref, atol=ATOL, rtol=RTOL)
 
 
     # compare with pytorch expect thd and causal impl is different
@@ -456,9 +480,9 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
         out_pytorch = out_pytorch.transpose(1, 2) if layout == "bshd" else out_pytorch
 
         if DEBUG:
-            print("o:", o, o.shape)
+            print("o:", output_triton, output_triton.shape)
             print("out_pytorch:", out_pytorch, out_pytorch.shape)
-        torch.testing.assert_close(o, out_pytorch, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(output_triton, out_pytorch, atol=ATOL, rtol=RTOL)
         
         # compare with pytorch output
         if DEBUG:
@@ -504,7 +528,7 @@ def test_op_fwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 @pytest.mark.parametrize('use_exp2', [True, False])
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_bwd_prefill_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, DEBUG_INPUT):
+def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 

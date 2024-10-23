@@ -87,9 +87,9 @@ def attention_backward_core_ref_impl(
         print("dq:", dq, dq.shape)
 
     # cast back to original dtype
-    dq = dq.to(q.dtype)
-    dk = dk.to(k.dtype)
-    dv = dv.to(v.dtype)
+    dq = dq.to(torch.float16)
+    dk = dk.to(torch.float16)
+    dv = dv.to(torch.float16)
 
     # remove d dim with size 1
     delta = delta_3d.squeeze(-1)

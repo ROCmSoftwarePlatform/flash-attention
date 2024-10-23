@@ -92,6 +92,8 @@ def fwd(q,
                                                 metadata.use_exp2)
         o.copy_(output)
     else:
+        if DEBUG:
+            print("Using Triton implementation")
         (output, 
         softmax_lse, 
         exp_scores, 
@@ -200,6 +202,8 @@ def bwd(
         dk.copy_(dk_ref)
         dv.copy_(dv_ref)
     else:
+        if DEBUG:
+            print("Using Triton implementation")
         _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
             dout,
             q,
@@ -442,7 +446,9 @@ def varlen_bwd(
         dv.copy_(dv_ref)
         delta = delta_ref
     else:
-       dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
+        if DEBUG:
+            print("Using Triton implementation")
+        dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
             dout,
             q,
             k,
@@ -462,7 +468,7 @@ def varlen_bwd(
             max_seqlen_k,
             False,
         )
-       delta = delta_triton
+        delta = delta_triton
 
     if DEBUG:
         print("varlen_bwd outputs")

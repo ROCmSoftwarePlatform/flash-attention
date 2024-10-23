@@ -519,9 +519,9 @@ def attention_prefill_backward_triton_impl(
         print("max_seqlen_k:", max_seqlen_k)
         print("use_exp2:", use_exp2)
 
-    # kernel grid configs
-    BLOCK_M=64 # 32 avoids oom but has mismatches. Fix 32x32 mismatches
-    BLOCK_N=64 # 32 avoid oom
+    # TODO: fix mismatches because of 32 x 32 avoids oom issues but has mismatches
+    BLOCK_M = 32
+    BLOCK_N = 32
     num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
     waves_per_eu = 1
