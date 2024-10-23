@@ -496,9 +496,7 @@ def attention_prefill_backward_triton_impl(
     cu_seqlens_k,
     max_seqlen_q: int,
     max_seqlen_k: int,
-    use_exp2: bool,
-    BLOCK_M=64,
-    BLOCK_N=64,
+    use_exp2: bool
 ):
     if DEBUG:
         print()
@@ -520,8 +518,14 @@ def attention_prefill_backward_triton_impl(
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
         print("use_exp2:", use_exp2)
-        print("BLOCK_M:", BLOCK_M)
-        print("BLOCK_N:", BLOCK_N)
+
+    # kernel grid configs
+    BLOCK_M=64 # 32 avoids oom but has mismatches. Fix 32x32 mismatches
+    BLOCK_N=64 # 32 avoid oom
+    num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
+    num_stages = 1
+    waves_per_eu = 1
+
 
     # make contigious
     q = q.contiguous()
@@ -616,8 +620,6 @@ def attention_prefill_backward_triton_impl(
     assert softmax_lse.is_contiguous()
 
 
-    num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
-    num_stages = 1
 
     if True:
         delta = torch.zeros_like(softmax_lse)
@@ -715,6 +717,7 @@ def attention_prefill_backward_triton_impl(
         USE_EXP2=use_exp2,
         num_warps=num_warps,
         num_stages=num_stages,
+        waves_per_eu = waves_per_eu,
         IS_VARLEN=is_varlen
     )
 
