@@ -6,7 +6,7 @@ from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = True
+DEBUG = False
 USE_REF = True
 
 def fwd(q,
