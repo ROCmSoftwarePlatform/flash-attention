@@ -1,4 +1,5 @@
 import torch
+import os
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
@@ -6,8 +7,8 @@ from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = False
-USE_REF = True
+DEBUG = os.environ.get('FLASH_ATTENTION_DEBUG', '0').lower() in ('1', 'true', 'yes')
+USE_REF = os.environ.get('FLASH_ATTN_USE_REF', '0').lower() in ('1', 'true', 'yes')
 
 def fwd(q,
         k,
@@ -70,6 +71,8 @@ def fwd(q,
     # Check arguments
     metadata.check_args(q, k, v, o)
     if USE_REF:
+        if DEBUG:
+            print("Using reference implementation")
         (output, 
         softmax_lse, 
         exp_scores, 
@@ -176,6 +179,8 @@ def bwd(
         raise ValueError("dropout is not supported on AMD yet")
 
     if USE_REF:
+        if DEBUG:
+            print("Using reference implementation")
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
             dout,
             q,
@@ -291,7 +296,9 @@ def varlen_fwd(
         o = torch.empty_like(q, dtype=v.dtype)
 
     if USE_REF:
-        (o_triton, 
+        if DEBUG:
+            print("Using reference implementation")
+        (output, 
         softmax_lse, 
         exp_scores, 
         _, 
@@ -309,8 +316,11 @@ def varlen_fwd(
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k,
                                                 metadata.use_exp2)
+        o.copy_(output)
     else:
-        (o_triton, 
+        if DEBUG:
+            print("Using Triton implementation")
+        (output, 
         softmax_lse, 
         exp_scores, 
         _, 
@@ -336,7 +346,7 @@ def varlen_fwd(
                                                             metadata.return_scores, 
                                                             metadata.use_exp2)
 
-    return o_triton, q , k , v, o, softmax_lse, exp_scores, None
+    return output, q , k , v, o, softmax_lse, exp_scores, None
 
 def varlen_bwd(
     dout,
@@ -394,6 +404,8 @@ def varlen_bwd(
         raise ValueError("dropout is not supported on AMD yet")
 
     if USE_REF:
+        if DEBUG:
+            print("Using reference implementation")
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
             dout,
             q,

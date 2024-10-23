@@ -58,6 +58,11 @@ jobs:
         run: |
           export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
           python setup.py install
+      - name: Flash Attention Tests Using Reference Impl
+        run: |
+          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
+          export FLASH_ATTENTION_USE_REF=1
+          pytest tests/test_flash_attn_triton.py
       - name: Flash Attention Tests
         run: |
           export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
