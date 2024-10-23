@@ -1,12 +1,13 @@
 import torch
-from .fwd_prefill import attention_prefill_forward_triton_impl_explicit
+from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import MetaData, get_shape_from_layout
 
-DEBUG = False
+DEBUG = True
+USE_REF = True
 
 def fwd(q,
         k,
@@ -47,30 +48,85 @@ def fwd(q,
         o = torch.empty_like(q)
 
     # Setup metadata
-    input_metadata = MetaData(sm_scale=softmax_scale)
-    input_metadata.max_seqlens_q = q.shape[1]
-    input_metadata.max_seqlens_k = k.shape[1]
-    input_metadata.layout = "bshd"
-    input_metadata.use_exp2 = False
+    metadata = MetaData(sm_scale=softmax_scale)
+    metadata.max_seqlens_q = q.shape[1]
+    metadata.max_seqlens_k = k.shape[1]
+    metadata.layout = "bshd"
+    metadata.use_exp2 = False
     if return_softmax:
-        input_metadata.return_encoded_softmax = True
+        metadata.return_encoded_softmax = True
 
-    batch, nheads_q, nheads_k, head_size, _, _ = get_shape_from_layout(q, k, input_metadata.layout)
+    batch, nheads_q, nheads_k, head_size, _, _ = get_shape_from_layout(q, k, metadata.layout)
     
     if causal:
-        input_metadata.need_causal()
+        metadata.need_causal()
     
     if alibi_slopes is not None:
-        input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
+        metadata.need_alibi(alibi_slopes, batch, nheads_q)
     
     if dropout_p > 0.0:
-        input_metadata.need_dropout(dropout_p, return_softmax)
+        metadata.need_dropout(dropout_p, return_softmax)
     
     # Check arguments
-    input_metadata.check_args(q, k, v, o)
-    o_triton, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted = attention_prefill_forward_triton_impl(q, k, v, o, input_metadata)
+    metadata.check_args(q, k, v, o)
+    if USE_REF:
+        (output, 
+        softmax_lse, 
+        exp_scores, 
+        _, 
+        _,
+        _, 
+        _) = attention_forward_pytorch_ref_impl(
+                                                q, 
+                                                k, 
+                                                v,
+                                                metadata.sm_scale, 
+                                                metadata.causal,
+                                                metadata.layout, 
+                                                metadata.cu_seqlens_q, 
+                                                metadata.cu_seqlens_k,
+                                                metadata.max_seqlens_q, 
+                                                metadata.max_seqlens_k,
+                                                metadata.use_exp2)
+        o.copy_(output)
+    else:
+        (output, 
+        softmax_lse, 
+        exp_scores, 
+        _, 
+        _, 
+        _, 
+        _, 
+        _, 
+        _) = attention_prefill_forward_triton_impl(
+                                                q, 
+                                                k, 
+                                                v, 
+                                                o, 
+                                                metadata.sm_scale, 
+                                                metadata.alibi_slopes, 
+                                                metadata.causal, 
+                                                metadata.bias, 
+                                                metadata.dropout_p, 
+                                                metadata.layout, 
+                                                metadata.cu_seqlens_q, 
+                                                metadata.cu_seqlens_k,
+                                                metadata.max_seqlens_q, 
+                                                metadata.max_seqlens_k, 
+                                                metadata.return_scores, 
+                                                metadata.use_exp2)
 
-    return o_triton, q , k , v, o, softmax_lse, exp_scores, None
+    if DEBUG:
+        print("fwd outputs")
+        print("output:", output, output.shape)
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o, o.shape)
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
+        print("exp_scores:", exp_scores, exp_scores.shape)
+
+    return output, q , k , v, o, softmax_lse, exp_scores, None
 
 def bwd(
     dout,
@@ -100,6 +156,7 @@ def bwd(
         print("q:", q, q.shape)
         print("k:", k, k.shape)
         print("v:", v, v.shape)
+        print("out:", out, out.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("dq:", dq, dq.shape)
         print("dk:", dk, dk.shape)
@@ -118,26 +175,47 @@ def bwd(
     if dropout_p != 0.0:
         raise ValueError("dropout is not supported on AMD yet")
 
-    _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
-        dout,
-        q,
-        k,
-        v,
-        out,
-        softmax_lse,
-        dq,
-        dk,
-        dv,
-        softmax_scale,
-        alibi_slopes,
-        causal,
-        "bshd",
-        None,
-        None,
-        None,
-        None,
-        False
-    )
+    if USE_REF:
+        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            softmax_scale,
+            causal,
+            "bshd",
+            None,
+            None,
+            None,
+            None,
+            False,
+        )
+        dq.copy_(dq_ref)
+        dk.copy_(dk_ref)
+        dv.copy_(dv_ref)
+    else:
+        _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            dq,
+            dk,
+            dv,
+            softmax_scale,
+            alibi_slopes,
+            causal,
+            "bshd",
+            None,
+            None,
+            None,
+            None,
+            False,
+        )
 
     return dq, dk, dv, None
 
@@ -212,33 +290,7 @@ def varlen_fwd(
     if o is None:
         o = torch.empty_like(q, dtype=v.dtype)
 
-    if False:
-        (o_triton, 
-        softmax_lse, 
-        exp_scores, 
-        grid, 
-        head_size, 
-        philox_seed, 
-        philox_offset, 
-        scores, 
-        scores_scaled_shifted) = attention_prefill_forward_triton_impl_explicit(
-                                                            q, 
-                                                            k, 
-                                                            v, 
-                                                            o, 
-                                                            metadata.sm_scale, 
-                                                            metadata.alibi_slopes, 
-                                                            metadata.causal, 
-                                                            metadata.bias, 
-                                                            metadata.dropout_p, 
-                                                            metadata.layout, 
-                                                            metadata.cu_seqlens_q, 
-                                                            metadata.cu_seqlens_k,
-                                                            metadata.max_seqlens_q, 
-                                                            metadata.max_seqlens_k, 
-                                                            metadata.return_scores, 
-                                                            metadata.use_exp2)
-    else:
+    if USE_REF:
         (o_triton, 
         softmax_lse, 
         exp_scores, 
@@ -257,7 +309,32 @@ def varlen_fwd(
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k,
                                                 metadata.use_exp2)
-
+    else:
+        (o_triton, 
+        softmax_lse, 
+        exp_scores, 
+        _, 
+        _, 
+        _, 
+        _, 
+        _, 
+        _) = attention_prefill_forward_triton_impl(
+                                                            q, 
+                                                            k, 
+                                                            v, 
+                                                            o, 
+                                                            metadata.sm_scale, 
+                                                            metadata.alibi_slopes, 
+                                                            metadata.causal, 
+                                                            metadata.bias, 
+                                                            metadata.dropout_p, 
+                                                            metadata.layout, 
+                                                            metadata.cu_seqlens_q, 
+                                                            metadata.cu_seqlens_k,
+                                                            metadata.max_seqlens_q, 
+                                                            metadata.max_seqlens_k, 
+                                                            metadata.return_scores, 
+                                                            metadata.use_exp2)
 
     return o_triton, q , k , v, o, softmax_lse, exp_scores, None
 
@@ -316,7 +393,27 @@ def varlen_bwd(
     if dropout_p != 0.0:
         raise ValueError("dropout is not supported on AMD yet")
 
-    if False:
+    if USE_REF:
+        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            softmax_scale,
+            causal,
+            "thd",
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            False,
+        )
+        dq.copy_(dq_ref)
+        dk.copy_(dk_ref)
+        dv.copy_(dv_ref)
+    else:
         _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
             dout,
             q,
@@ -337,28 +434,7 @@ def varlen_bwd(
             max_seqlen_k,
             False,
         )
-    else:
-        dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
-            dout,
-            q,
-            k,
-            v,
-            out,
-            softmax_lse,
-            softmax_scale,
-            causal,
-            "thd",
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            False,
-        )
-        dq.copy_(dq_ref)
-        dk.copy_(dk_ref)
-        dv.copy_(dv_ref)
 
-    
     if DEBUG:
         print("varlen_bwd outputs")
         print("delta_ref:", delta_ref, delta_ref.shape)

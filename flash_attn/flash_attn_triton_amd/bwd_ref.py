@@ -1,7 +1,7 @@
 import torch
 import math
 
-DEBUG = False
+DEBUG = True
 
 def attention_backward_core_ref_impl(
     do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2
@@ -9,17 +9,27 @@ def attention_backward_core_ref_impl(
     if DEBUG:
         print()
         print("attention_backward_core_ref_impl")
+        print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
         print("v:", v, v.shape)
-        print("o:", o, o.shape)
+        print("o:", o, o.shape) # is a bad number
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
         print("use_exp2:", use_exp2)
+    
+    # cast to float32
+    do = do.to(torch.float32)
+    q = q.to(torch.float32)
+    k = k.to(torch.float32)
+    v = v.to(torch.float32)
+    o = o.to(torch.float32)
+    softmax_lse = softmax_lse.to(torch.float32)
 
-    # recompute attention_scores
-    attention_scores = torch.matmul(q, k.transpose(-2, -1))
+
+    # recompute attention_scores. Make sure it matches the forward impl. i.e. It use float32
+    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
     if DEBUG:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
@@ -53,7 +63,7 @@ def attention_backward_core_ref_impl(
         print("dp:", dp, dp.shape)
 
     # calculate ds using dp
-    if False:
+    if True:
         delta = torch.sum(o * do, axis=-1).to(torch.float32)  # what OAI kernel uses
         delta_3d = delta.unsqueeze(-1)
     else:
@@ -250,7 +260,6 @@ def attention_backward_pytorch_ref_impl(
     max_seqlen_k,
     use_exp2
 ):
-
     if layout == "thd":
         dq, dk, dv, delta = attention_varlen_backward_pytorch_ref_impl(
             do,

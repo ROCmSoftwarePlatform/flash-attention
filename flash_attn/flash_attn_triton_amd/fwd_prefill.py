@@ -492,27 +492,27 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
     tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
 
 
-def attention_prefill_forward_triton_impl_explicit(
-                                                q, 
-                                                k, 
-                                                v, 
-                                                o, 
-                                                sm_scale, 
-                                                alibi_slopes, 
-                                                causal, 
-                                                bias, 
-                                                dropout_p, 
-                                                layout, 
-                                                cu_seqlens_q, 
-                                                cu_seqlens_k,
-                                                max_seqlens_q, 
-                                                max_seqlens_k, 
-                                                return_scores, 
-                                                use_exp2):
+def attention_prefill_forward_triton_impl(
+                                        q,
+                                        k,
+                                        v,
+                                        o,
+                                        sm_scale,
+                                        alibi_slopes,
+                                        causal,
+                                        bias,
+                                        dropout_p,
+                                        layout,
+                                        cu_seqlens_q, 
+                                        cu_seqlens_k,
+                                        max_seqlens_q, 
+                                        max_seqlens_k, 
+                                        return_scores, 
+                                        use_exp2):
 
     if DEBUG:
         print()
-        print("attention_prefill_forward_triton_impl_explicit")
+        print("attention_prefill_forward_triton_impl")
         print("q:", q, q.shape)
         print("k:", k, k.shape)
         print("v:", v, v.shape)
