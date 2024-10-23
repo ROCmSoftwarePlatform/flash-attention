@@ -146,8 +146,7 @@ def _bwd_kernel_one_col_block(
     # masks
     mask_n = offs_n < N_CTX_K
     mask_d = offs_d < ACTUAL_BLOCK_DMODEL
-    k_mask = mask_n[:, None] & mask_d[None, :]
-    v_mask = mask_n[:, None] & mask_d[None, :]
+    kv_mask = mask_n[:, None] & mask_d[None, :]
     
 
     # initialize grad accumulators
@@ -157,8 +156,8 @@ def _bwd_kernel_one_col_block(
     # load k and v once per column block
     k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
-    k = tl.load(k_ptrs, mask=k_mask, other=0.0)
-    v = tl.load(v_ptrs, mask=v_mask, other=0.0)
+    k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
+    v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
     # print("k:", k)
     # print("v:", v)
 
@@ -238,9 +237,10 @@ def _bwd_kernel_one_col_block(
         ds = (p * (dp - Di[:, None])) * sm_scale
         # print("ds:", ds)
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
-        # print("ds masked:", ds)
         
         # compute dk = dot(ds.T, q)
+        # print("ds masked:", ds)
+        # print("q:", q)
         dk += tl.dot(tl.trans(ds), q)
         # print("dk:", dk)
 
@@ -264,8 +264,8 @@ def _bwd_kernel_one_col_block(
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
     # write-back
     # print("dv:", dv)
-    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=k_mask)
-    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=v_mask)
+    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
+    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
 
 # @triton.autotune(
 #     configs=[
@@ -519,12 +519,6 @@ def attention_prefill_backward_triton_impl(
         print("max_seqlen_k:", max_seqlen_k)
         print("use_exp2:", use_exp2)
 
-    # TODO: fix mismatches because of 32 x 32 avoids oom issues but has mismatches
-    BLOCK_M = 32
-    BLOCK_N = 32
-    num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
-    num_stages = 1
-    waves_per_eu = 1
 
 
     # make contigious
@@ -552,8 +546,19 @@ def attention_prefill_backward_triton_impl(
         stride_kz, stride_kh, stride_kn, stride_kk = k.stride(0),  k.stride(1), k.stride(2),  k.stride(3)
         stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1), v.stride(2),  v.stride(3)
 
+    # TODO: fix mismatches because of 32 x 32 avoids oom issues but has mismatches
+    if max_seqlen_q < 32 or max_seqlen_k < 32:
+        BLOCK_M = 32 
+        BLOCK_N = 32
+    else:
+        BLOCK_M = 64 
+        BLOCK_N = 64
+    num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
+    num_stages = 1
+    waves_per_eu = 1
+
+    # configs
     sequence_parallel = False
-    causal = False
 
     # divide up the problem
     num_blocks_m = triton.cdiv(max_seqlen_q, BLOCK_M)

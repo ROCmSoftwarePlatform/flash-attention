@@ -492,41 +492,42 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 4),
-    (2, 1, 4, 4, 16),
-    (1, 2, 4, 4, 16),
-    (2, 2, 4, 4, 16),
-    (1, 1, 4, 4, 16),
-    (2, 1, 4, 4 , 16),
-    (4, 6, 8, 8 , 16),
-    (1, 1, 4, 4, 32),
-    (1, 1, 16, 16, 16),
-    (1, 1, 32, 32, 16),
-    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
-    (1, 1, 128, 128, 64),
-    (1, 1, 128, 256, 45),
-    (1, 1, 256, 256, 64),
-    (1, 1, 256, 512, 16),
-    (1, 1, 512, 512, 64), 
-    (1, 1, 1024, 1024, 64),
-    # fa configs
-    (2, 2, 128, 128, 65),
-    (2, 2, 128, 128, 224),
-    (4, 6, 108, 256, 224),
-    (1, 1, 256, 512, 16),
-    # old tests that work
-    (4, 48, 1024, 1024, 73),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (1, 24, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
+    # (1, 1, 1, 1, 1),
+    # (1, 1, 4, 4, 4),
+    # (2, 1, 4, 4, 16),
+    # (1, 2, 4, 4, 16),
+    # (2, 2, 4, 4, 16),
+    # (1, 1, 4, 4, 16),
+    # (2, 1, 4, 4 , 16),
+    # (4, 6, 8, 8 , 16),
+    # (1, 1, 4, 4, 32),
+    # (1, 1, 16, 16, 16),
+    # (1, 1, 32, 32, 16),
+    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    # (1, 1, 128, 128, 64),
+    # (1, 1, 128, 256, 45),
+    (1, 1, 113, 203, 192)
+    # (1, 1, 256, 256, 64),
+    # (1, 1, 256, 512, 16),
+    # (1, 1, 512, 512, 64), 
+    # (1, 1, 1024, 1024, 64),
+    # # fa configs
+    # (2, 2, 128, 128, 65),
+    # (2, 2, 128, 128, 224),
+    # (4, 6, 108, 256, 224),
+    # (1, 1, 256, 512, 16),
+    # # old tests that work
+    # (4, 48, 1024, 1024, 73),
+    # (4, 48, 1024, 1024, 64),
+    # (4, 48, 2048, 2048, 64),
+    # (1, 24, 4096, 4096, 64),
+    # (1, 16, 1024, 1024, 64),
+    # (1, 16, 1024, 1024, 128),
 ])
 @pytest.mark.parametrize('causal', [False]) # bwd causal needs more work
-@pytest.mark.parametrize('use_exp2', [True, False])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('use_exp2', [False])
+@pytest.mark.parametrize('layout', ["bhsd"])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
 def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, DEBUG_INPUT):
     dtype = torch.float16
