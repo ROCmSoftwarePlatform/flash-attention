@@ -1,6 +1,7 @@
 import torch
 import math
 from .utils import DEBUG
+DEBUG = False
 
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
     if DEBUG:
@@ -301,7 +302,7 @@ def attention_forward_pytorch_ref_impl(
         print("attention_forward_pytorch_ref_impl outputs")
         print("o_ref:", o_ref, o_ref.shape)
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-        print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape)
+        print("exp_scores_ref:", exp_scores_ref, exp_scores_ref.shape if exp_scores_ref is not None else None)
 
     return (
             o_ref,

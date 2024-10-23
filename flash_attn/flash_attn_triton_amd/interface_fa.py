@@ -7,7 +7,7 @@ from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import MetaData, get_shape_from_layout, DEBUG
 
-USE_REF = os.environ.get('FLASH_ATTN_USE_REF', '0').lower() in ('1', 'true', 'yes')
+USE_REF = os.environ.get('FLASH_ATTENTION_USE_REF', '0').lower() in ('1', 'true', 'yes')
 
 def fwd(q,
         k,
@@ -221,6 +221,12 @@ def bwd(
             False,
         )
 
+
+    if DEBUG:
+        print("bwd outputs")
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
     return dq, dk, dv, None
 
 def varlen_fwd(
@@ -344,6 +350,16 @@ def varlen_fwd(
                                                             metadata.max_seqlens_k, 
                                                             metadata.return_scores, 
                                                             metadata.use_exp2)
+    if DEBUG:
+        print("varlen_fwd outputs")
+        print("output:", output, output.shape)
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o, o.shape)
+        print("softmax_lse:", softmax_lse, softmax_lse.shape)
+        print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None )
+
 
     return output, q , k , v, o, softmax_lse, exp_scores, None
 
@@ -424,8 +440,9 @@ def varlen_bwd(
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)
         dv.copy_(dv_ref)
+        delta = delta_ref
     else:
-        _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
+       dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
             dout,
             q,
             k,
@@ -445,15 +462,16 @@ def varlen_bwd(
             max_seqlen_k,
             False,
         )
+       delta = delta_triton
 
     if DEBUG:
         print("varlen_bwd outputs")
-        print("delta_ref:", delta_ref, delta_ref.shape)
+        print("delta:", delta, delta.shape)
         print("dv:", dv, dv.shape)
         print("dk:", dk, dk.shape)
         print("dq:", dq, dq.shape)
 
-    return dq, dk, dv, delta_ref
+    return dq, dk, dv, delta
 
 def fwd_kvcache(
         q,

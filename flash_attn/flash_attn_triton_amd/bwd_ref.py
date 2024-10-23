@@ -1,6 +1,7 @@
 import torch
 import math
 from .utils import DEBUG
+DEBUG = False
 
 def attention_backward_core_ref_impl(
     do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2
