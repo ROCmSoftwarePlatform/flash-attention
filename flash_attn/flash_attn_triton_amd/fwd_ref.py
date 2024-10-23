@@ -1,7 +1,6 @@
 import torch
 import math
-
-DEBUG = False
+from .utils import DEBUG
 
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
     if DEBUG:

@@ -1,5 +1,8 @@
 
 import torch
+import os
+
+DEBUG = os.environ.get('FLASH_ATTENTION_DEBUG', '0').lower() in ('1', 'true', 'yes')
 
 
 def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=False):

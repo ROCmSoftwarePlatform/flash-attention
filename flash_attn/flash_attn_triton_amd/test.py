@@ -1,15 +1,13 @@
 import torch
 import pytest
 
-from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
+from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper, DEBUG
 from .interface_torch import attention_prefill, attention_decode
 from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
-
-DEBUG = False
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
 ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 

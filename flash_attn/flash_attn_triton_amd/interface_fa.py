@@ -5,9 +5,8 @@ from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .utils import MetaData, get_shape_from_layout
+from .utils import MetaData, get_shape_from_layout, DEBUG
 
-DEBUG = os.environ.get('FLASH_ATTENTION_DEBUG', '0').lower() in ('1', 'true', 'yes')
 USE_REF = os.environ.get('FLASH_ATTN_USE_REF', '0').lower() in ('1', 'true', 'yes')
 
 def fwd(q,
@@ -127,7 +126,7 @@ def fwd(q,
         print("v:", v, v.shape)
         print("o:", o, o.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("exp_scores:", exp_scores, exp_scores.shape)
+        print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None )
 
     return output, q , k , v, o, softmax_lse, exp_scores, None
 

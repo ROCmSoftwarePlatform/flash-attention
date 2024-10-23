@@ -1,9 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout
-
-DEBUG = False
+from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG
 
 @triton.jit
 def cdiv_fn(x, y):

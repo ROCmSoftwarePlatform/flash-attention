@@ -3,9 +3,7 @@ import triton
 import triton.language as tl
 
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .utils import get_shape_from_layout, get_strides_from_layout
-
-DEBUG = False
+from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG
 
 @triton.jit
 def _bwd_preprocess_use_o(
