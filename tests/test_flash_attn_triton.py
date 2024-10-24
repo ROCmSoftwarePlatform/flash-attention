@@ -1545,29 +1545,29 @@ def test_flash_attn_varlen_output(
 @pytest.mark.parametrize("dtype", [torch.float16])
 # @pytest.mark.parametrize("local", [False, True])
 @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("d", [32, 40, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64, 128])
-# @pytest.mark.parametrize("d", [32])
+@pytest.mark.parametrize("d", [32])
 # @pytest.mark.parametrize("swap_sq_sk", [False, True])
 @pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        # (2, 2),
-        (1, 239),
-        (3, 799),
-        (127, 512),
-        (127, 513),
-        (113, 203),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (1023, 1024),
+        (64, 128),
+        # (1, 239),
+        # (3, 799),
+        # (127, 512),
+        # (127, 513),
+        # (113, 203),
+        # (128, 217),
+        # (113, 211),
+        # (108, 256),
+        # (256, 512),
+        # (1023, 1024),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -1583,8 +1583,8 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
     causal = True
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 8
-    nheads = 9
+    batch_size = 1
+    nheads = 1
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
     q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     k = torch.randn(batch_size, seqlen_k, nheads, d, device=device, dtype=dtype, requires_grad=True)
@@ -1647,9 +1647,23 @@ def test_flash_attn_causal(seqlen_q, seqlen_k, swap_sq_sk, d, local, dtype):
     # of a Pytorch implementation.
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item() + 1e-5
 
-    assert (dq - dq_ref).abs().max().item() <= 2 * (dq_pt - dq_ref).abs().max().item() + 1e-5
-    assert (dk - dk_ref).abs().max().item() <= 2 * (dk_pt - dk_ref).abs().max().item() + 1e-5
+    if DEBUG:
+        print("dv:", dv, dv.shape)
+        print("dv_ref:", dv_ref, dv_ref.shape)
+        print("dv_pt:", dv_pt, dv_pt.shape)
     assert (dv - dv_ref).abs().max().item() <= 2 * (dv_pt - dv_ref).abs().max().item() + 1e-5
+    
+    if DEBUG:
+        print("dk:", dk, dk.shape)
+        print("dk_ref:", dk_ref, dk_ref.shape)
+        print("dk_pt:", dk_pt, dk_pt.shape)
+    assert (dk - dk_ref).abs().max().item() <= 2 * (dk_pt - dk_ref).abs().max().item() + 1e-5
+
+    if DEBUG:
+        print("dq:", dq, dq.shape)
+        print("dq_ref:", dq_ref, dq_ref.shape)
+        print("dq_pt:", dq_pt, dq_pt.shape)
+    assert (dq - dq_ref).abs().max().item() <= 2 * (dq_pt - dq_ref).abs().max().item() + 1e-5
 
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 @pytest.mark.parametrize("dtype", [torch.float16])

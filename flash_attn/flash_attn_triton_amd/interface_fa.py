@@ -201,10 +201,11 @@ def bwd(
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)
         dv.copy_(dv_ref)
+        delta = delta_ref
     else:
         if DEBUG:
             print("Using Triton implementation")
-        _, _, _, _, _, _ = attention_prefill_backward_triton_impl(
+        dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
             dout,
             q,
             k,
@@ -224,14 +225,14 @@ def bwd(
             None,
             False,
         )
-
+        delta = delta_triton
 
     if DEBUG:
         print("bwd outputs")
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
         print("dv:", dv, dv.shape)
-    return dq, dk, dv, None
+        print("dk:", dk, dk.shape)
+        print("dq:", dq, dq.shape)
+    return dq, dk, dv, delta
 
 def varlen_fwd(
         q, 

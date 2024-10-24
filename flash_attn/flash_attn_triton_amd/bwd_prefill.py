@@ -1,8 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-
-from .bwd_ref import attention_backward_pytorch_ref_impl
 from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG
 DEBUG = False
 
@@ -743,7 +741,6 @@ def attention_prefill_backward_triton_impl(
         dv_og.copy_(dv)
         return dq_og, dk_og, dv_og, delta, None, None
     else:
-
         return dq, dk, dv, delta, None, None
 
 
