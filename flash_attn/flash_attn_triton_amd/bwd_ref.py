@@ -38,6 +38,24 @@ def attention_backward_core_ref_impl(
     if DEBUG:
         print("attention_scaled_scores:", attention_scaled_scores, attention_scaled_scores.shape)
 
+    # Apply causal mask if necessary
+    if causal:
+        L_q, L_k = q.shape[1], k.shape[1]
+        row_idx = torch.arange(L_q, device=q.device).unsqueeze(1)
+        col_idx = torch.arange(L_k, device=q.device).unsqueeze(0)
+        col_offset = L_q-L_k
+        causal_mask = row_idx >= (col_offset + col_idx)
+        if DEBUG:
+            print("row_idx:", row_idx)
+            print("col_idx:", col_idx)
+            print("causal_mask:", causal_mask)
+        # set -inf to places the causal mask is false
+        attention_scaled_scores = attention_scaled_scores.masked_fill(
+             torch.logical_not(causal_mask.unsqueeze(0)), float('-inf')
+        )
+        if DEBUG:
+            print("attention_scaled_scores after causal:", attention_scaled_scores, attention_scaled_scores.shape)
+
     # compute probabilities using softmax_lse
     if use_exp2:
         RCP_LN = 1 / math.log(2)
@@ -215,6 +233,18 @@ def attention_vanilla_backward_pytorch_ref_impl(
         pass
     else:
         raise ValueError(f"Unknown layout {layout}")
+    
+    # Prepare tensors in [batch_size * num_heads, seq_len, head_dim] format
+    batch_size, num_heads, seq_len_q, head_dim = q.shape
+    seq_len_k = k.shape[2]
+
+    # Merge batch and heads dimensions
+    do = do.reshape(batch_size * num_heads, seq_len_q, head_dim)
+    q = q.reshape(batch_size * num_heads, seq_len_q, head_dim)
+    k = k.reshape(batch_size * num_heads, seq_len_k, head_dim)
+    v = v.reshape(batch_size * num_heads, seq_len_k, head_dim)
+    softmax_lse = softmax_lse.reshape(batch_size * num_heads, seq_len_q)
+    o = o.reshape(batch_size * num_heads, seq_len_q, head_dim)
 
     dq, dk, dv, delta = attention_backward_core_ref_impl(
         do,
@@ -227,6 +257,12 @@ def attention_vanilla_backward_pytorch_ref_impl(
         causal,
         use_exp2
     )
+
+    # Reshape outputs back to [batch_size, num_heads, seq_len, head_dim]
+    dq = dq.reshape(batch_size, num_heads, seq_len_q, head_dim)
+    dk = dk.reshape(batch_size, num_heads, seq_len_k, head_dim)
+    dv = dv.reshape(batch_size, num_heads, seq_len_k, head_dim)
+    delta = delta.reshape(batch_size, num_heads, seq_len_q)
 
     # Go back to original layout
     if layout == "bshd":

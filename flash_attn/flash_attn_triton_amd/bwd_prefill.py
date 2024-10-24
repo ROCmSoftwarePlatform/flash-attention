@@ -512,6 +512,7 @@ def attention_prefill_backward_triton_impl(
         print("dv:", dv, dv.shape if dv is not None else None)
         print("sm_scale:", sm_scale)
         print("alibi_slopes:", alibi_slopes)
+        print("causal:", causal)
         print("layout:", layout)
         print("cu_seqlens_q:", cu_seqlens_q)
         print("cu_seqlens_k:", cu_seqlens_k)

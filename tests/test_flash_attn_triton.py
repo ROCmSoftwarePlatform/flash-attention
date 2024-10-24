@@ -1551,11 +1551,13 @@ def test_flash_attn_varlen_output(
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
 # @pytest.mark.parametrize("d", [64, 128])
+# @pytest.mark.parametrize("d", [32])
 # @pytest.mark.parametrize("swap_sq_sk", [False, True])
 @pytest.mark.parametrize("swap_sq_sk", [False])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
+        # (2, 2),
         (1, 239),
         (3, 799),
         (127, 512),
