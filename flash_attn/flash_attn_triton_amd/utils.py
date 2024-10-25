@@ -5,7 +5,7 @@ import os
 DEBUG = os.environ.get('FLASH_ATTENTION_DEBUG', '0').lower() in ('1', 'true', 'yes')
 
 
-def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=False):
+def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
     torch.manual_seed(20)
 
     # Initialize q, k, v
@@ -20,17 +20,17 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT
 
     if DEBUG_INPUT:
         if layout == "bhsd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
         elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device="cuda").view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device="cuda").view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
     else:
-        q = torch.randn(q_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
-        k = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
-        v = torch.randn(k_tensor_shape, dtype=dtype, device="cuda", requires_grad=True)
+        q = torch.randn(q_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+        k = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+        v = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
     
     if DEBUG_INPUT:
         sm_scale = 1
@@ -43,7 +43,7 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT
     return q, k, v, input_metadata
 
 
-def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlens=False, DEBUG_INPUT=False):
+def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device="cuda", equal_seqlens=False, DEBUG_INPUT=False):
     torch.manual_seed(20)
 
     # Random or equal sequence lengths based on 'equal_seqlens' flag
@@ -59,8 +59,8 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
     # Calculate cumulative sequence lengths
     cu_seqlens_q = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens_q.cumsum(dim=0)])
     cu_seqlens_k = torch.cat([torch.tensor([0], dtype=torch.int32), seqlens_k.cumsum(dim=0)])
-    cu_seqlens_q = cu_seqlens_q.to(device="cuda").to(torch.int32)
-    cu_seqlens_k = cu_seqlens_k.to(device="cuda").to(torch.int32)
+    cu_seqlens_q = cu_seqlens_q.to(device=device).to(torch.int32)
+    cu_seqlens_k = cu_seqlens_k.to(device=device).to(torch.int32)
 
     # Total lengths
     total_q = cu_seqlens_q[-1].item()
@@ -68,18 +68,18 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, equal_seqlen
 
     if DEBUG_INPUT:
         # Initialize q, k, v with deterministic values
-        q = torch.arange(total_q, dtype=dtype, device="cuda").view(total_q, 1, 1)
+        q = torch.arange(total_q, dtype=dtype, device=device).view(total_q, 1, 1)
         q = q.expand(total_q, HQ, D_HEAD).contiguous().requires_grad_()
-        k = torch.arange(total_k, dtype=dtype, device="cuda").view(total_k, 1, 1)
+        k = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
         k = k.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
-        v = torch.arange(total_k, dtype=dtype, device="cuda").view(total_k, 1, 1)
+        v = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
         v = v.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
         sm_scale = 1
     else:
         # Initialize q, k, v with random values
-        q = torch.randn((total_q, HQ, D_HEAD), dtype=dtype, device="cuda").requires_grad_()
-        k = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device="cuda").requires_grad_()
-        v = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device="cuda").requires_grad_()
+        q = torch.randn((total_q, HQ, D_HEAD), dtype=dtype, device=device).requires_grad_()
+        k = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device=device).requires_grad_()
+        v = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device=device).requires_grad_()
         sm_scale = D_HEAD ** -0.5
 
     input_metadata = MetaData(sm_scale=sm_scale)
@@ -167,6 +167,7 @@ class MetaData():
     dropout_p, return_scores= 0.0, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = False
+    return_encoded_softmax = False
     
 
     def __repr__(self) -> str:

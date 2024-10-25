@@ -8,6 +8,7 @@ from flash_attn.flash_attn_triton_amd.utils import (
     varlen_input_helper,
 )
 from flash_attn.flash_attn_triton_amd.interface_torch import attention_prefill, attention_decode
+from flash_attn.flash_attn_triton_amd.ref import attention as attention_prefill_old
 
 
 def get_benchmark_configs(args, varlen=False):
@@ -59,18 +60,66 @@ def get_benchmark_configs(args, varlen=False):
         ]
 
 
-def run_benchmark(args, benchmark_fn):
+def gen_fn_inputs(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device, layout, causal):
+    is_varlen = layout == "thd"
+
+    if fn_name.startswith("prefill"):
+        if is_varlen:
+            q, k, v, input_metadata = varlen_input_helper(
+                BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device=device)
+            for i in range(input_metadata.num_contexts):
+                seqlen_q = input_metadata.cu_seqlens_q[i + 1] - input_metadata.cu_seqlens_q[i]
+                seqlen_k = input_metadata.cu_seqlens_k[i + 1] - input_metadata.cu_seqlens_k[i]
+                flops_per_matmul += seqlen_q.item() * seqlen_k.item() * HQ * D_HEAD * 2
+        else:
+            q, k, v, input_metadata = input_helper(
+                BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device=device
+            )
+            flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
+
+        if causal:
+            input_metadata.need_causal()
+
+        o = torch.empty_like(q)
+        input_data = (q, k, v, o, input_metadata)
+    elif fn_name.startswith("decode"):
+        q = torch.randn(
+            [BATCH, N_CTX_Q, HK, HQ // HK, D_HEAD],
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+        )
+        k = torch.randn(
+            [BATCH, N_CTX_K, HK, 1, D_HEAD],
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+        ).expand(-1, -1, -1, HQ // HK, -1)
+        v = torch.randn(
+            [BATCH, N_CTX_K, HK, 1, D_HEAD],
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+        ).expand(-1, -1, -1, HQ // HK, -1)
+        input_metadata = MetaData(sm_scale=1.3)
+        input_metadata.layout = "bsghd"
+        
+        # Adjust flops calculation if needed
+        input_data = (q, k, v, input_metadata)
+        flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
+    else:
+        raise ValueError("Unsupported benchmark function")
+
+    
+    return input_data, flops_per_matmul
+
+def run_benchmark(args, fn_name, fn):
     """
     Runs the benchmark for the provided function based on the provided arguments.
     """
-    # Map string dtype to torch dtype
-    arg_to_torch_dtype = {
-        "fp16": torch.float16,
-        "bf16": torch.bfloat16,
-        "fp32": torch.float32,
-    }
+    print(f"Benching {fn_name}...")
 
-    dtype = arg_to_torch_dtype[args.dtype]
+    dtype = ARGS_TO_TORCH_DTYPE[args.dtype]
     head_size = args.d if args.d else 128
     causal = args.causal
     varlen = args.layout == "thd"
@@ -79,13 +128,6 @@ def run_benchmark(args, benchmark_fn):
 
     # Determine configurations
     x_vals_list = get_benchmark_configs(args, varlen=varlen)
-
-    if benchmark_fn == attention_prefill:
-        fn_name = "attention-prefill"
-    elif benchmark_fn == attention_decode:
-        fn_name = "attention-decode"
-    else:
-        raise ValueError("Unkonwn benchmark_fn: {benchmark_fn}")
 
     # Setup benchmark configurations
     configs = [
@@ -114,57 +156,8 @@ def run_benchmark(args, benchmark_fn):
         rep = 100
         flops_per_matmul = 0
 
-        if benchmark_fn == attention_prefill:
-
-            if varlen:
-                q, k, v, input_metadata = varlen_input_helper(
-                    BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.equal_seqlens
-                )
-                for i in range(input_metadata.num_contexts):
-                    seqlen_q = input_metadata.cu_seqlens_q[i + 1] - input_metadata.cu_seqlens_q[i]
-                    seqlen_k = input_metadata.cu_seqlens_k[i + 1] - input_metadata.cu_seqlens_k[i]
-                    flops_per_matmul += seqlen_q.item() * seqlen_k.item() * HQ * D_HEAD * 2
-            else:
-                q, k, v, input_metadata = input_helper(
-                    BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.layout
-                )
-                flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
-
-            if causal:
-                input_metadata.need_causal()
-
-            o = torch.empty_like(q)
-            fn = lambda: benchmark_fn(q, k, v, o, input_metadata)
-
-        elif benchmark_fn == attention_decode:
-            q = torch.randn(
-                [BATCH, N_CTX_Q, HK, HQ // HK, D_HEAD],
-                device="cuda",
-                dtype=dtype,
-                requires_grad=False,
-            )
-            k = torch.randn(
-                [BATCH, N_CTX_K, HK, 1, D_HEAD],
-                device="cuda",
-                dtype=dtype,
-                requires_grad=False,
-            ).expand(-1, -1, -1, HQ // HK, -1)
-            v = torch.randn(
-                [BATCH, N_CTX_K, HK, 1, D_HEAD],
-                device="cuda",
-                dtype=dtype,
-                requires_grad=False,
-            ).expand(-1, -1, -1, HQ // HK, -1)
-            input_metadata = MetaData(sm_scale=1.3)
-            input_metadata.layout = "bsghd"
-            fn = lambda: benchmark_fn(q, k, v, input_metadata)
-            # Adjust flops calculation if needed
-            flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
-
-        else:
-            raise ValueError("Unsupported benchmark function")
-
-        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+        fn_inputs, flops_per_matmul = gen_fn_inputs(fn_name, BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device, args.layout, causal)
+        ms = triton.testing.do_bench(lambda: fn(*fn_inputs), warmup=warmup, rep=rep)
 
         # NOTE: taken from bench old. Not sure if true 2.0(fwd) + 2.0(bwd) + 0.5(recompute)
         total_flops = 2 * flops_per_matmul
@@ -224,11 +217,22 @@ def parse_args():
         "-benchmark_fn",
         type=str,
         nargs="*",
-        choices=["prefill", "decode"],
+        choices=FUNCTIONS.keys(),
         help="Function(s) to benchmark: prefill, decode, or both",
     )
     return parser.parse_args()
 
+ARGS_TO_TORCH_DTYPE = {
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+    "fp32": torch.float32,
+}
+
+FUNCTIONS = {
+    "prefill": attention_prefill,
+    "prefill_old": attention_prefill_old,
+    "decode": attention_decode
+}
 
 def main():
     """
@@ -237,11 +241,6 @@ def main():
     args = parse_args()
 
     # Validate arguments
-    arg_to_torch_dtype = {
-        "fp16": torch.float16,
-        "bf16": torch.bfloat16,
-        "fp32": torch.float32,
-    }
     assert (
         args.layout == "thd" or not args.equal_seqlens
     ), "Equal sequence lengths arg must be used with the thd layout."
@@ -252,7 +251,7 @@ def main():
             "If custom config is specified, please provide all of batch, "
             "number of Q heads, Q sequence length, and head size."
         )
-    assert args.dtype in arg_to_torch_dtype, "Only fp16, bf16 and fp32 types currently supported."
+    assert args.dtype in ARGS_TO_TORCH_DTYPE, "Only fp16, bf16 and fp32 types currently supported."
 
 
     # Determine the functions to benchmark
@@ -260,14 +259,10 @@ def main():
         print(f"Provide functions to bench. E.g. -benchmark_fn prefill")
     else:
         for fn_name in args.benchmark_fn:
-            if fn_name == 'prefill':
-                benchmark_fn = attention_prefill
-            elif fn_name == 'decode':
-                benchmark_fn = attention_decode
-            else:
+            if fn_name not in FUNCTIONS:
                 raise ValueError(f"Invalid benchmark function specified: {fn_name}")
-            print(f"Benching {fn_name}...")
-            run_benchmark(args, benchmark_fn)
+
+            run_benchmark(args, fn_name, FUNCTIONS[fn_name])
 
 
 if __name__ == "__main__":

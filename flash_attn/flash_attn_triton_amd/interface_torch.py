@@ -49,7 +49,7 @@ class _attention_prefill(torch.autograd.Function):
         return output, softmax_lse, exp_scores
 
     @staticmethod
-    def backward(ctx, do, *args): # expects bhsd
+    def backward(ctx, do, *args):
         q, k, v, o, softmax_lse = ctx.saved_tensors
         return attention_prefill_backward_triton_impl(
             do,
