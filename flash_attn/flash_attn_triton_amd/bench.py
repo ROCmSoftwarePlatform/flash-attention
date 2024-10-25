@@ -166,6 +166,7 @@ def run_benchmark(args, benchmark_fn):
 
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
 
+        # NOTE: taken from bench old. Not sure if true 2.0(fwd) + 2.0(bwd) + 0.5(recompute)
         total_flops = 2 * flops_per_matmul
         if causal:
             total_flops *= 0.5

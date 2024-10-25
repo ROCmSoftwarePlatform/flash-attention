@@ -584,13 +584,8 @@ def attention_prefill_backward_triton_impl(
     assert o.is_contiguous()
     assert softmax_lse.is_contiguous()
 
-
-
-    if True:
-        delta = torch.zeros_like(softmax_lse)
-    else:
-        delta = torch.empty_like(softmax_lse)
-
+    # init delta
+    delta = torch.empty_like(softmax_lse)
     if is_varlen:
         stride_deltam, stride_deltah = delta.stride()
         stride_deltaz = 0
@@ -700,10 +695,12 @@ def attention_prefill_backward_triton_impl(
     if is_packed:
         if DEBUG:
             print("Copying back to original tensors due to ispacked")
-            dq_og.copy_(dq)
-            dk_og.copy_(dk)
-            dv_og.copy_(dv)
-            return dq_og, dk_og, dv_og, delta, None, None
+        
+        # copy back results to og tensors
+        dq_og.copy_(dq)
+        dk_og.copy_(dk)
+        dv_og.copy_(dv)
+        return dq_og, dk_og, dv_og, delta, None, None
     else:
         return dq, dk, dv, delta, None, None
 
