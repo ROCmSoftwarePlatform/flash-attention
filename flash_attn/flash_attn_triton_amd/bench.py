@@ -8,7 +8,7 @@ from flash_attn.flash_attn_triton_amd.utils import (
     varlen_input_helper,
 )
 from flash_attn.flash_attn_triton_amd.interface_torch import attention_prefill, attention_decode
-from flash_attn.flash_attn_triton_amd.ref import attention as attention_prefill_old
+from flash_attn.flash_attn_triton_amd.fwd_old import attention as attention_prefill_old
 
 
 def get_benchmark_configs(args, varlen=False):
