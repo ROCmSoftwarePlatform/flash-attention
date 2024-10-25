@@ -142,13 +142,9 @@ def _strides(x: torch.Tensor, *stride_names: str):
     assert x.ndim == len(stride_names)
     return {f"stride_{s}": x.stride(i) for i, s in enumerate(stride_names)}
 
-
-
-
 def get_input_shapes():
     cases = [(max(1, 2**(16 - i)), 1, 2**i, 16, 1, 128)
              for i in range(8, 18)] + [(max(1, 2**(16 - i)), 1, 2**i, 16, 2, 128) for i in range(8, 18)]
-
     return cases
 
 class MetaData():
@@ -170,7 +166,7 @@ class MetaData():
     v_new = None
     dropout_p, return_scores= 0.0, False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
-    use_exp2 = True
+    use_exp2 = False
     
 
     def __repr__(self) -> str:

@@ -7,7 +7,31 @@ from .fwd_decode import attention_decode_forward_triton_impl
 class _attention_prefill(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, o, metadata):
-        o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, _, _ = attention_prefill_forward_triton_impl(q, k, v, o, metadata)
+        (output, 
+        softmax_lse, 
+        exp_scores, 
+        grid, 
+        head_size, 
+        philox_seed, 
+        philox_offset, 
+        _, 
+        _) = attention_prefill_forward_triton_impl(
+                                                q, 
+                                                k, 
+                                                v, 
+                                                o, 
+                                                metadata.sm_scale, 
+                                                metadata.alibi_slopes, 
+                                                metadata.causal, 
+                                                metadata.bias, 
+                                                metadata.dropout_p, 
+                                                metadata.layout, 
+                                                metadata.cu_seqlens_q, 
+                                                metadata.cu_seqlens_k,
+                                                metadata.max_seqlens_q, 
+                                                metadata.max_seqlens_k, 
+                                                metadata.return_scores, 
+                                                metadata.use_exp2)
 
         ctx.save_for_backward(q, k, v, o, softmax_lse)
         ctx.grid = grid
@@ -22,7 +46,7 @@ class _attention_prefill(torch.autograd.Function):
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
         ctx.use_exp2 = metadata.use_exp2
-        return o, softmax_lse, exp_scores
+        return output, softmax_lse, exp_scores
 
     @staticmethod
     def backward(ctx, do, *args): # expects bhsd

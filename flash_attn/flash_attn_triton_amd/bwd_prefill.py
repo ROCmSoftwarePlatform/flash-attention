@@ -549,36 +549,21 @@ def attention_prefill_backward_triton_impl(
     ACTUAL_BLOCK_DMODEL = head_size
 
     do = do.contiguous()
-    # if sequence_parallel:
-    #     # replicate q for each parallel sequence
-    #     replicas = num_blocks_n
-    #     new_dq_shape = (replicas,) + q.shape
-    #     if dq is None: 
-    #         dq = torch.zeros(new_dq_shape, device=q.device, dtype=q.dtype)
-    #     else:
-    #         dq = dq.contiguous()
-    # else:
-    #     if dq is None:
-    #         dq = torch.zeros_like(q, dtype=q.dtype)
-    #     else:
-    #         dq = dq.contiguous()
+    if sequence_parallel:
+        # replicate q for each parallel sequence
+        replicas = num_blocks_n
+        dq_shape = (replicas,) + q.shape
+    else:
+        dq_shape = q.shape
 
-
-    # if dk is None:
-    #     if True:
-    #         dk = torch.zeros_like(k)
-    #     else:
-    #         dk = torch.empty_like(k)
-    # else:
-    #     dk = dk.contiguous()
-
-    # if dv is None:
-    #     if True:
-    #         dv = torch.zeros_like(v)
-    #     else:
-    #         dv = torch.empty_like(v)
-    # else:
-    #     dv = dv.contiguous()
+    if dq is None or dk is None or dv is None: 
+        dq = torch.zeros(dq_shape, device=q.device, dtype=q.dtype)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+    else:
+        dq = dq.contiguous()
+        dk = dk.contiguous()
+        dv = dv.contiguous()
 
     # qkv packed
     is_packed = False
