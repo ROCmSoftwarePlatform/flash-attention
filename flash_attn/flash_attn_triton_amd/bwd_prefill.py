@@ -556,6 +556,7 @@ def attention_prefill_backward_triton_impl(
     else:
         dq_shape = q.shape
 
+    is_qkvpacked = False
     if dq is None or dk is None or dv is None: 
         dq = torch.zeros(dq_shape, device=q.device, dtype=q.dtype)
         dk = torch.empty_like(k)
@@ -563,15 +564,13 @@ def attention_prefill_backward_triton_impl(
     elif (not dq.is_contiguous()) or (not dq.is_contiguous()) or (not dq.is_contiguous()):
             if DEBUG:
                 print("Not contigious and setting is packed to True")
-            is_packed = True
+            is_qkvpacked = True
             dq_og = dq
             dq = dq.contiguous()
             dk_og = dk
             dk = dk.contiguous()
             dv_og = dv
-            dv = dv.contiguous()
-    else:
-        is_packed = False
+            dv = dv.contiguous()       
     
     # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
     dq.zero_()
@@ -692,7 +691,7 @@ def attention_prefill_backward_triton_impl(
         print("dv:", dv, dv.shape)
         print("delta:", delta, delta.shape)
     
-    if is_packed:
+    if is_qkvpacked:
         if DEBUG:
             print("Copying back to original tensors due to ispacked")
         
