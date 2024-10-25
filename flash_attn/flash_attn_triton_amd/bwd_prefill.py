@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG
-DEBUG = True
+DEBUG = False
 
 @triton.jit
 def _bwd_preprocess_use_o(
@@ -522,9 +522,10 @@ def attention_prefill_backward_triton_impl(
         stride_qz, stride_qh, stride_qm, stride_qk =  q.stride(0),  q.stride(1), q.stride(2),  q.stride(3)
         stride_kz, stride_kh, stride_kn, stride_kk = k.stride(0),  k.stride(1), k.stride(2),  k.stride(3)
         stride_vz, stride_vh, stride_vn, stride_vk = v.stride(0),  v.stride(1), v.stride(2),  v.stride(3)
+    is_varlen = layout == "thd"
 
-    # TODO: fix mismatches because of 32 x 32 avoids oom issues but has mismatches
-    if max_seqlen_q < 32 or max_seqlen_k < 32:
+    # FIXME: some configs lead to oom for some reason when using 64 x 64 blocks
+    if max_seqlen_q <= 32 or max_seqlen_k <= 32:
         BLOCK_M = 32 
         BLOCK_N = 32
     else:
@@ -609,7 +610,6 @@ def attention_prefill_backward_triton_impl(
     else:
         delta = torch.empty_like(softmax_lse)
 
-    is_varlen = layout == "thd"
     if is_varlen:
         stride_deltam, stride_deltah = delta.stride()
         stride_deltaz = 0

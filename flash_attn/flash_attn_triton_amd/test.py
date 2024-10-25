@@ -14,6 +14,7 @@ ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose.
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
+EQUAL_NAN = True
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD', [
     (4, 48, 24, 1024, 1024, 64),
@@ -492,44 +493,44 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    # (1, 1, 1, 1, 1),
-    # (1, 1, 4, 4, 4),
-    # (2, 1, 4, 4, 16),
-    # (1, 2, 4, 4, 16),
-    # (2, 2, 4, 4, 16),
-    # (1, 1, 4, 4, 16),
-    # (2, 1, 4, 4 , 16),
-    # (4, 6, 8, 8 , 16),
-    # (1, 1, 4, 4, 32),
-    # (1, 1, 16, 16, 16),
-    # (1, 1, 32, 32, 16),
-    # (1, 1, 64, 64, 16), # pass # smallest head_size = 16
-    # (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
+    (1, 1, 1, 1, 1),
+    (1, 1, 4, 4, 4),
+    (2, 1, 4, 4, 16),
+    (1, 2, 4, 4, 16),
+    (2, 2, 4, 4, 16),
+    (1, 1, 4, 4, 16),
+    (2, 1, 4, 4 , 16),
+    (4, 6, 8, 8 , 16),
+    (1, 1, 4, 4, 32),
+    (1, 1, 16, 16, 16),
+    (1, 1, 32, 32, 16),
+    (1, 1, 64, 64, 16), # pass # smallest head_size = 16
+    (1, 1, 64, 64, 64), # pass # smallest seq len seems to be 64
     (1, 1, 64, 128, 32),
-    # (1, 1, 128, 128, 64),
-    # (1, 1, 128, 256, 45),
-    # (1, 1, 113, 203, 192),
-    # (1, 1, 256, 256, 64),
-    # (1, 1, 256, 512, 16),
-    # (1, 1, 512, 512, 64), 
-    # (1, 1, 1024, 1024, 64),
-    # # fa configs
-    # (2, 2, 128, 128, 65),
-    # (2, 2, 128, 128, 224),
-    # (4, 6, 108, 256, 224),
-    # (1, 1, 256, 512, 16),
-    # # old tests that work
-    # (4, 48, 1024, 1024, 73),
-    # (4, 48, 1024, 1024, 64),
-    # (4, 48, 2048, 2048, 64),
-    # (1, 24, 4096, 4096, 64),
-    # (1, 16, 1024, 1024, 64),
-    # (1, 16, 1024, 1024, 128),
+    (1, 1, 128, 128, 64),
+    (1, 1, 128, 256, 45),
+    (1, 1, 113, 203, 192),
+    (1, 1, 256, 256, 64),
+    (1, 1, 256, 512, 16),
+    (1, 1, 512, 512, 64), 
+    (1, 1, 1024, 1024, 64),
+    # fa configs
+    (2, 2, 128, 128, 65),
+    (2, 2, 128, 128, 224),
+    (4, 6, 108, 256, 224),
+    (1, 1, 256, 512, 16),
+    # old tests that work
+    (4, 48, 1024, 1024, 73),
+    (4, 48, 1024, 1024, 64),
+    (4, 48, 2048, 2048, 64),
+    (1, 24, 4096, 4096, 64),
+    (1, 16, 1024, 1024, 64),
+    (1, 16, 1024, 1024, 128),
 ])
-@pytest.mark.parametrize('causal', [True]) # bwd causal needs more work
-@pytest.mark.parametrize('use_exp2', [False])
-@pytest.mark.parametrize('layout', ["bhsd"])
-@pytest.mark.parametrize('DEBUG_INPUT', [True]) # debug output causes nans in both new and old backend
+@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('use_exp2', [False]) # using exp2 causas issue with exp2
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
 def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
@@ -599,7 +600,7 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
     # =============================================== Triton ==============================================================
     o = o_ref.clone().contiguous()
     softmax_lse = softmax_lse_ref.clone().contiguous()
-    dq, dk, dv, delta, _, _ = attention_prefill_backward_triton_impl(
+    dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
         do,
         q,
         k,
@@ -624,24 +625,24 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
     if DEBUG:
         print()
     if DEBUG:
-        print("delta:", delta, delta.shape)
+        print("delta_triton:", delta_triton, delta_triton.shape)
         print("delta_ref:", delta_ref, delta_ref.shape)
-    torch.testing.assert_close(delta, delta_ref, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(delta_triton, delta_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
     if DEBUG:
-        print("dv:", dv, dv.shape)
+        print("dv_triton:", dv_triton, dv_triton.shape)
         print("dv_ref:", dv_ref, dv_ref.shape)
-    torch.testing.assert_close(dv, dv_ref, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
     if DEBUG:
-        print("dk:", dk, dk.shape)
+        print("dk_triton:", dk_triton, dk_triton.shape)
         print("dk_ref:", dk_ref, dk_ref.shape)
-    torch.testing.assert_close(dk, dk_ref, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
     if DEBUG:
-        print("dq:", dq, dq.shape)
+        print("dq_triton:", dq_triton, dq_triton.shape)
         print("dq_ref:", dq_ref, dq_ref.shape)
-    torch.testing.assert_close(dq, dq_ref, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
 
 @pytest.mark.parametrize('batch_size, seqlen_q, seqlen_k, group_q, group_k, dim', get_input_shapes())
