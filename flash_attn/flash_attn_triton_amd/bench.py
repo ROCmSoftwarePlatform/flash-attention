@@ -1,142 +1,199 @@
 import argparse
 import torch
 import triton
-from flash_attn.flash_attn_triton_amd.utils import MetaData, get_input_shapes, input_helper, varlen_input_helper
+from flash_attn.flash_attn_triton_amd.utils import (
+    MetaData,
+    get_input_shapes,
+    input_helper,
+    varlen_input_helper,
+)
 from flash_attn.flash_attn_triton_amd.interface_torch import attention_prefill, attention_decode
 
-def nonvarlen_benchmark_configs():
-    configs = [
-        (16, 16, 16, 1024, 1024),
-        (8, 16, 16, 2048, 2048),
-        (4, 16, 16, 4096, 4096),
-        (2, 16, 16, 8192, 8192),
-        (1, 16, 16, 16384, 16384),
-        (2, 48, 48, 1024, 1024),
-        (2, 48, 48, 2048, 1024),
-        (2, 48, 48, 4096, 8192),
-        (2, 48, 48, 8192, 4096),
-        (2, 48, 48, 16384, 8192),
-        (8, 16, 16, 1989, 15344),
-        (4, 16, 16, 4097, 163),
-        (2, 16, 16, 8122, 2159),
-        (1, 16, 16, 16281, 7),
-        (2, 48, 48, 1021, 1020),
-        (2, 48, 48, 2001, 2048),
-        (2, 48, 48, 3996, 9639),
-        (2, 48, 48, 8181, 1021),
-    ]
-    return configs
+
+def get_benchmark_configs(args, varlen=False):
+    """
+    Returns benchmark configurations based on whether variable-length sequences are used.
+    """
+    if args.custom_config:
+        hk = args.hq if not args.hk else args.hk
+        sk = args.sq if not args.sk else args.sk
+        return [(args.b, args.hq, hk, args.sq, sk)]
+    elif varlen:
+        return [
+            (2, 16, 4, 1024, 1024),
+            (8, 16, 2, 2048, 2048),
+            (4, 16, 8, 4096, 4096),
+            (2, 16, 4, 8192, 8192),
+            (2, 16, 8, 16384, 16384),
+            (2, 48, 12, 1024, 1024),
+            (2, 48, 24, 2048, 2048),
+            (2, 48, 8, 4096, 4096),
+            (2, 48, 4, 8192, 8192),
+            (2, 48, 2, 16384, 16384),
+            (2, 64, 32, 1024, 1024),
+            (4, 64, 16, 2048, 2048),
+            (4, 64, 8, 4096, 4096),
+            (4, 64, 32, 8192, 8192),
+            (4, 128, 16, 16384, 16384),
+        ]
+    else:
+        return [
+            (16, 16, 16, 1024, 1024),
+            (8, 16, 16, 2048, 2048),
+            (4, 16, 16, 4096, 4096),
+            (2, 16, 16, 8192, 8192),
+            (1, 16, 16, 16384, 16384),
+            (2, 48, 48, 1024, 1024),
+            (2, 48, 48, 2048, 1024),
+            (2, 48, 48, 4096, 8192),
+            (2, 48, 48, 8192, 4096),
+            (2, 48, 48, 16384, 8192),
+            (8, 16, 16, 1989, 15344),
+            (4, 16, 16, 4097, 163),
+            (2, 16, 16, 8122, 2159),
+            (1, 16, 16, 16281, 7),
+            (2, 48, 48, 1021, 1020),
+            (2, 48, 48, 2001, 2048),
+            (2, 48, 48, 3996, 9639),
+            (2, 48, 48, 8181, 1021),
+        ]
 
 
-def varlen_benchmark_configs():
-    configs = [
-        (2, 16, 4, 1024, 1024),
-        (8, 16, 2, 2048, 2048),
-        (4, 16, 8, 4096, 4096),
-        (2, 16, 4, 8192, 8192),
-        (2, 16, 8, 16384, 16384),
-        (2, 48, 12, 1024, 1024),
-        (2, 48, 24, 2048, 2048),
-        (2, 48, 8, 4096, 4096),
-        (2, 48, 4, 8192, 8192),
-        (2, 48, 2, 16384, 16384),
-        (2, 64, 32, 1024, 1024),
-        (4, 64, 16, 2048, 2048),
-        (4, 64, 8, 4096, 4096),
-        (4, 64, 32, 8192, 8192),
-        (4, 128, 16, 16384, 16384),
-    ]
-    return configs
-
-
-def run_benchmark(custom, args):
+def run_benchmark(args, benchmark_fn):
+    """
+    Runs the benchmark for the provided function based on the provided arguments.
+    """
+    # Map string dtype to torch dtype
+    arg_to_torch_dtype = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+    }
 
     dtype = arg_to_torch_dtype[args.dtype]
-    hk = args.hq if not args.hk else args.hk
-    sk = args.sq if not args.sk else args.sk
-    head_size = 128 if not args.d else args.d
-    mode = 'fwd'
-    x_names = ['BATCH', 'HQ', 'HK', 'N_CTX_Q', 'N_CTX_K']
+    head_size = args.d if args.d else 128
     causal = args.causal
-    varlen = args.layout == 'thd'
-    configs = []
-    if custom:
-        x_vals_list = [(args.b, args.hq, hk, args.sq, sk)]
-    else:
-        if varlen:
-            x_vals_list = varlen_benchmark_configs()
-        else:
-            x_vals_list = nonvarlen_benchmark_configs()
+    varlen = args.layout == "thd"
     print_time = args.return_time
-    line_names = 'Time (ms)' if print_time else 'TFLOPS'
-    configs.append(
-        triton.testing.Benchmark(x_names=x_names, x_vals=x_vals_list, line_arg='provider', line_vals=['triton'],
-                                 line_names=[line_names], styles=[('red', '-')], ylabel='ms',
-                                 plot_name=f'fused-attention-{mode}-d{head_size}-layout{args.layout}',
-                                 args={'D_HEAD': head_size, 'dtype': dtype, 'causal': causal, 'mode': mode}))
+    line_names = "Time (ms)" if print_time else "TFLOPS"
+
+    # Determine configurations
+    x_vals_list = get_benchmark_configs(args, varlen=varlen)
+
+    if benchmark_fn == attention_prefill:
+        fn_name = "attention-prefill"
+    elif benchmark_fn == attention_decode:
+        fn_name = "attention-decode"
+    else:
+        raise ValueError("Unkonwn benchmark_fn: {benchmark_fn}")
+
+    # Setup benchmark configurations
+    configs = [
+        triton.testing.Benchmark(
+            x_names=["BATCH", "HQ", "HK", "N_CTX_Q", "N_CTX_K"],
+            x_vals=x_vals_list,
+            line_arg="provider",
+            line_vals=["triton"],
+            line_names=[line_names],
+            styles=[("red", "-")],
+            ylabel="ms",
+            plot_name=f"benchmark-{fn_name}-d{head_size}-layout{args.layout}",
+            args={
+                "D_HEAD": head_size,
+                "dtype": dtype,
+                "causal": causal,
+            },
+        )
+    ]
 
     @triton.testing.perf_report(configs)
-    def bench_flash_attention(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, causal, mode, provider, device="cuda"):
-        assert mode in ["fwd", "bwd"]
+    def bench_function(
+        BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, causal, provider, device="cuda"
+    ):
         warmup = 25
         rep = 100
-        # TODO: Enable bias after testing.
-        # if use_bias:
-        #     bias = torch.randn((1, H, N_CTX, N_CTX), dtype=torch.float32, device="cuda")
-        #     input_metadata.need_bias(bias, BATCH, H, N_CTX, N_CTX)
-        # else:
-        #     bias = None
-        # bias = None
-
-        # Bwd pass only supports causal=True right now
-        if mode == 'bwd':
-            causal = True
-
         flops_per_matmul = 0
-        if varlen:
-            q, k, v, input_metadata = varlen_input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype,
-                                                          args.equal_seqlens)
-            for i in range(0, input_metadata.num_contexts):
-                seqlen_q = input_metadata.cu_seqlens_q[i + 1] - input_metadata.cu_seqlens_q[i]
-                seqlen_k = input_metadata.cu_seqlens_k[i + 1] - input_metadata.cu_seqlens_k[i]
-                # x2 for 2 GEMMs
-                flops_per_matmul += seqlen_q.item() * seqlen_k.item() * HQ * D_HEAD * 2
-        else:
-            q, k, v, input_metadata = input_helper(BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.layout)
+
+        if benchmark_fn == attention_prefill:
+
+            if varlen:
+                q, k, v, input_metadata = varlen_input_helper(
+                    BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.equal_seqlens
+                )
+                for i in range(input_metadata.num_contexts):
+                    seqlen_q = input_metadata.cu_seqlens_q[i + 1] - input_metadata.cu_seqlens_q[i]
+                    seqlen_k = input_metadata.cu_seqlens_k[i + 1] - input_metadata.cu_seqlens_k[i]
+                    flops_per_matmul += seqlen_q.item() * seqlen_k.item() * HQ * D_HEAD * 2
+            else:
+                q, k, v, input_metadata = input_helper(
+                    BATCH, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, args.layout
+                )
+                flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
+
+            if causal:
+                input_metadata.need_causal()
+
+            o = torch.empty_like(q)
+            fn = lambda: benchmark_fn(q, k, v, o, input_metadata)
+
+        elif benchmark_fn == attention_decode:
+            q = torch.randn(
+                [BATCH, N_CTX_Q, HK, HQ // HK, D_HEAD],
+                device="cuda",
+                dtype=dtype,
+                requires_grad=False,
+            )
+            k = torch.randn(
+                [BATCH, N_CTX_K, HK, 1, D_HEAD],
+                device="cuda",
+                dtype=dtype,
+                requires_grad=False,
+            ).expand(-1, -1, -1, HQ // HK, -1)
+            v = torch.randn(
+                [BATCH, N_CTX_K, HK, 1, D_HEAD],
+                device="cuda",
+                dtype=dtype,
+                requires_grad=False,
+            ).expand(-1, -1, -1, HQ // HK, -1)
+            input_metadata = MetaData(sm_scale=1.3)
+            input_metadata.layout = "bsghd"
+            fn = lambda: benchmark_fn(q, k, v, input_metadata)
+            # Adjust flops calculation if needed
             flops_per_matmul = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * D_HEAD
-        if causal:
-            input_metadata.need_causal()
-        o = torch.empty_like(q)
-        fn = lambda: attention_prefill(q, k, v, o, input_metadata)
-        if mode == 'bwd':
-            o, _, _= fn()
-            do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
+
+        else:
+            raise ValueError("Unsupported benchmark function")
+
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
+
         total_flops = 2 * flops_per_matmul
-        # TODO: This needs to be fixed for unequal Q/K seqlens
         if causal:
             total_flops *= 0.5
-        if mode == "bwd":
-            total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
+
         if print_time:
             return ms
         else:
             return total_flops / ms * 1e-9
 
-    bench_flash_attention.run(save_path=".", print_data=True)
+    bench_function.run(save_path=".", print_data=True)
 
 
 def supported_layouts():
-    layouts = \
-        'bhsd: Q, K, V are individual tensors of [batch, num_heads, seqlen_q/k, head_size]' \
-        'bshd: Q, K, V are individual tensors of [batch, seqlen_q/k, num_heads, head_size]' \
-        'thd: Q, K, V are individual tensors of [total_q/k, num_heads, head_size]' \
+    """
+    Returns a string describing the supported layouts.
+    """
+    return (
+        "bhsd: Q, K, V are individual tensors of [batch, num_heads, seqlen_q/k, head_size]\n"
+        "bshd: Q, K, V are individual tensors of [batch, seqlen_q/k, num_heads, head_size]\n"
+        "thd: Q, K, V are individual tensors of [total_q/k, num_heads, head_size]\n"
         'This layout is sometimes called "varlen" or "grouped" layout.'
-    return layouts
+    )
 
 
 def parse_args():
+    """
+    Parses command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         prog="Benchmark FlashAttention",
         allow_abbrev=False,
@@ -146,90 +203,71 @@ def parse_args():
     parser.add_argument("-hk", type=int, default=0)
     parser.add_argument("-sq", type=int, default=0)
     parser.add_argument("-sk", type=int, default=0)
-    parser.add_argument("-equal_seqlens", action='store_true', default=False,
-                        help='If specified, each context within the thd layout' \
-                            ' has same seqlen as sq and sk')
+    parser.add_argument(
+        "-equal_seqlens",
+        action="store_true",
+        default=False,
+        help="If specified, each context within the thd layout has same seqlen as sq and sk",
+    )
     parser.add_argument("-d", type=int, default=0)
-    parser.add_argument("-causal", action='store_true', default=False)
-    parser.add_argument("-dtype", default='fp16')
-    parser.add_argument("-return_time", action='store_true', default=False)
-    parser.add_argument("-layout", type=str, default='bhsd', help=supported_layouts())
+    parser.add_argument("-causal", action="store_true", default=False)
+    parser.add_argument("-dtype", default="fp16")
+    parser.add_argument("-return_time", action="store_true", default=False)
+    parser.add_argument(
+        "-layout",
+        type=str,
+        default="bhsd",
+        help=supported_layouts(),
+    )
+    parser.add_argument(
+        "-benchmark_fn",
+        type=str,
+        nargs="*",
+        choices=["prefill", "decode"],
+        help="Function(s) to benchmark: prefill, decode, or both",
+    )
     return parser.parse_args()
 
 
-def run_benchmark_decode():
-    try:
-        FLASH_VER = 2
-    except BaseException:
-        try:
-            FLASH_VER = 1
-        except BaseException:
-            FLASH_VER = None
-    HAS_FLASH = FLASH_VER is not None
-
-
-    configs = []
-    for mode in ['fwd']:
-        # for D_HEAD in [128]:
-        for causal in [False]:
-            configs.append(
-                triton.testing.Benchmark(
-                    x_names=['B', 'Mq', 'Mkv', 'Hq', 'Hkv', 'K'], x_vals=get_input_shapes(), line_arg='provider',
-                    line_vals=['triton'] + (['flash'] if HAS_FLASH else []),
-                    line_names=['Triton'] + ([f'Flash-{FLASH_VER}'] if HAS_FLASH else []), styles=[('red', '-'),
-                                                                                                ('blue', '-')],
-                    ylabel='ms', plot_name=f'fused-attention-d{128}-{mode}-causal={causal}', args={
-                        # 'D_HEAD': D_HEAD,
-                        'dtype': torch.float16, 'mode': mode, 'causal': causal
-                    }))
-
-
-    @triton.testing.perf_report(configs)
-    def bench_flash_attention_decode(B, Mq, Mkv, Hq, Hkv, K, causal, mode, provider, dtype=torch.float16, device="cuda"):
-        assert mode in ['fwd', 'bwd']
-        warmup = 100
-        rep = 400
-        ms = 0
-        if provider == "triton":
-            q = torch.randn([B, Mq, Hkv, Hq // Hkv, K], device="cuda", dtype=dtype, requires_grad=False)
-            k = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
-                            requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
-            v = torch.randn([B, Mkv, Hkv, 1, K], device="cuda", dtype=dtype,
-                            requires_grad=False).expand(-1, -1, -1, Hq // Hkv, -1)
-
-            sm_scale = 1.3
-            input_metadata = MetaData(sm_scale=sm_scale)
-            input_metadata.layout = "bsghd"
-            fn = lambda: attention_decode(q, k, v, input_metadata)
-            ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-
-        # flops_per_matmul = 2 * B * Hq * (Mq * K * Mkv + Mq * Mkv * K)
-        # total_flops = 2 * flops_per_matmul
-        # totalBytes = ((B * Mkv * Hkv * K * 2) + (B * Mq * Hq * K) + (B * Mq * Hq * K)) * 2
-
-        # return totalBytes / ms * 1e-9
-        return ms * 1000
-
-
-    bench_flash_attention_decode.run(save_path='.', print_data=True)
-
-if __name__ == '__main__':
-    arg_to_torch_dtype = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp32': torch.float32}
-
+def main():
+    """
+    Main function to run benchmarks.
+    """
     args = parse_args()
-    custom_config = False
-    assert args.layout == 'thd' or not args.equal_seqlens, \
-           "Equal sequence lengths arg must be used with the thd layout."
+
+    # Validate arguments
+    arg_to_torch_dtype = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+    }
+    assert (
+        args.layout == "thd" or not args.equal_seqlens
+    ), "Equal sequence lengths arg must be used with the thd layout."
+    args.custom_config = False
     if args.b or args.hq or args.hk or args.sq or args.sk or args.d:
-        custom_config = True
-        assert args.b and args.hq and args.sq and args.d, \
-               "If custom config is specified, please provide \
-                all of batch, number of Q heads, Q sequence length \
-                and head size."
+        args.custom_config = True
+        assert args.b and args.hq and args.sq and args.d, (
+            "If custom config is specified, please provide all of batch, "
+            "number of Q heads, Q sequence length, and head size."
+        )
+    assert args.dtype in arg_to_torch_dtype, "Only fp16, bf16 and fp32 types currently supported."
 
-    assert args.dtype in arg_to_torch_dtype, \
-           "Only fp16, bf16 and f32 types currently supported."
 
-    run_benchmark(custom_config, args)
-    run_benchmark_decode()
+    # Determine the functions to benchmark
+    if args.benchmark_fn is None or len(args.benchmark_fn) == 0:
+        print(f"Provide functions to bench. E.g. -benchmark_fn prefill")
+    else:
+        for fn_name in args.benchmark_fn:
+            if fn_name == 'prefill':
+                benchmark_fn = attention_prefill
+            elif fn_name == 'decode':
+                benchmark_fn = attention_decode
+            else:
+                raise ValueError(f"Invalid benchmark function specified: {fn_name}")
+            print(f"Benching {fn_name}...")
+            run_benchmark(args, benchmark_fn)
 
+
+if __name__ == "__main__":
+    main()
