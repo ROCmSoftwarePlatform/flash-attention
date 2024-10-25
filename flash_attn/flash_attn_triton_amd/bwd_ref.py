@@ -1,7 +1,7 @@
 import torch
 import math
 from .utils import DEBUG
-DEBUG = False
+DEBUG = True
 
 def attention_backward_core_ref_impl(
     do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2
@@ -46,8 +46,6 @@ def attention_backward_core_ref_impl(
         col_offset = L_q-L_k
         causal_mask = row_idx >= (col_offset + col_idx)
         if DEBUG:
-            print("row_idx:", row_idx)
-            print("col_idx:", col_idx)
             print("causal_mask:", causal_mask)
         # set -inf to places the causal mask is false
         attention_scaled_scores = attention_scaled_scores.masked_fill(

@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG
-DEBUG = False
+DEBUG = True
 
 @triton.jit
 def _bwd_preprocess_use_o(
@@ -133,7 +133,8 @@ def _bwd_kernel_one_col_block(
     USE_EXP2: tl.constexpr,
 ):
     if CAUSAL:
-        lo = start_n * BLOCK_M
+        # lo = start_n * BLOCK_M
+        lo = 0
     else:
         lo = 0
 
@@ -177,30 +178,17 @@ def _bwd_kernel_one_col_block(
         # print("do:", do)
 
         # recompute p = softmax(qk, dim=-1).T
-        # NOTE: `do` is pre-divided by `l`; no normalization here
-        # if CAUSAL:
-        #     col_offset = N_CTX_Q - N_CTX_K
-        #     qk = tl.where(
-        #         offs_m[:, None] >= (col_offset + offs_n[None, :]), float(0.0), float("-inf")
-        #     )
-        # else:
-        #     qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, tl.trans(k))
 
         if CAUSAL:
-            # row_idx = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-            # col_idx = start_n + tl.arange(0, BLOCK_N)
-            
-            # create a N_CTX_Q x N_CTX_K causal mask
             col_offset = N_CTX_Q - N_CTX_K
             causal_mask = offs_m[:, None] >= (col_offset + offs_n[None, :])
+            # print("causal_mask:", causal_mask)
 
             # Apply the mask
             qk = tl.where(causal_mask, qk, float("-inf"))
-
-
-
+            # print("qk after causal:", qk)
         # print("qk:", qk)
         l_ptrs = l_offset + offs_m * stride_deltam
         l_i = tl.load(l_ptrs, mask=mask_m)
@@ -237,25 +225,15 @@ def _bwd_kernel_one_col_block(
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         
         # compute dk = dot(ds.T, q)
-        # print("ds masked:", ds)
-        # print("q:", q)
         dk += tl.dot(tl.trans(ds), q)
-        # print("dk:", dk)
 
         # compute dq
         if SEQUENCE_PARALLEL:
-            if True: # path for MMA_V3 in oai kernel
-                dq = tl.dot(ds, k)
-            else:
-                # not work with mma v3, because M % 64 != 0
-                dq = tl.trans(tl.dot(tl.trans(k), tl.trans(ds)))
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
+            dq = tl.dot(ds, k)
         else:
             dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
-            # print("dq load:", dq)
             dq += tl.dot(ds, k)
-            # print("dq after dot:", dq)
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
+        tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
 
     # write-back dv and dk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
@@ -603,7 +581,8 @@ def attention_prefill_backward_triton_impl(
 
     # qkv packed
     is_packed = False
-    if not dq.is_contiguous():
+    if (not dq.is_contiguous()) or (not dq.is_contiguous()) or (not dq.is_contiguous()):
+        print("Not contigious and setting is packed to True")
         is_packed = True
         dq_og = dq
         dq = dq.contiguous()
@@ -686,6 +665,8 @@ def attention_prefill_backward_triton_impl(
         print("num_warps:",num_warps)
         print("num_stages:", num_stages)
         print("USE_EXP2:", use_exp2)
+        print("num_blocks_m:", num_blocks_m)
+        print("num_blocks_n:", num_blocks_n)
 
     _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
         q,
@@ -736,6 +717,7 @@ def attention_prefill_backward_triton_impl(
         print("delta:", delta, delta.shape)
     
     if is_packed:
+        print("Copying to Og tensors due ispacked")
         dq_og.copy_(dq)
         dk_og.copy_(dk)
         dv_og.copy_(dv)

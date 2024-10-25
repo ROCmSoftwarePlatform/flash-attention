@@ -529,7 +529,7 @@ def test_op_prefill_fwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scor
 @pytest.mark.parametrize('causal', [True]) # bwd causal needs more work
 @pytest.mark.parametrize('use_exp2', [False])
 @pytest.mark.parametrize('layout', ["bhsd"])
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
+@pytest.mark.parametrize('DEBUG_INPUT', [True]) # debug output causes nans in both new and old backend
 def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd

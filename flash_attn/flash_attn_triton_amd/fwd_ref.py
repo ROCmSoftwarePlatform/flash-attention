@@ -32,8 +32,6 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         col_offset = L_q-L_k
         causal_mask = row_idx >= (col_offset + col_idx)
         if DEBUG:
-            print("row_idx:", row_idx)
-            print("col_idx:", col_idx)
             print("causal_mask:", causal_mask)
         # set -inf to places the causal mask is false
         attention_scaled_scores = attention_scaled_scores.masked_fill(
