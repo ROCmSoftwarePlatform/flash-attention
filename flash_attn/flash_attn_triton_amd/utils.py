@@ -3,8 +3,8 @@ import torch
 import os
 import triton
 
+AUTOTUNE = os.environ.get('FLASH_ATTENTION_AUTOTUNE', '1').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_DEBUG', '0').lower() in ('1', 'true', 'yes')
-
 
 class MetaData():
     cu_seqlens_q = None

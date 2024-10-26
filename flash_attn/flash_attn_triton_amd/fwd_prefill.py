@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, DEBUG
+from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, DEBUG, AUTOTUNE
 DEBUG = False
 
 @triton.jit
@@ -79,8 +79,6 @@ def compute_alibi_block(alibi_slope, seqlen_q, seqlen_k, offs_m, offs_n, transpo
         return alibi_block.T
     else:
         return alibi_block
-
-
 
 
 @triton.jit
@@ -246,12 +244,32 @@ def get_rdna_autotune_configs():
 
 
 def get_autotune_configs():
-    if is_rdna():
-        return get_rdna_autotune_configs()
-    elif is_cdna():
-        return get_cdna_autotune_configs()
+    if AUTOTUNE:
+        if is_rdna():
+            return get_rdna_autotune_configs()
+        elif is_cdna():
+            return get_cdna_autotune_configs()
+        else:
+            raise ValueError("Unknown Device Type")
     else:
-        raise ValueError("Unknown Device Type")
+        return [
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64, "waves_per_eu": 1, "PRE_LOAD_V": False},
+                num_stages=1,
+                num_warps=4,
+            ),
+        ], [
+            "IS_CAUSAL",
+            "dropout_p",
+            "MAX_SEQLENS_Q",
+            "MAX_SEQLENS_K",
+            "ACTUAL_BLOCK_DMODEL",
+            "VARLEN",
+            "HQ",
+            "HK",
+        ]
+
+
 autotune_configs, autotune_keys = get_autotune_configs()
 
 @triton.autotune(
