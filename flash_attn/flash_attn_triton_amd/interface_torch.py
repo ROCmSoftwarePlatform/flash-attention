@@ -77,8 +77,21 @@ attention_prefill = _attention_prefill.apply
 
 class _attention_decode(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, input_metadata):
-        out, lse = attention_decode_forward_triton_impl(q, k, v, input_metadata)
-        return out, lse
+    def forward(ctx, q, k, v, metadata):
+        output, softmax_lse = attention_decode_forward_triton_impl(
+            q,
+            k,
+            v,
+            metadata.sm_scale,
+            metadata.causal,
+            metadata.alibi_slopes,
+            metadata.layout,
+            metadata.cache_seqlens,
+            metadata.cache_batch_idx,
+            metadata.new_kv,
+            metadata.k_new,
+            metadata.v_new,
+        )
+        return output, softmax_lse
 
 attention_decode = _attention_decode.apply

@@ -56,24 +56,24 @@ jobs:
           cd ..
       - name: Build
         run: |
-          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
+          export FLASH_ATTENTION_USE_TRITON_AMD="TRUE"
           python setup.py install
       - name: Flash Attention Tests Using Reference Impl
         run: |
-          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
+          export FLASH_ATTENTION_USE_TRITON_AMD="TRUE"
           export FLASH_ATTENTION_USE_REF=1
           pytest tests/test_flash_attn_triton.py
       - name: Flash Attention Tests
         run: |
-          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
+          export FLASH_ATTENTION_USE_TRITON_AMD="TRUE"
           export FLASH_ATTENTION_AUTOTUNE=0
           pytest tests/test_flash_attn_triton.py
       - name: AMD Kernel Tests
         run: |
-          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
+          export FLASH_ATTENTION_USE_TRITON_AMD="TRUE"
           export FLASH_ATTENTION_AUTOTUNE=0
           pytest -v -s flash_attn/flash_attn_triton_amd/test.py
       - name: AMD Kernel Bench
         run: |
-          export FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
+          export FLASH_ATTENTION_USE_TRITON_AMD="TRUE"
           python flash_attn/flash_attn_triton_amd/bench.py

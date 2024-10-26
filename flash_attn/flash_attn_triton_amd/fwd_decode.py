@@ -540,36 +540,36 @@ def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
     split_k = max(split_k, 1)
     return split_k
 
-def attention_decode_forward_triton_impl(q, k, v, input_metadata, BLOCK_M= 16, BLOCK_N= 64, SPLIT_K=None, NUM_QUANT_GROUPS = 1):
-    original_layout = input_metadata.layout
+def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes, layout, cache_seqlens, cache_batch_idx, new_kv, k_new, v_new):
+    # kernel config
+    BLOCK_M = 16
+    BLOCK_N = 64
+    SPLIT_K = None
+    NUM_QUANT_GROUPS = 1
 
     # kernels expects "bsghd"
-    if input_metadata.layout == "bshd":
+    original_layout = layout
+    if layout == "bshd":
         q=q.unsqueeze(2)
         k=k.unsqueeze(2)
         v=v.unsqueeze(2)
-
-        if input_metadata.new_kv:
-            input_metadata.k_new = input_metadata.k_new.unsqueeze(2)
-            input_metadata.v_new = input_metadata.v_new.unsqueeze(2)
-
-        input_metadata.layout = "bsghd"
-    elif input_metadata.layout == "bhsd":
+        if new_kv:
+            k_new = k_new.unsqueeze(2)
+            v_new = v_new.unsqueeze(2)
+        layout = "bsghd"
+    elif layout == "bhsd":
         q=q.permute(0, 2, 1, 3).unsqueeze(2)
         k=k.permute(0, 2, 1, 3).unsqueeze(2)
         v=v.permute(0, 2, 1, 3).unsqueeze(2)
-        if input_metadata.new_kv:
-            input_metadata.k_new = input_metadata.k_new.permute(0, 2, 1, 3).unsqueeze(2)
-            input_metadata.v_new = input_metadata.v_new.permute(0, 2, 1, 3).unsqueeze(2)
-
-
-        input_metadata.layout = "bsghd"
-    elif input_metadata.layout == "bsghd":
+        if new_kv:
+            k_new = k_new.permute(0, 2, 1, 3).unsqueeze(2)
+            v_new = v_new.permute(0, 2, 1, 3).unsqueeze(2)
+        layout = "bsghd"
+    elif layout == "bsghd":
         pass
-    elif input_metadata.layout is None:
+    elif layout is None:
         raise ValueError("Layout not given")
-
-    assert input_metadata.layout == "bsghd"
+    assert layout == "bsghd"
 
     # get dims
     batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_q = q.shape
@@ -583,17 +583,11 @@ def attention_decode_forward_triton_impl(q, k, v, input_metadata, BLOCK_M= 16, B
 
     # Handle MQA/GQA case
     if heads_per_group_q > heads_per_group_k:
-        input_metadata.is_gqa = True
+        is_gqa = True
     elif heads_per_group_q < heads_per_group_k:
         raise ValueError("heads_per_group_q < heads_per_group_k")
     else:
-        input_metadata.is_gqa = False
-
-    # attn_bias = inp.attn_bias
-    if input_metadata.cache_seqlens is not None:
-        cache_seqlens = input_metadata.cache_seqlens
-    else:
-        cache_seqlens = None
+        is_gqa = False
 
     assert dim_k == dim_q, f"Keys have head dim {dim_k} but queries have head dim {dim_q}"
 
@@ -618,29 +612,29 @@ def attention_decode_forward_triton_impl(q, k, v, input_metadata, BLOCK_M= 16, B
         Q=q,
         K=k,
         V=v,
-        sm_scale=input_metadata.sm_scale,
+        sm_scale=sm_scale,
         Out_splitK=out_splitk,
         Metadata=metadata,
-        K_new = input_metadata.k_new,
-        V_new = input_metadata.v_new,
+        K_new = k_new,
+        V_new = v_new,
         Cache_seqlens=cache_seqlens,
-        Cache_batch_idx=input_metadata.cache_batch_idx,
-        Alibi_slopes=input_metadata.alibi_slopes,
+        Cache_batch_idx=cache_batch_idx,
+        Alibi_slopes=alibi_slopes,
         **_strides(q, "qz", "qm", "qg", "qh", "qd"),
         **_strides(k, "kz", "kn", "kg", "kh", "kd"),
         **_strides(v, "vz", "vn", "vg", "vh", "vd"),
         **_strides(out_splitk, "osk_zhg", "osk_s", "osk_m", "osk_d"),
         **_strides(metadata, "mzhg", "m2", "ms", "mm"),
-        **_strides(input_metadata.k_new, "kn_z", "kn_n", "kn_g", "kn_h", "kn_d"),
-        **_strides(input_metadata.v_new, "vn_z", "vn_n", "vn_g", "vn_h", "vn_d"),
-        **_strides(input_metadata.alibi_slopes, "az", "ah"),
+        **_strides(k_new, "kn_z", "kn_n", "kn_g", "kn_h", "kn_d"),
+        **_strides(v_new, "vn_z", "vn_n", "vn_g", "vn_h", "vn_d"),
+        **_strides(alibi_slopes, "az", "ah"),
         Z=batch_size,
         H_q=heads_per_group_q,
         H_kv=heads_per_group_k,
         G_q=n_group_q,
         N_CTX_Q=seqlen_q,
         N_CTX_K=seqlen_k,
-        N_CTX_NEW=input_metadata.k_new.shape[1] if input_metadata.new_kv else None,
+        N_CTX_NEW=k_new.shape[1] if new_kv else None,
         BLOCK_N_PER_SPLIT=split_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -648,11 +642,11 @@ def attention_decode_forward_triton_impl(q, k, v, input_metadata, BLOCK_M= 16, B
         ACTUAL_BLOCK_DMODEL=dim_k,
         BOUNDS_CHECKS_N=(split_size % BLOCK_N) > 0 or use_cache_seqlens,
         USE_CACHE_SEQLENs=use_cache_seqlens,
-        USE_CACHE_BATCH_IDX= input_metadata.cache_batch_idx is not None,
-        NEW_KV=input_metadata.new_kv,
-        IS_GQA=input_metadata.is_gqa,
-        IS_CAUSAL=input_metadata.causal,
-        USE_ALIBI=False if input_metadata.alibi_slopes is None else True,
+        USE_CACHE_BATCH_IDX=cache_batch_idx is not None,
+        NEW_KV=new_kv,
+        IS_GQA=is_gqa,
+        IS_CAUSAL=causal,
+        USE_ALIBI=False if alibi_slopes is None else True,
         num_warps=num_warps,
         num_stages=1,
     )
@@ -687,7 +681,7 @@ def attention_decode_forward_triton_impl(q, k, v, input_metadata, BLOCK_M= 16, B
         split_k=split_k, 
         splitK_pow2=splitK_pow2, 
         use_mask=use_mask,
-        IS_CAUSAL=input_metadata.causal,
+        IS_CAUSAL=causal,
         num_warps=4)
 
     lse = lse.reshape([batch_size, n_group_q, heads_per_group_q, seqlen_q])

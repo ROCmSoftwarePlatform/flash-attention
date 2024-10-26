@@ -21,7 +21,7 @@ from flash_attn.layers.rotary import apply_rotary_emb
 
 DEBUG = False
 # Test ROCM Triton Backend
-USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_ROCM", "FALSE") == "TRUE"
+USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_AMD", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:
     random.seed(42)
 

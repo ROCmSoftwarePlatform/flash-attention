@@ -506,26 +506,39 @@ def fwd_kvcache(
         out = torch.empty_like(q)
 
     # fill metadata
-    input_metadata = MetaData(sm_scale=softmax_scale)
-    input_metadata.layout = "bshd"
-    input_metadata.max_seqlens_q = q.shape[1]
-    input_metadata.max_seqlens_k = k_cache.shape[1]
-    input_metadata.cache_seqlens = cache_seqlens
-    input_metadata.cache_batch_idx = cache_batch_idx
+    metadata = MetaData(sm_scale=softmax_scale)
+    metadata.layout = "bshd"
+    metadata.max_seqlens_q = q.shape[1]
+    metadata.max_seqlens_k = k_cache.shape[1]
+    metadata.cache_seqlens = cache_seqlens
+    metadata.cache_batch_idx = cache_batch_idx
 
     if k is not None and v is not None:
-        input_metadata.new_kv = True
-        input_metadata.seqlen_new = k.shape[1]
-        input_metadata.k_new = k
-        input_metadata.v_new = v
+        metadata.new_kv = True
+        metadata.seqlen_new = k.shape[1]
+        metadata.k_new = k
+        metadata.v_new = v
 
     if causal:
-        input_metadata.need_causal()
+        metadata.need_causal()
 
     if alibi_slopes is not None:
         batch, _ , nheads_q, _= q.shape
-        input_metadata.need_alibi(alibi_slopes, batch, nheads_q)
+        metadata.need_alibi(alibi_slopes, batch, nheads_q)
 
     # launch kernel
-    tri_out, softmax_lse = attention_decode_forward_triton_impl(q, k_cache, v_cache, input_metadata)
-    return tri_out, softmax_lse
+    output, softmax_lse = attention_decode_forward_triton_impl(
+        q,
+        k_cache,
+        v_cache,
+        metadata.sm_scale,
+        metadata.causal,
+        metadata.alibi_slopes,
+        metadata.layout,
+        metadata.cache_seqlens,
+        metadata.cache_batch_idx,
+        metadata.new_kv,
+        metadata.k_new,
+        metadata.v_new,
+    )
+    return output, softmax_lse
