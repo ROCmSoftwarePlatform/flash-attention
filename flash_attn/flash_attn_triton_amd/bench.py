@@ -3,12 +3,10 @@ import torch
 import triton
 from flash_attn.flash_attn_triton_amd.utils import (
     MetaData,
-    get_input_shapes,
     input_helper,
     varlen_input_helper,
 )
 from flash_attn.flash_attn_triton_amd.interface_torch import attention_prefill, attention_decode
-from flash_attn.flash_attn_triton_amd.fwd_old import attention as attention_prefill_old
 
 
 def get_benchmark_configs(args, varlen=False):
@@ -206,7 +204,7 @@ def parse_args():
     parser.add_argument("-d", type=int, default=0)
     parser.add_argument("-causal", action="store_true", default=False)
     parser.add_argument("-dtype", default="fp16")
-    parser.add_argument("-return_time", action="store_true", default=False)
+    parser.add_argument("-return_time", action="store_true", default=True)
     parser.add_argument(
         "-layout",
         type=str,
@@ -230,7 +228,6 @@ ARGS_TO_TORCH_DTYPE = {
 
 FUNCTIONS = {
     "prefill": attention_prefill,
-    "prefill_old": attention_prefill_old,
     "decode": attention_decode
 }
 
@@ -253,16 +250,17 @@ def main():
         )
     assert args.dtype in ARGS_TO_TORCH_DTYPE, "Only fp16, bf16 and fp32 types currently supported."
 
-
-    # Determine the functions to benchmark
+    # determine the functions to benchmark
     if args.benchmark_fn is None or len(args.benchmark_fn) == 0:
-        print(f"Provide functions to bench. E.g. -benchmark_fn prefill")
+        bench_fn_list = FUNCTIONS.keys()
     else:
-        for fn_name in args.benchmark_fn:
-            if fn_name not in FUNCTIONS:
-                raise ValueError(f"Invalid benchmark function specified: {fn_name}")
-
-            run_benchmark(args, fn_name, FUNCTIONS[fn_name])
+        bench_fn_list = args.benchmark_fn
+    
+    # bench functions
+    for fn_name in bench_fn_list:
+        if fn_name not in FUNCTIONS:
+            raise ValueError(f"Invalid benchmark function specified: {fn_name}")
+        run_benchmark(args, fn_name, FUNCTIONS[fn_name])
 
 
 if __name__ == "__main__":
