@@ -18,8 +18,8 @@ from flash_attn import (
 from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
+from flash_attn.flash_attn_triton_amd.utils import DEBUG
 
-DEBUG = False
 # Test ROCM Triton Backend
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_USE_TRITON_AMD", "FALSE") == "TRUE"
 if USE_TRITON_ROCM:

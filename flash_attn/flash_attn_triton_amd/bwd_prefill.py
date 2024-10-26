@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG
-DEBUG = False
 
 @triton.jit
 def _bwd_preprocess_use_o(
