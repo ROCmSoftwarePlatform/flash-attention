@@ -126,11 +126,31 @@ FlashAttention-2 ROCm CK backend currently supports:
 1. MI200 or MI300 GPUs.
 2. Datatype fp16 and bf16
 3. Forward's head dimensions up to 256. Backward head dimensions up to 128.
-#### Triton Backend
-FlashAttention-2 ROCm Triton backend is a work in progress. 
-It current supports Forwards only. However some features like PagedAttention and Sliding Window are missing. It can run on both MI and Navi Machines. We are working on backwards.
 
-Inorder to use the triton backend for rocm, follow the steps below.
+#### Triton Backend
+The Triton implementation of the [Flash Attention v2](https://tridao.me/publications/flash2/flash2.pdf) is currently a work in progress.
+
+It supports AMD's CDNA (MI200, MI300) and RDNA GPU's using fp16 and bf16 datatypes.
+
+These features are supported in Fwd and Bwd
+1) Fwd and Bwd with causal masking
+2) Variable sequence lengths
+3) Arbitrary Q and KV sequence lengths
+4) Arbitrary head sizes
+
+These features are supported in Fwd for now. We will add them to backward soon.
+1) Multi and grouped query attention
+2) ALiBi and matrix bias
+
+These features are in development
+1) Paged Attention 
+2) Sliding Window
+3) Rotary embeddings
+4) Dropout
+5) Performance Improvements
+
+#### Getting Started
+To get started with the triton backend for AMD, follow the steps below.
 
 First install the recommended Triton [commit](https://github.com/triton-lang/triton/commit/2e9f2c2d20601c24b91a4c32a7b97ad1f8a55d88).
 

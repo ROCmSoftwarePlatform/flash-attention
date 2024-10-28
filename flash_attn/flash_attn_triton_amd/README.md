@@ -1,28 +1,30 @@
-Attention Fused Kernel
+Flash Attention Triton Kernel
 ===============
 
-This is a Triton implementation of the Flash Attention v2 algorithm
-See https://tridao.me/publications/flash2/flash2.pdf
+#### Introduction
+The Triton implementation of the [Flash Attention v2](https://tridao.me/publications/flash2/flash2.pdf) is currently a work in progress.
 
-Credits:
-AMD Triton kernels team
-OpenAI kernel team
+It supports AMD's CDNA (MI200, MI300) and RDNA GPU's using fp16 and bf16 datatypes.
 
-Currently only the forward kernel is supported, and contains these features:
+These features are supported in Fwd and Bwd
+1) Fwd and Bwd with causal masking
+2) Variable sequence lengths
+3) Arbitrary Q and KV sequence lengths
+4) Arbitrary head sizes
 
-1) Fwd with causal masking
-2) Arbitrary Q and KV sequence lengths
-3) Arbitrary head sizes
-4) Multi and grouped query attention
-5) Variable sequence lengths
-6) ALiBi and matrix bias
+These features are supported in Fwd for now. We will add them to backward soon.
+1) Multi and grouped query attention
+2) ALiBi and matrix bias
 
+These features are in development
+1) Paged Attention 
+2) Sliding Window
+3) Rotary embeddings
+4) Dropout
+5) Performance Improvements
 
-#### Triton Backend
-FlashAttention-2 ROCm Triton backend is a work in progress. 
-It current supports Forwards only. However some features like PagedAttention and Sliding Window are missing. It can run on both MI and Navi Machines. We are working on backwards.
-
-Inorder to use the triton backend for rocm, follow the steps below.
+#### Getting Started
+To get started with the triton backend for AMD, follow the steps below.
 
 First install the recommended Triton [commit](https://github.com/triton-lang/triton/commit/2e9f2c2d20601c24b91a4c32a7b97ad1f8a55d88).
 
@@ -41,3 +43,7 @@ python setup.py install
 pytest tests/test_flash_attn.py
 ```
 
+#### Credits
+AMD Triton kernels team
+
+OpenAI kernel team
