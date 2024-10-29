@@ -526,11 +526,6 @@ def attention_prefill_backward_triton_impl(
         dq = torch.zeros(dq_shape, device=q.device, dtype=q.dtype)
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
-    else:
-        if sequence_parallel:
-            dq = dq.unsqueeze(0)
-            dq = dq.expand(dq_shape).contiguous()
-            dq.zero_() 
 
     is_qkvpacked = False
     if (not dq.is_contiguous()) or (not dq.is_contiguous()) or (not dq.is_contiguous()):
@@ -543,9 +538,15 @@ def attention_prefill_backward_triton_impl(
         dk = dk.contiguous()
         dv_og = dv
         dv = dv.contiguous()
-    
-    # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
-    dq.zero_()
+
+    # replica dq is sequence parallel
+    if sequence_parallel:
+        dq = dq.unsqueeze(0)
+        dq = dq.expand(dq_shape).contiguous()
+        dq.zero_()
+    else:
+        # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
+        dq.zero_()
 
     # assert contigious
     assert do.is_contiguous()
