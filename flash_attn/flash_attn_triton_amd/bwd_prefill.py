@@ -1,4 +1,3 @@
-import os
 import torch
 import triton
 import triton.language as tl
@@ -454,13 +453,6 @@ def attention_prefill_backward_triton_impl(
     use_exp2: bool,
     sequence_parallel = True,
 ):
-    
-    PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', 'true', 'yes')
-    if PERF:
-        sequence_parallel = True
-    else:
-        sequence_parallel = False
-
     if DEBUG:
         print()
         print("attention_prefill_backward_triton_new_impl")
