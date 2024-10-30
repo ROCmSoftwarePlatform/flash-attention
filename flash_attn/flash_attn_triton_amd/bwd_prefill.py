@@ -551,6 +551,9 @@ def attention_prefill_backward_triton_impl(
             dv = dv.contiguous()
             copy_back["dv"] = True
 
+    if DEBUG:
+        print("copy_back:", copy_back)
+
     # assert contigious
     assert do.is_contiguous()
     assert q.is_contiguous()
@@ -673,6 +676,7 @@ def attention_prefill_backward_triton_impl(
         print("dk:", dk, dk.shape)
         print("dv:", dv, dv.shape)
         print("delta:", delta, delta.shape)
+        print("copy_back:", copy_back)
 
     if copy_back["dq"]:
         dq_og.copy_(dq)
