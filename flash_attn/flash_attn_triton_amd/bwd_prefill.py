@@ -497,7 +497,6 @@ def attention_prefill_backward_triton_impl(
     stride_kz, stride_kh, stride_kn, stride_kk = k_strides
     stride_vz, stride_vh, stride_vn, stride_vk = v_strides
     stride_oz, stride_oh, stride_om, stride_ok = o_strides
-    stride_dq_all = q.numel()
     batch_headsize = batch * nheads_q
     is_varlen = layout == "thd"
 
@@ -521,40 +520,42 @@ def attention_prefill_backward_triton_impl(
     padded_d_model = max(padded_d_model, 16)
     BLOCK_DMODEL = padded_d_model
     ACTUAL_BLOCK_DMODEL = head_size
+    is_qkvpacked = False
 
     do = do.contiguous()
-    if sequence_parallel:
-        # replicate q for each parallel sequence
-        replicas = num_blocks_n
-        dq_shape = (replicas,) + q.shape
+
+    # deal with dq
+    if dq is None:
+        dq = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
     else:
-        dq_shape = q.shape
-
-    if dq is None or dk is None or dv is None: 
-        dq = torch.zeros(dq_shape, device=q.device, dtype=q.dtype)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-
-    is_qkvpacked = False
-    if (not dq.is_contiguous()) or (not dq.is_contiguous()) or (not dq.is_contiguous()):
-        if DEBUG:
-            print("Not contigious and setting is packed to True")
-        is_qkvpacked = True
         dq_og = dq
-        dq = dq.contiguous()
-        dk_og = dk
-        dk = dk.contiguous()
-        dv_og = dv
-        dv = dv.contiguous()
 
-    # replica dq is sequence parallel
-    if sequence_parallel:
-        dq = dq.unsqueeze(0)
-        dq = dq.expand(dq_shape).contiguous()
-        dq.zero_()
-    else:
+        if sequence_parallel and len(q.shape) == 4:
+            dq_replicated = torch.zeros((num_blocks_n,) + q.shape, device=q.device, dtype=q.dtype)
+            dq = dq_replicated
+       
+        if (not dq.is_contiguous()):
+            dq = dq.contiguous()
+            is_qkvpacked = True
+
         # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
         dq.zero_()
+    stride_dq_all = dq.stride()[0]
+
+    # deal with dk, dv
+    if (dk is None) or (dv is None):
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+    else:
+        dk_og = dk
+        if (not dk.is_contiguous()):
+            dk = dk.contiguous()
+            is_qkvpacked = True
+
+        dv_og = dv
+        if (not dv.is_contiguous()):
+            dv = dv.contiguous()
+            is_qkvpacked = True
 
     # assert contigious
     assert do.is_contiguous()
@@ -669,7 +670,6 @@ def attention_prefill_backward_triton_impl(
         print("dv:", dv, dv.shape)
         print("delta:", delta, delta.shape)
 
-    # Sequence parralle
     if sequence_parallel:
         dq = dq.sum(dim=0)
 
@@ -690,6 +690,9 @@ def attention_prefill_backward_triton_impl(
         dv_og.copy_(dv)
         return dq_og, dk_og, dv_og, delta, None, None
     else:
+        if sequence_parallel:
+            dq_og.copy_(dq)
+            return dq_og, dk, dv, delta, None, None
         return dq, dk, dv, delta, None, None
 
 
