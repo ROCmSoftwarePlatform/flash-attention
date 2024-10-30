@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG
+from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG, PERF
 
 @triton.jit
 def _bwd_preprocess_use_o(
@@ -453,6 +453,11 @@ def attention_prefill_backward_triton_impl(
     use_exp2: bool,
     sequence_parallel = True,
 ):
+    # if PERF:
+    #     sequence_parallel = True
+    # else:
+    #     sequence_parallel = False
+
     if DEBUG:
         print()
         print("attention_prefill_backward_triton_new_impl")
@@ -522,7 +527,7 @@ def attention_prefill_backward_triton_impl(
     else:
         dq_og = dq
 
-        if sequence_parallel and len(q.shape) == 4:
+        if sequence_parallel:
             dq_replicated = torch.zeros((num_blocks_n,) + q.shape, device=q.device, dtype=q.dtype)
             dq = dq_replicated
        
