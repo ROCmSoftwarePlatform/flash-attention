@@ -452,11 +452,6 @@ def attention_prefill_backward_triton_impl(
     use_exp2: bool,
     sequence_parallel = True,
 ):
-    # if PERF:
-    #     sequence_parallel = True
-    # else:
-    #     sequence_parallel = False
-
     if DEBUG:
         print()
         print("attention_prefill_backward_triton_new_impl")
@@ -536,9 +531,9 @@ def attention_prefill_backward_triton_impl(
         if sequence_parallel:
             dq = torch.zeros((num_blocks_n,) + q.shape, device=q.device, dtype=q.dtype)
             copy_back["dq"] = True
-
-        # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
-        dq.zero_()
+        else:
+            # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
+            dq.zero_()
     stride_dq_all = dq.stride()[0]
 
     # deal with dk, dv
