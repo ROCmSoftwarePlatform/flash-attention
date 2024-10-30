@@ -74,7 +74,6 @@ def _bwd_preprocess_use_o(
     tl.store(delta_ptrs, delta, mask=mask_m)
 
 
-
 @triton.jit
 def _bwd_kernel_one_col_block(
     Q,
@@ -517,23 +516,28 @@ def attention_prefill_backward_triton_impl(
     padded_d_model = max(padded_d_model, 16)
     BLOCK_DMODEL = padded_d_model
     ACTUAL_BLOCK_DMODEL = head_size
-    is_qkvpacked = False
 
     do = do.contiguous()
+    # NOTE: we might need to copy the output tensor if they are not continuous or have other issues
+    copy_back = {"dq": False, "dk": False, "dv": False}
 
     # deal with dq
     if dq is None:
-        dq = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
+        if sequence_parallel:
+            dq = torch.zeros((num_blocks_n,) + q.shape, device=q.device, dtype=q.dtype)
+        else:
+            dq = torch.zeros(q.shape, device=q.device, dtype=q.dtype)
     else:
         dq_og = dq
 
         if sequence_parallel:
             dq_replicated = torch.zeros((num_blocks_n,) + q.shape, device=q.device, dtype=q.dtype)
             dq = dq_replicated
-       
+            copy_back["dq"] = True
+
         if (not dq.is_contiguous()):
             dq = dq.contiguous()
-            is_qkvpacked = True
+            copy_back["dq"] = True
 
         # NOTE: the kernel does inplace accumlation so dq has to be zeros. This avoids the case where we are passed empty dq and it is not all zeros
         dq.zero_()
@@ -544,15 +548,15 @@ def attention_prefill_backward_triton_impl(
         dk = torch.empty_like(k)
         dv = torch.empty_like(v)
     else:
-        dk_og = dk
         if (not dk.is_contiguous()):
             dk = dk.contiguous()
-            is_qkvpacked = True
+            dk_og = dk
+            copy_back["dk"] = True
 
-        dv_og = dv
         if (not dv.is_contiguous()):
             dv = dv.contiguous()
-            is_qkvpacked = True
+            dv_og = dv
+            copy_back["dv"] = True
 
     # assert contigious
     assert do.is_contiguous()
@@ -676,20 +680,15 @@ def attention_prefill_backward_triton_impl(
         print("dk:", dk, dk.shape)
         print("dv:", dv, dv.shape)
         print("delta:", delta, delta.shape)
-    
-    if is_qkvpacked:
-        if DEBUG:
-            print("Copying back to original tensors due to ispacked")
-        
-        # copy back results to og tensors
+
+    if copy_back["dq"]:
         dq_og.copy_(dq)
+        dq = dq_og
+    if copy_back["dk"]:
         dk_og.copy_(dk)
+        dk = dk_og
+    if copy_back["dv"]:
         dv_og.copy_(dv)
-        return dq_og, dk_og, dv_og, delta, None, None
-    else:
-        if sequence_parallel:
-            dq_og.copy_(dq)
-            return dq_og, dk, dv, delta, None, None
-        return dq, dk, dv, delta, None, None
+        dv = dv_og
 
-
+    return dq, dk, dv, delta, None, None
