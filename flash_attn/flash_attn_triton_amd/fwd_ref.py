@@ -154,11 +154,21 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
         o = o.reshape(batch_size, nheads_q, seq_len_q, head_dim)
         softmax_lse = softmax_lse.reshape(batch_size, nheads_k, group_size, seq_len_q)
         softmax_lse = softmax_lse.reshape(batch_size, nheads_q, seq_len_q)
+        exp_scores = exp_scores.reshape(batch_size, nheads_k, group_size, seq_len_q, seq_len_k)
+        exp_scores = exp_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        softmax = softmax.reshape(batch_size, nheads_k, group_size, seq_len_q, seq_len_k)
+        softmax = softmax.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        attention_scaled_scores = attention_scaled_scores.reshape(batch_size, nheads_k, group_size, seq_len_q, seq_len_k)
+        attention_scaled_scores = attention_scaled_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
     else:
         # Standard case
         o = o.reshape(batch_size, nheads_q, seq_len_q, head_dim)
         softmax_lse = softmax_lse.reshape(batch_size, nheads_q, seq_len_q)
         exp_scores = exp_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        softmax = softmax.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        attention_shifted_scaled_scores = attention_shifted_scaled_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        attention_scaled_scores = attention_scaled_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        attention_scores = attention_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
 
     # Restore original layout if necessary
     if layout == "bshd":
