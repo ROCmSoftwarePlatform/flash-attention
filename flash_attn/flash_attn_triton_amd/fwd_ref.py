@@ -120,34 +120,52 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
     elif layout != "bhsd":
         raise ValueError(f"Unknown layout {layout}")
 
-    # Prepare tensors in [batch_size * num_heads, seq_len, head_dim] format
-    batch_size, num_heads, seq_len_q, head_dim = q.shape
-    seq_len_k = k.shape[2]
+    # Prepare tensors
+    batch_size, nheads_q, seq_len_q, head_dim = q.shape
+    batch_size, nheads_k, seq_len_k, head_dim = k.shape
+    group_size = nheads_q // nheads_k
+    if nheads_q % nheads_k != 0:
+        raise ValueError("nheads_q must be divisible by nheads_k")
 
-    # Merge batch and heads dimensions
-    q = q.reshape(batch_size * num_heads, seq_len_q, head_dim)
-    k = k.reshape(batch_size * num_heads, seq_len_k, head_dim)
-    v = v.reshape(batch_size * num_heads, seq_len_k, head_dim)
+    if group_size != 1:
+        # MQA or GQA case
+        # Reshape q to [batch_size, nheads_k, group_size, seq_len_q, head_dim]
+        q = q.reshape(batch_size, nheads_k, group_size, seq_len_q, head_dim)
+        # Expand k and v to match group_size
+        k = k.unsqueeze(2).expand(-1, -1, group_size, -1, -1)
+        v = v.unsqueeze(2).expand(-1, -1, group_size, -1, -1)
+        # Flatten the first three dimensions for computation
+        q = q.reshape(batch_size * nheads_k * group_size, seq_len_q, head_dim)
+        k = k.reshape(batch_size * nheads_k * group_size, seq_len_k, head_dim)
+        v = v.reshape(batch_size * nheads_k * group_size, seq_len_k, head_dim)
+    else:
+        q = q.reshape(batch_size * nheads_q, seq_len_q, head_dim)
+        k = k.reshape(batch_size * nheads_k, seq_len_k, head_dim)
+        v = v.reshape(batch_size * nheads_k, seq_len_k, head_dim)
 
     # Call the core attention function
     o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores = attention_forward_core_ref_impl(
         q, k, v, sm_scale, causal, use_exp2
     )
 
-    # Reshape outputs back to [batch_size, num_heads, seq_len, head_dim]
-    o = o.reshape(batch_size, num_heads, seq_len_q, head_dim)
-    softmax_lse = softmax_lse.reshape(batch_size, num_heads, seq_len_q)
-    exp_scores = exp_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
-    softmax = softmax.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
-    attention_shifted_scaled_scores = attention_shifted_scaled_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
-    attention_scaled_scores = attention_scaled_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
-    attention_scores = attention_scores.reshape(batch_size, num_heads, seq_len_q, seq_len_k)
+    if group_size != 1:
+        # Reshape outputs back to original dimensions
+        o = o.reshape(batch_size, nheads_k, group_size, seq_len_q, head_dim)
+        o = o.reshape(batch_size, nheads_q, seq_len_q, head_dim)
+        softmax_lse = softmax_lse.reshape(batch_size, nheads_k, group_size, seq_len_q)
+        softmax_lse = softmax_lse.reshape(batch_size, nheads_q, seq_len_q)
+    else:
+        # Standard case
+        o = o.reshape(batch_size, nheads_q, seq_len_q, head_dim)
+        softmax_lse = softmax_lse.reshape(batch_size, nheads_q, seq_len_q)
+        exp_scores = exp_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
 
     # Restore original layout if necessary
     if layout == "bshd":
         o = o.transpose(1, 2)
 
     return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
+
 
 def attention_varlen_forward_pytorch_ref_impl(
     q,
@@ -252,6 +270,7 @@ def attention_forward_pytorch_ref_impl(
         print("v:", v, v.shape)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
+        print("layout:", layout)
         print("cu_seqlens_q:", cu_seqlens_q)
         print("cu_seqlens_k:", cu_seqlens_k)
         print("max_seqlen_q:", max_seqlen_q)
