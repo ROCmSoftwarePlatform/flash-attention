@@ -25,3 +25,9 @@ var/
 
 # Dev
 venv
+
+
+# AMD
+scripts
+.eggs
+csrc/flash_attn_ck
