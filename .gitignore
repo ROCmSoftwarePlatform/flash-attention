@@ -29,5 +29,6 @@ venv
 
 # AMD
 scripts
+kernels
 .eggs
 csrc/flash_attn_ck
