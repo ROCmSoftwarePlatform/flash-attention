@@ -9,6 +9,7 @@ def cdiv_fn(x, y):
 
 @triton.jit
 def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
+    # tl.device_print('fwd_philox_offset:', philox_offset)
     ms = tl.arange(0, m)
     ns = tl.arange(0, n)
     return philox_offset + ms[:, None] * stride + ns[None, :]
@@ -163,7 +164,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
-            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
+            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_SCORES:
                 # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
@@ -391,13 +392,13 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
         alibi_slope = None
 
     if RETURN_SCORES:
-        scores_offset = scores + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        scores_offset = scores + off_z * stride_sz + off_h_q * stride_sh # + cu_seqlens_q_start * stride_sm
         score_ptrs = scores_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
 
-        scores_scaled_shifted_offset = scores_scaled_shifted + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        scores_scaled_shifted_offset = scores_scaled_shifted + off_z * stride_sz + off_h_q * stride_sh # + cu_seqlens_q_start * stride_sm
         scores_scaled_shifted_ptrs = scores_scaled_shifted_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
     
-        exp_scores_offset = exp_scores + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        exp_scores_offset = exp_scores + off_z * stride_sz + off_h_q * stride_sh # + cu_seqlens_q_start * stride_sm
         exp_scores_ptrs = exp_scores_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
     else:
         score_ptrs = None
@@ -406,7 +407,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
 
     if ENABLE_DROPOUT:
         off_hz = off_z * HQ + off_h_q
-        batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
+        batch_philox_offset = philox_offset_base + off_hz * MAX_SEQLENS_Q * MAX_SEQLENS_K
     else:
         batch_philox_offset = 0
     # initialize pointer to m and l
@@ -585,6 +586,7 @@ def attention_prefill_forward_triton_impl(
     batch, nheads_q, nheads_k, head_size, seqlen_q, seqlen_k = get_shape_from_layout(q, k, layout, cu_seqlens_q, cu_seqlens_k, max_seqlens_q, max_seqlens_k)
     q_strides, k_strides, v_strides, o_strides = get_strides_from_layout(q, k, v, o, layout)
 
+
     # Get closest power of 2 over or equal to 32.
     padded_d_model = 1 << (head_size - 1).bit_length()
     # Smallest head_dim supported is 16. If smaller, the tile in the
@@ -624,8 +626,8 @@ def attention_prefill_forward_triton_impl(
         stride_lse_z, stride_lse_h, stride_lse_m = softmax_lse.stride()
 
     # Seed the RNG so we get reproducible results for testing.
-    philox_seed = 0x1BF52
-    philox_offset = 0x1D4B42
+    philox_seed = 0x1BF58
+    philox_offset = 0x1D4B49
 
     if bias is not None:
         bias_strides = (bias.stride(0), bias.stride(1),bias.stride(2),

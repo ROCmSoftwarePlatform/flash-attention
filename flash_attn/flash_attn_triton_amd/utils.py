@@ -100,8 +100,6 @@ class MetaData():
             assert len(self.cu_seqlens_q) == len(self.cu_seqlens_k)
             # TODO: Remove once bias is supported with varlen
             assert self.bias is None
-            # TODO:Remove once dropout is supported with varlen
-            assert self.dropout_p == 0.0
             # assert not self.return_scores
         else:
             assert q.dim() == 4
@@ -271,4 +269,3 @@ def is_cdna():
 def is_rdna():
     return is_hip() and triton.runtime.driver.active.get_current_target().arch in ("gfx1030", "gfx1100", "gfx1101",
                                                                                    "gfx1102", "gfx1200", "gfx1201")
-

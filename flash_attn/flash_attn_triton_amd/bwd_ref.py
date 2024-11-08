@@ -359,12 +359,14 @@ def attention_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
+    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    use_exp2
+    use_exp2,
+    rng_state
 ):
 
     if DEBUG:
