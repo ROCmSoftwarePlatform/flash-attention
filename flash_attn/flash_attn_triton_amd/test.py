@@ -452,7 +452,8 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         k.clone(), 
         v.clone(), 
         metadata.sm_scale, 
-        causal, 
+        causal,
+        dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -562,7 +563,8 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
         k_ref, 
         v_ref,
         metadata.sm_scale, 
-        causal, 
+        causal,
+        dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
@@ -596,12 +598,14 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
         softmax_lse_ref,
         metadata.sm_scale,
         causal,
+        dropout_p,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
-        use_exp2
+        use_exp2,
+        rng_state
     )
 
     # =============================================== Triton ==============================================================
