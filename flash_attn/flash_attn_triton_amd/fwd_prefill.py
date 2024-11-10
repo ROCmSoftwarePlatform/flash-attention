@@ -27,6 +27,13 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
     rng_keep = rng_output > dropout_p
     return rng_keep
 
+@triton.jit
+def store_dropout_mask(X, philox_seed, philox_offset, dropout_p: tl.constexpr, m: tl.constexpr, n: tl.constexpr, stride: tl.constexpr):
+    x = tl.zeros((m, n), tl.float32)
+    # import pdb; pdb.set_trace()
+    x = dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride)
+    x_block = (tl.arange(0, m)[:, None]*n + tl.arange(0, n)[None, :])
+    tl.store(X+x_block, x, mask=((tl.arange(0, m)[:, None] < m) & (tl.arange(0, n)[None, :] < n)))
 
 # Convenience function to load with optional boundary checks.
 # "First" is the major dim, "second" is the minor dim.
@@ -162,8 +169,10 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
 
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
+        
+        # if dropout enabled, mask the scores and scale proportionally
         if ENABLE_DROPOUT:
-            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
+            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
             if RETURN_SCORES:
                 # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
@@ -406,9 +415,10 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
 
     if ENABLE_DROPOUT:
         off_hz = off_z * HQ + off_h_q
-        batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
+        batch_philox_offset = philox_offset_base + off_hz * MAX_SEQLENS_Q * MAX_SEQLENS_K
     else:
         batch_philox_offset = 0
+
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
@@ -547,6 +557,8 @@ def attention_prefill_forward_triton_impl(
                                         causal,
                                         bias,
                                         dropout_p,
+                                        dropout_philox_seed,
+                                        dropout_philox_offset,
                                         layout,
                                         cu_seqlens_q, 
                                         cu_seqlens_k,
@@ -623,10 +635,6 @@ def attention_prefill_forward_triton_impl(
         softmax_lse = torch.empty((batch, nheads_q, max_seqlens_q), device=q.device, dtype=torch.float32)
         stride_lse_z, stride_lse_h, stride_lse_m = softmax_lse.stride()
 
-    # Seed the RNG so we get reproducible results for testing.
-    philox_seed = 0x1BF52
-    philox_offset = 0x1D4B42
-
     if bias is not None:
         bias_strides = (bias.stride(0), bias.stride(1),bias.stride(2),
                         bias.stride(3))
@@ -641,7 +649,7 @@ def attention_prefill_forward_triton_impl(
 
     attn_fwd[grid](q, k, v, bias, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
-                    dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, scores=scores, 
+                    dropout_p=dropout_p, philox_seed=dropout_philox_seed, philox_offset_base=dropout_philox_offset, scores=scores, 
                     scores_scaled_shifted=scores_scaled_shifted, exp_scores=exp_scores, alibi_slopes=alibi_slopes, 
                     HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=max_seqlens_q,
                     MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
@@ -649,4 +657,4 @@ def attention_prefill_forward_triton_impl(
                     USE_ALIBI=False if alibi_slopes is None else True, ENABLE_DROPOUT=dropout_p
                     > 0.0, USE_EXP2=use_exp2, RETURN_SCORES=return_scores)
 
-    return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
+    return o, softmax_lse, exp_scores, grid, head_size, dropout_philox_seed, dropout_philox_offset, scores, scores_scaled_shifted

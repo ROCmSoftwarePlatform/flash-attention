@@ -12,8 +12,8 @@ class _attention_prefill(torch.autograd.Function):
         exp_scores, 
         grid, 
         head_size, 
-        philox_seed, 
-        philox_offset, 
+        _, 
+        _, 
         _, 
         _) = attention_prefill_forward_triton_impl(
                                                 q, 
@@ -24,7 +24,9 @@ class _attention_prefill(torch.autograd.Function):
                                                 metadata.alibi_slopes, 
                                                 metadata.causal, 
                                                 metadata.bias, 
-                                                metadata.dropout_p, 
+                                                metadata.dropout_p,
+                                                metadata.dropout_philox_seed,
+                                                metadata.dropout_philox_offset,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -39,13 +41,18 @@ class _attention_prefill(torch.autograd.Function):
         ctx.head_size = head_size
         ctx.causal = metadata.causal
         ctx.alibi_slopes = metadata.alibi_slopes
+        ctx.cu_seqlens_q = metadata.cu_seqlens_q
+        ctx.cu_seqlens_k = metadata.cu_seqlens_k
+        ctx.max_seqlens_q = metadata.max_seqlens_q
+        ctx.max_seqlens_k = metadata.max_seqlens_k
         ctx.dropout_p = metadata.dropout_p
-        ctx.philox_seed = philox_seed
-        ctx.philox_offset = philox_offset
+        ctx.dropout_philox_seed = metadata.dropout_philox_seed
+        ctx.dropout_philox_offset = metadata.dropout_philox_offset
         ctx.exp_scores = exp_scores
         ctx.return_scores = metadata.return_scores
         ctx.layout = metadata.layout
         ctx.use_exp2 = metadata.use_exp2
+        
         return output, softmax_lse, exp_scores
 
     @staticmethod
@@ -65,10 +72,13 @@ class _attention_prefill(torch.autograd.Function):
             ctx.alibi_slopes,
             ctx.causal,
             ctx.layout,
-            None,
-            None,
-            None,
-            None,
+            ctx.cu_seqlens_q,
+            ctx.cu_seqlens_k,
+            ctx.max_seqlens_q,
+            ctx.max_seqlens_k,
+            ctx.dropout_p,
+            ctx.dropout_philox_seed,
+            ctx.dropout_philox_offset,
             ctx.use_exp2
         )
 

@@ -2,7 +2,7 @@ import torch
 import math
 from .utils import DEBUG
 
-def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
+def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dropout_p, use_exp2):
     if DEBUG:
         print()
         print("attention_forward_core_ref_impl")
@@ -11,6 +11,9 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         print("v:", v, v.shape)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
+        print("dropout_p:", dropout_p)
+        print("dropout_mask:", dropout_mask.shape)
+        print("dropout_mask[0]:", dropout_mask[0])
         print("use_exp2:", use_exp2)
     
     # Compute attention scores
@@ -102,6 +105,13 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
     if DEBUG:
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
+    # Apply dropout mask to softmax output
+    if dropout_p > 0.0:
+        softmax = softmax.masked_fill(
+            torch.logical_not(dropout_mask), 0
+        )
+        softmax = softmax / (1 - dropout_p) # scale scores based on dropout
+
     # Compute output
     o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
     if DEBUG:
@@ -109,7 +119,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
 
     return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
 
-def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, use_exp2):
+def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, dropout_mask, dropout_p, layout, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
     # Ensure the layout is 'bhsd'
@@ -131,7 +141,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
 
     # Call the core attention function
     o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores = attention_forward_core_ref_impl(
-        q, k, v, sm_scale, causal, use_exp2
+        q, k, v, sm_scale, causal, dropout_mask, dropout_p, use_exp2
     )
 
     # Reshape outputs back to [batch_size, num_heads, seq_len, head_dim]
@@ -155,6 +165,8 @@ def attention_varlen_forward_pytorch_ref_impl(
     v,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p, 
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
@@ -203,7 +215,7 @@ def attention_varlen_forward_pytorch_ref_impl(
             attention_shifted_scaled_scores_i,
             attention_scaled_scores_i,
             attention_scores_i,
-        ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, use_exp2)
+        ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, dropout_mask, dropout_p, use_exp2)
 
         # Convert back to 'thd' layout and float16
         o_i = o_i.permute(1, 0, 2).to(torch.float16)  # [L_q_i, num_heads, head_dim]
@@ -237,6 +249,8 @@ def attention_forward_pytorch_ref_impl(
     v,
     sm_scale,
     causal,
+    dropout_mask,
+    dropout_p, 
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
@@ -273,7 +287,9 @@ def attention_forward_pytorch_ref_impl(
             k.clone(), 
             v.clone(), 
             sm_scale, 
-            causal, 
+            causal,
+            dropout_mask,
+            dropout_p, 
             layout,
             cu_seqlens_q,
             cu_seqlens_k,
@@ -291,7 +307,7 @@ def attention_forward_pytorch_ref_impl(
             attention_scaled_scores_ref,
             attention_scores_ref,
         ) = attention_vanilla_forward_pytorch_ref_impl(
-            q.clone(), k.clone(), v.clone(), sm_scale, causal, layout, use_exp2
+            q.clone(), k.clone(), v.clone(), sm_scale, causal, dropout_mask, dropout_p, layout, use_exp2
         )
 
     if DEBUG:

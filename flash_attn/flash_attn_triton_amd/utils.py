@@ -3,6 +3,39 @@ import torch
 import os
 import triton
 
+import triton.language as tl
+
+@triton.jit
+def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
+    ms = tl.arange(0, m)
+    ns = tl.arange(0, n)
+    return philox_offset + ms[:, None] * stride + ns[None, :]
+
+
+@triton.jit
+def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
+    rng_offsets = dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride).to(tl.uint32)
+    # TODO: use tl.randint for better performance
+    return tl.rand(philox_seed, rng_offsets)
+
+
+@triton.jit
+def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
+    rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride)
+    rng_keep = rng_output > dropout_p
+    return rng_keep
+
+@triton.jit
+def store_dropout_mask(X, philox_seed, philox_offset, dropout_p: tl.constexpr, m: tl.constexpr, n: tl.constexpr, stride: tl.constexpr):
+    # x = tl.zeros((m, n), tl.float32)
+    # import pdb; pdb.set_trace()
+    for start_m in range(0, m, 128):
+        for start_n in range(0, n, 128):
+            philox_offset_shift = philox_offset + start_m*n + start_n
+            x = dropout_mask(philox_seed, philox_offset_shift, dropout_p, 128, 128, stride)
+            x_block = (tl.arange(0, 128)[:, None]*n + tl.arange(0, 128)[None, :])
+            tl.store(X+x_block, x, mask=((tl.arange(0, 128)[:, None] < m) & (tl.arange(0, 128)[None, :] < n)))
+
 AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '0').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
 PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', 'true', 'yes')
@@ -24,7 +57,7 @@ class MetaData():
     seqlen_new = None
     k_new = None
     v_new = None
-    dropout_p, return_scores= 0.0, False
+    dropout_p, dropout_philox_seed, dropout_philox_offset, dropout_mask, return_scores= 0.0, 0x1BF52, 0x1D4B42, torch.zeros(0, 0), False
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = False
     
@@ -49,6 +82,9 @@ class MetaData():
                 f"  k_new={self.k_new},\n"
                 f"  v_new={self.v_new},\n"
                 f"  dropout_p={self.dropout_p},\n"
+                f"  dropout_philox_seed={self.dropout_philox_seed},\n"
+                f"  dropout_philox_offset={self.dropout_philox_offset},\n"
+                f"  dropout_mask={self.dropout_mask.shape},\n"
                 f"  return_scores={self.return_scores}\n"
                 f")")
 
@@ -85,8 +121,21 @@ class MetaData():
     def need_causal(self):
         self.causal = True
 
-    def need_dropout(self, dropout_p, return_scores):
+    def need_dropout(self, dropout_p, dropout_philox_seed, dropout_philox_offset, return_scores=False):
         self.dropout_p = dropout_p
+        self.dropout_philox_seed = dropout_philox_seed
+        self.dropout_philox_offset = dropout_philox_offset
+
+        # # TODO: Generate the dropout mask on demand without needing a fwd pass of attention
+        self.dropout_mask = torch.zeros(self.max_seqlens_q, self.max_seqlens_k, device='cuda')
+        store_dropout_mask[(1, 1, 1)](self.dropout_mask,
+                                      self.dropout_philox_seed,
+                                      self.dropout_philox_offset,
+                                      self.dropout_p,
+                                      self.max_seqlens_q,
+                                      self.max_seqlens_k,
+                                      self.max_seqlens_k)
+
         self.return_scores = return_scores
 
     def check_args(self, q, k, v, o):
@@ -100,8 +149,6 @@ class MetaData():
             assert len(self.cu_seqlens_q) == len(self.cu_seqlens_k)
             # TODO: Remove once bias is supported with varlen
             assert self.bias is None
-            # TODO:Remove once dropout is supported with varlen
-            assert self.dropout_p == 0.0
             # assert not self.return_scores
         else:
             assert q.dim() == 4
@@ -116,6 +163,7 @@ class MetaData():
         assert (nheads_q % nheads_k) == 0
         assert self.layout is not None
         assert self.layout == 'thd' or not self.varlen
+        assert self.max_seqlens_q != 0 and self.max_seqlens_k != 0, "max_seqlens_q OR max_seqlens_k is 0. Must be non-zero."
 
 def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cuda", DEBUG_INPUT=False):
     torch.manual_seed(20)

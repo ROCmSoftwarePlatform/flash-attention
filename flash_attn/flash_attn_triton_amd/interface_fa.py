@@ -1,6 +1,6 @@
 import torch
 import os
-from .fwd_prefill import attention_prefill_forward_triton_impl
+from .fwd_prefill import attention_prefill_forward_triton_impl, store_dropout_mask
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
 from .fwd_ref import attention_forward_pytorch_ref_impl
@@ -15,6 +15,8 @@ def fwd(q,
         o,
         alibi_slopes,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         causal,
         window_size_left,
@@ -32,6 +34,8 @@ def fwd(q,
         print("o:", o)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
+        print("dropout_philox_seed:", dropout_philox_seed)
+        print("dropout_philox_offset:", dropout_philox_offset)
         print("softmax_scale:", softmax_scale)
         print("causal:", causal)
         print("window_size_left:", window_size_left)
@@ -39,10 +43,6 @@ def fwd(q,
         print("softcap:", softcap)
         print("softcap:", softcap)
         print("return_softmax:", return_softmax)
-
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
 
     if o is None:
         o = torch.empty_like(q)
@@ -64,7 +64,7 @@ def fwd(q,
         metadata.need_alibi(alibi_slopes, batch, nheads_q)
     
     if dropout_p > 0.0:
-        metadata.need_dropout(dropout_p, return_softmax)
+        metadata.need_dropout(dropout_p,  dropout_philox_seed, dropout_philox_offset, return_softmax)
     
     # Check arguments
     metadata.check_args(q, k, v, o)
@@ -83,6 +83,8 @@ def fwd(q,
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
+                                                None,
+                                                metadata.dropout_p,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -111,6 +113,8 @@ def fwd(q,
                                                 metadata.causal, 
                                                 metadata.bias, 
                                                 metadata.dropout_p, 
+                                                metadata.dropout_philox_seed, 
+                                                metadata.dropout_philox_offset, 
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -139,6 +143,8 @@ def bwd(
     dv,
     alibi_slopes,
     dropout_p,
+    dropout_philox_seed,
+    dropout_philox_offset,
     softmax_scale,
     causal,
     window_size_left,
@@ -146,7 +152,6 @@ def bwd(
     softcap,
     deterministic,
     gen_,
-    rng_state,
 ):
     if DEBUG:
         print()
@@ -162,6 +167,8 @@ def bwd(
         print("dv:", dv, dv.shape)
         print("alibi_slopes:", alibi_slopes)
         print("dropout_p:", dropout_p)
+        print("dropout_philox_seed:", dropout_philox_seed)
+        print("dropout_philox_offset:", dropout_philox_offset)
         print("out:", out)
         print("softmax_scale:", softmax_scale)
         print("causal:", causal)
@@ -169,14 +176,22 @@ def bwd(
         print("window_size_right:", window_size_right)
         print("deterministic:", deterministic)
         print("gen_:", gen_)
-        print("rng_state:", rng_state)
 
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
+    # Setup metadata
+    metadata = MetaData(sm_scale=softmax_scale)
+    metadata.max_seqlens_q = q.shape[1]
+    metadata.max_seqlens_k = k.shape[1]
+    metadata.layout = "bshd"
+    metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset)
 
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
+
+        # seqlen_q, seqlen_k = q.shape(-3), k.shape(-3)       # NOTE: assumes 'bshd' layout
+        # dropout_mask = torch.zeros(seqlen_q, seqlen_k)
+        # store_dropout_mask[(1, 1, 1)](MASK=dropout_mask, philox_seed=dropout_philox_seed, philox_offset=dropout_philox_offset, dropout_p=dropout_p, m=seqlen_q, n=seqlen_k, stride=seqlen_k)
+        
         dq_ref, dk_ref, dv_ref, delta_ref = attention_backward_pytorch_ref_impl(
             dout,
             q,
@@ -186,6 +201,8 @@ def bwd(
             softmax_lse,
             softmax_scale,
             causal,
+            None,
+            dropout_p,
             "bshd",
             None,
             None,
@@ -218,6 +235,9 @@ def bwd(
             None,
             None,
             None,
+            dropout_p,
+            dropout_philox_seed,
+            dropout_philox_offset,
             False,
         )
         delta = delta_triton
@@ -243,6 +263,8 @@ def varlen_fwd(
         max_seqlen_q,
         max_seqlen_k,
         dropout_p,
+        dropout_philox_seed,
+        dropout_philox_offset,
         softmax_scale,
         zero_tensors,
         causal,
@@ -264,14 +286,13 @@ def varlen_fwd(
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
         print("dropout_p:", dropout_p)
+        print("dropout_philox_seed:", dropout_philox_seed)
+        print("dropout_philox_offset:", dropout_philox_offset)
         print("softmax_scale:", softmax_scale)
         print("causal:", causal)
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
     
     if o is None:
         o = torch.empty_like(q)
@@ -292,7 +313,7 @@ def varlen_fwd(
         metadata.need_alibi(alibi_slopes, batch, nheads_q)
     
     if dropout_p > 0.0:
-        metadata.need_dropout(dropout_p, return_softmax)
+        metadata.need_dropout(dropout_p, dropout_philox_seed, dropout_philox_offset, return_softmax)
     
     # Check arguments
     metadata.check_args(q, k, v, o)
@@ -314,6 +335,8 @@ def varlen_fwd(
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
+                                                metadata.dropout_mask,
+                                                metadata.dropout_p,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -342,6 +365,8 @@ def varlen_fwd(
                                                             metadata.causal, 
                                                             metadata.bias, 
                                                             metadata.dropout_p, 
+                                                            metadata.dropout_philox_seed, 
+                                                            metadata.dropout_philox_offset, 
                                                             metadata.layout, 
                                                             metadata.cu_seqlens_q, 
                                                             metadata.cu_seqlens_k,
@@ -374,15 +399,17 @@ def varlen_bwd(
     max_seqlen_q,
     max_seqlen_k,
     dropout_p,
+    dropout_philox_seed,
+    dropout_philox_offset,
     softmax_scale,
     zero_tensors,
     causal,
+    dropout_mask,
     window_size_left,
     window_size_right,
     softcap,
     deterministic,
     gen_,
-    rng_state,
 ):
     if DEBUG:
         print()
@@ -408,10 +435,6 @@ def varlen_bwd(
         print("window_size_right:", window_size_right)
         print("deterministic:", deterministic)
         print("gen_:", gen_)
-        print("rng_state:", rng_state)
-
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
 
     if USE_REF:
         if DEBUG:
@@ -425,6 +448,8 @@ def varlen_bwd(
             softmax_lse,
             softmax_scale,
             causal,
+            dropout_mask,
+            dropout_p,
             "thd",
             cu_seqlens_q,
             cu_seqlens_k,
@@ -457,6 +482,10 @@ def varlen_bwd(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
+            dropout_p,
+            dropout_philox_seed,
+            dropout_philox_offset,
+            False,
             False,
         )
         delta = delta_triton
