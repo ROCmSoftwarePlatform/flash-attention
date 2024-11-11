@@ -195,15 +195,19 @@ def attention_varlen_forward_pytorch_ref_impl(
         raise ValueError(f"Unsupported layout {layout}. Expected 'thd'.")
 
     batch_size = cu_seqlens_q.shape[0] - 1
-    num_heads = q.shape[1]
+    nheads_q, nheads_k = q.shape[1], k.shape[1]
     head_dim = q.shape[2]
 
     # Pre-allocate outputs
     total_L_q = q.shape[0]
-    total_L_k = k.shape[0]
 
-    o = torch.empty((total_L_q, num_heads, head_dim), dtype=q.dtype, device=q.device)
-    softmax_lse = torch.empty((total_L_q, num_heads), dtype=torch.float32, device=q.device)
+    o = torch.empty((total_L_q, nheads_q, head_dim), dtype=q.dtype, device=q.device)
+    softmax_lse = torch.empty((total_L_q, nheads_q), dtype=torch.float32, device=q.device)
+
+    # Compute group_size for MQA/GQA handling
+    group_size = nheads_q // nheads_k
+    if nheads_q % nheads_k != 0:
+        raise ValueError("nheads_q must be divisible by nheads_k")
 
     for i in range(batch_size):
         # Get the start and end indices for the current sequence
@@ -212,15 +216,38 @@ def attention_varlen_forward_pytorch_ref_impl(
         start_k = cu_seqlens_k[i].item()
         end_k = cu_seqlens_k[i + 1].item()
 
-        # Extract q_i, k_i, v_i
-        q_i = q[start_q:end_q, :, :]  # [L_q_i, num_heads, head_dim]
-        k_i = k[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
-        v_i = v[start_k:end_k, :, :]  # [L_k_i, num_heads, head_dim]
+        seqlen_q = end_q - start_q
+        seqlen_k = end_k - start_k
 
-        # Permute to [num_heads, L_q_i, head_dim]
+        if DEBUG:
+            print(f"Batch {i} with seqlen_q = {seqlen_q}, seqlen_k = {seqlen_k}, Hq= {nheads_q}, Hk = {nheads_k}")
+
+        # Extract q_i, k_i, v_i
+        q_i = q[start_q:end_q, :, :]  # [L_q_i, nheads_q, head_dim]
+        k_i = k[start_k:end_k, :, :]  # [L_k_i, nheads_k, head_dim]
+        v_i = v[start_k:end_k, :, :]  # [L_k_i, nheads_k, head_dim]
+
+        # Permute to [nheads, L_q_i, head_dim]
         q_i = q_i.permute(1, 0, 2)
         k_i = k_i.permute(1, 0, 2)
         v_i = v_i.permute(1, 0, 2)
+
+        # Handle MQA/GQA by adjusting shapes based on group_size
+        if group_size != 1:
+            # Reshape q_i to [nheads_k, group_size, L_q_i, head_dim]
+            q_i = q_i.reshape(nheads_k, group_size, seqlen_q, head_dim)
+            # Expand k_i and v_i to match group_size
+            k_i = k_i.unsqueeze(1).expand(-1, group_size, -1, -1)
+            v_i = v_i.unsqueeze(1).expand(-1, group_size, -1, -1)
+            # Flatten the first two dimensions for computation
+            q_i = q_i.reshape(nheads_k * group_size, seqlen_q, head_dim)
+            k_i = k_i.reshape(nheads_k * group_size, seqlen_k, head_dim)
+            v_i = v_i.reshape(nheads_k * group_size, seqlen_k, head_dim)
+        else:
+            # Standard case
+            q_i = q_i.reshape(nheads_q, seqlen_q, head_dim)
+            k_i = k_i.reshape(nheads_k, seqlen_k, head_dim)
+            v_i = v_i.reshape(nheads_k, seqlen_k, head_dim)
 
         # Call the core attention function for this sequence
         (
@@ -233,20 +260,26 @@ def attention_varlen_forward_pytorch_ref_impl(
             attention_scores_i,
         ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, use_exp2)
 
+        # Reshape outputs back to original dimensions
+        if group_size != 1:
+            # Reshape outputs to [nheads_k, group_size, seqlen_q, head_dim]
+            o_i = o_i.reshape(nheads_k, group_size, seqlen_q, head_dim)
+            # Combine the first two dimensions back to nheads_q
+            o_i = o_i.reshape(nheads_q, seqlen_q, head_dim)
+            # Reshape softmax_lse_i similarly
+            softmax_lse_i = softmax_lse_i.reshape(nheads_k, group_size, seqlen_q)
+            softmax_lse_i = softmax_lse_i.reshape(nheads_q, seqlen_q)
+        else:
+            # Outputs are already in the correct shape
+            pass
+
         # Convert back to 'thd' layout and float16
-        o_i = o_i.permute(1, 0, 2).to(torch.float16)  # [L_q_i, num_heads, head_dim]
+        o_i = o_i.permute(1, 0, 2).to(torch.float16)  # [L_q_i, nheads_q, head_dim]
+        softmax_lse_i = softmax_lse_i.permute(1, 0)  # [L_q_i, nheads_q]
 
         # Place outputs in pre-allocated tensors
         o[start_q:end_q, :, :] = o_i
-        softmax_lse[start_q:end_q, :] = softmax_lse_i.transpose(0, 1)  # Transpose to [L_q_i, num_heads]
-
-        # For variable-sized outputs, map them into the preallocated tensors
-        # exp_scores_i: [num_heads, L_q_i, L_k_i] -> [L_q_i, num_heads, L_k_i]
-        exp_scores_i = exp_scores_i.permute(1, 0, 2)
-        softmax_i = softmax_i.permute(1, 0, 2)
-        attention_shifted_scaled_scores_i = attention_shifted_scaled_scores_i.permute(1, 0, 2)
-        attention_scaled_scores_i = attention_scaled_scores_i.permute(1, 0, 2)
-        attention_scores_i = attention_scores_i.permute(1, 0, 2)
+        softmax_lse[start_q:end_q, :] = softmax_lse_i
 
     return (
         o,
@@ -257,6 +290,7 @@ def attention_varlen_forward_pytorch_ref_impl(
         None,
         None,
     )
+
 
 
 def attention_forward_pytorch_ref_impl(
