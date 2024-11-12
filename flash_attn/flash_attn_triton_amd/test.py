@@ -481,55 +481,58 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         print("output_ref:", output_ref, output_ref.shape)
     torch.testing.assert_close(output_triton, output_ref, atol=ATOL, rtol=RTOL)
 
-@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-    (1, 1, 1, 1, 1),
-    (1, 1, 4, 4, 4),
-    (2, 1, 4, 4, 16),
-    (1, 2, 4, 4, 16),
-    (2, 2, 4, 4, 16),
-    (1, 1, 4, 4, 16),
-    (2, 1, 4, 4 , 16),
-    (4, 6, 8, 8 , 16),
-    (1, 1, 4, 4, 32),
-    (1, 1, 16, 16, 16),
-    (1, 1, 32, 32, 16),
-    (1, 1, 64, 64, 16),
-    (1, 1, 64, 64, 64),
-    (1, 1, 64, 128, 32),
-    (1, 1, 128, 128, 64),
-    (1, 1, 128, 256, 45),
-    (1, 1, 113, 203, 192),
-    (1, 1, 256, 256, 64),
-    (1, 1, 256, 512, 16),
-    (1, 1, 512, 512, 64), 
-    (1, 1, 1024, 1024, 64),
+@pytest.mark.parametrize(
+    "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
+    (1, 1, 1, 1, 1, 1),
+    (1, 1, 1, 4, 4, 4),
+    (2, 1, 1, 4, 4, 16),
+    (1, 2, 2, 4, 4, 16),
+    (1, 4, 1, 2, 4, 16),
+    (1, 4, 2, 2, 4, 16),
+    (2, 2, 2, 4, 4, 16),
+    (1, 1, 1, 4, 4, 16),
+    (2, 1, 1, 4, 4 , 16),
+    (4, 6, 6, 8, 8 , 16),
+    (1, 1, 1, 4, 4, 32),
+    (1, 1, 1, 16, 16, 16),
+    (1, 1, 1, 32, 32, 16),
+    (1, 1, 1, 64, 64, 16),
+    (1, 1, 1, 64, 64, 64),
+    (1, 1, 1, 64, 128, 32),
+    (1, 1, 1, 128, 128, 64),
+    (1, 1, 1, 128, 256, 45),
+    (1, 1, 1, 113, 203, 192),
+    (1, 1, 1, 256, 256, 64),
+    (1, 1, 1, 256, 512, 16),
+    (1, 1, 1, 512, 512, 64), 
+    (1, 1, 1, 1024, 1024, 64),
     # fa configs
-    (2, 2, 128, 128, 65),
-    (2, 2, 128, 128, 224),
-    (4, 6, 108, 256, 224),
-    (1, 1, 256, 512, 16),
+    (2, 2, 2, 128, 128, 65),
+    (2, 2, 2, 128, 128, 224),
+    (4, 6, 6, 108, 256, 224),
+    (1, 1, 1, 256, 512, 16),
     # old tests that work
-    (4, 48, 1024, 1024, 73),
-    (4, 48, 1024, 1024, 64),
-    (4, 48, 2048, 2048, 64),
-    (1, 24, 4096, 4096, 64),
-    (1, 16, 1024, 1024, 64),
-    (1, 16, 1024, 1024, 128),
+    (4, 48, 48, 1024, 1024, 73),
+    (4, 48, 48, 1024, 1024, 64),
+    (4, 48, 48, 2048, 2048, 64),
+    (1, 24, 24, 4096, 4096, 64),
+    (1, 16, 16, 1024, 1024, 64),
+    (1, 16, 16, 1024, 1024, 128),
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
-def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
+def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
     alibi_slopes = None
     if layout == "thd":
-        q, k, v, metadata = varlen_input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, DEBUG_INPUT=DEBUG_INPUT)
     else:
-        q, k, v, metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
+        q, k, v, metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, DEBUG_INPUT=DEBUG_INPUT)
     if DEBUG_INPUT:
         do = torch.ones_like(q).contiguous()
     else:
@@ -560,6 +563,13 @@ def test_op_prefill_bwd_impl(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, l
         metadata.max_seqlens_k,
         use_exp2
     )
+
+
+    if DEBUG:
+        if HQ // HK != 1:
+            print("MQA/GQA")
+        else:
+            print("MHA")
 
     dq = torch.zeros_like(q, dtype=q.dtype) # NOTE: the kernel does inplace accumlation on dq so dq has to be zeros
     if DEBUG_INPUT:
