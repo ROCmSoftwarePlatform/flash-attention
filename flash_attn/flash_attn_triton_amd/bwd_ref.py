@@ -139,8 +139,12 @@ def attention_varlen_backward_pytorch_ref_impl(
         raise ValueError(f"Unsupported layout {layout}. Expected 'thd'.")
 
     batch_size = cu_seqlens_q.shape[0] - 1
-    num_heads = q.shape[1]
-    head_dim = q.shape[2]
+    nheads_q, head_dim = q.shape[1], q.shape[2]
+    nheads_k = k.shape[1]
+
+    group_size = nheads_q // nheads_k
+    if nheads_q % nheads_k != 0:
+        raise ValueError("nheads_q must be divisible by nheads_k")
 
     # Pre-allocate outputs
     total_L_q = q.shape[0]
@@ -149,8 +153,8 @@ def attention_varlen_backward_pytorch_ref_impl(
     dq = torch.zeros_like(q)
     dk = torch.zeros_like(k)
     dv = torch.zeros_like(v)
-    # delta has the same shape as softmax_lse: [total_L_q, num_heads]
-    delta = torch.zeros((total_L_q, num_heads), dtype=torch.float32, device=o.device)
+    # delta has the same shape as softmax_lse: [total_L_q, nheads_q]
+    delta = torch.zeros((total_L_q, nheads_q), dtype=torch.float32, device=o.device)
 
     for i in range(batch_size):
         # Get the start and end indices for the current sequence
@@ -160,22 +164,37 @@ def attention_varlen_backward_pytorch_ref_impl(
         end_k = cu_seqlens_k[i + 1].item()
 
         # Extract q_i, k_i, v_i, do_i, o_i, softmax_lse_i
-        q_i = q[start_q:end_q, :, :]      # [L_q_i, num_heads, head_dim]
-        k_i = k[start_k:end_k, :, :]      # [L_k_i, num_heads, head_dim]
-        v_i = v[start_k:end_k, :, :]      # [L_k_i, num_heads, head_dim]
-        do_i = do[start_q:end_q, :, :]    # [L_q_i, num_heads, head_dim]
-        o_i = o[start_q:end_q, :, :]      # [L_q_i, num_heads, head_dim]
-        # softmax_lse has shape [total_L_q, num_heads]
-        softmax_lse_i = softmax_lse[start_q:end_q, :]  # [L_q_i, num_heads]
-        softmax_lse_i = softmax_lse_i.transpose(0, 1)  # [num_heads, L_q_i]
+        q_i = q[start_q:end_q, :, :]      # [L_q_i, nheads_q, head_dim]
+        k_i = k[start_k:end_k, :, :]      # [L_k_i, nheads_k, head_dim]
+        v_i = v[start_k:end_k, :, :]      # [L_k_i, nheads_k, head_dim]
+        do_i = do[start_q:end_q, :, :]    # [L_q_i, nheads_q, head_dim]
+        o_i = o[start_q:end_q, :, :]      # [L_q_i, nheads_q, head_dim]
+        softmax_lse_i = softmax_lse[start_q:end_q, :] # [L_q_i, nheads_q]
 
-        # Permute to [num_heads, L_q_i, head_dim]
+        if group_size != 1:
+            # MQA or GQA case
+            # Reshape tensors to include group dimension
+            q_i = q_i.view(q_i.shape[0], nheads_k, group_size, head_dim)
+            do_i = do_i.view(do_i.shape[0], nheads_k, group_size, head_dim)
+            o_i = o_i.view(o_i.shape[0], nheads_k, group_size, head_dim)
+            softmax_lse_i = softmax_lse_i.view(softmax_lse_i.shape[0], nheads_k, group_size)
+            # Expand k_i and v_i to match group_size
+            k_i = k_i.unsqueeze(2).expand(-1, -1, group_size, -1)
+            v_i = v_i.unsqueeze(2).expand(-1, -1, group_size, -1)
+            # Flatten the nheads_k and group_size dimensions
+            q_i = q_i.reshape(q_i.shape[0], nheads_k * group_size, head_dim)
+            do_i = do_i.reshape(do_i.shape[0], nheads_k * group_size, head_dim)
+            o_i = o_i.reshape(o_i.shape[0], nheads_k * group_size, head_dim)
+            softmax_lse_i = softmax_lse_i.reshape(softmax_lse_i.shape[0], nheads_k * group_size)
+            k_i = k_i.reshape(k_i.shape[0], nheads_k * group_size, head_dim)
+            v_i = v_i.reshape(v_i.shape[0], nheads_k * group_size, head_dim)
+        # Permute to [nheads_total, L, head_dim]
         q_i = q_i.permute(1, 0, 2)
         k_i = k_i.permute(1, 0, 2)
         v_i = v_i.permute(1, 0, 2)
         do_i = do_i.permute(1, 0, 2)
         o_i = o_i.permute(1, 0, 2)
-        # softmax_lse_i is already in [num_heads, L_q_i]
+        softmax_lse_i = softmax_lse_i.transpose(0, 1)
 
         # Call the core backward function for this sequence
         dq_i, dk_i, dv_i, delta_i = attention_backward_core_ref_impl(
@@ -191,16 +210,31 @@ def attention_varlen_backward_pytorch_ref_impl(
         )
 
         # Convert back to 'thd' layout
-        dq_i = dq_i.permute(1, 0, 2)  # [L_q_i, num_heads, head_dim]
-        dk_i = dk_i.permute(1, 0, 2)  # [L_k_i, num_heads, head_dim]
-        dv_i = dv_i.permute(1, 0, 2)  # [L_k_i, num_heads, head_dim]
+        dq_i = dq_i.permute(1, 0, 2)  # [L_q_i, nheads_total, head_dim]
+        dk_i = dk_i.permute(1, 0, 2)  # [L_k_i, nheads_total, head_dim]
+        dv_i = dv_i.permute(1, 0, 2)  # [L_k_i, nheads_total, head_dim]
+        delta_i = delta_i.transpose(1, 0)  # [L_q_i, nheads_total]
+
+        if group_size != 1:
+            # Reshape dq_i and delta_i back to original shape
+            dq_i = dq_i.view(dq_i.shape[0], nheads_k, group_size, head_dim)
+            delta_i = delta_i.view(delta_i.shape[0], nheads_k, group_size)
+            # Sum dk_i and dv_i over group dimension
+            dk_i = dk_i.view(dk_i.shape[0], nheads_k, group_size, head_dim)
+            dv_i = dv_i.view(dv_i.shape[0], nheads_k, group_size, head_dim)
+            dk_i = dk_i.sum(dim=2)
+            dv_i = dv_i.sum(dim=2)
+            # Reshape dq_i back to [L_q_i, nheads_q, head_dim]
+            dq_i = dq_i.reshape(dq_i.shape[0], nheads_q, head_dim)
+            delta_i = delta_i.reshape(delta_i.shape[0], nheads_q)
+        else:
+            # No need to reshape
+            pass
 
         # Place outputs in pre-allocated tensors
         dq[start_q:end_q, :, :] = dq_i
         dk[start_k:end_k, :, :] += dk_i  # Accumulate gradients for shared keys
         dv[start_k:end_k, :, :] += dv_i  # Accumulate gradients for shared values
-        # delta_i has shape [num_heads, L_q_i]
-        delta_i = delta_i.transpose(1, 0)  # [L_q_i, num_heads]
         delta[start_q:end_q, :] = delta_i
 
     return dq, dk, dv, delta
