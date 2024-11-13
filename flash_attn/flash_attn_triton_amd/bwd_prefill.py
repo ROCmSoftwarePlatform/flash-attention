@@ -112,13 +112,8 @@ def _bwd_kernel_one_col_block(
     stride_deltaz, 
     stride_deltah, 
     stride_deltam,
-    Z,
-    H,
     N_CTX_Q,
     N_CTX_K,
-    off_h,
-    off_z,
-    off_hz,
     start_n,
     num_block_m,
     num_block_n,
@@ -258,7 +253,8 @@ def _bwd_kernel(
     stride_deltah, 
     stride_deltam,
     Z,
-    H,
+    HQ,
+    HK,
     num_block_m,
     num_block_n,
     cu_seqlens_q,  
@@ -278,8 +274,14 @@ def _bwd_kernel(
     off_hz = tl.program_id(0)
     if SEQUENCE_PARALLEL:
         start_n = tl.program_id(1)
-    off_z = off_hz // H
-    off_h = off_hz % H
+    off_z = off_hz // HQ
+    off_hq = off_hz % HQ
+
+    GROUP_SIZE = HQ // HK
+    if GROUP_SIZE != 1:
+        off_hk = off_hq // GROUP_SIZE
+    else:
+        off_hk = off_hq
 
     if IS_VARLEN:
         # Compute sequence lengths for the current batch
@@ -299,20 +301,20 @@ def _bwd_kernel(
     
 
     # input tensor offsets
-    q_offset = Q + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
-    k_offset = K + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
-    v_offset = V + off_z * stride_vz + off_h * stride_vh + k_start * stride_vn
-    do_offset = DO + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
-    l_offset = L + off_z * stride_deltaz + off_h * stride_deltah + q_start * stride_deltam
-    d_offset = D + off_z * stride_deltaz + off_h * stride_deltah + q_start * stride_deltam
+    q_offset = Q + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
+    k_offset = K + off_z * stride_kz + off_hk * stride_kh + k_start * stride_kn
+    v_offset = V + off_z * stride_vz + off_hk * stride_vh + k_start * stride_vn
+    do_offset = DO + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
+    l_offset = L + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
+    d_offset = D + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
 
     # output tensor offsets
-    dk_offset = DK + off_z * stride_kz + off_h * stride_kh + k_start * stride_kn
-    dv_offset = DV + off_z * stride_vz + off_h * stride_vh + k_start * stride_vn
+    dk_offset = DK + off_z * stride_kz + off_hk * stride_kh + k_start * stride_kn
+    dv_offset = DV + off_z * stride_vz + off_hk * stride_vh + k_start * stride_vn
     if SEQUENCE_PARALLEL:
-        dq_offset = DQ + start_n * stride_dq_all + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
+        dq_offset = DQ + start_n * stride_dq_all + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
     else:
-        dq_offset = DQ + off_z * stride_qz + off_h * stride_qh + q_start * stride_qm
+        dq_offset = DQ + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
 
     # inner loop
     if SEQUENCE_PARALLEL:
@@ -353,13 +355,8 @@ def _bwd_kernel(
             stride_deltaz, 
             stride_deltah, 
             stride_deltam,
-            Z,
-            H,
             N_CTX_Q,
             N_CTX_K,
-            off_h,
-            off_z,
-            off_hz,
             start_n,
             num_block_m,
             num_block_n,
@@ -410,13 +407,8 @@ def _bwd_kernel(
                 stride_deltaz, 
                 stride_deltah, 
                 stride_deltam,
-                Z,
-                H,
                 N_CTX_Q,
                 N_CTX_K,
-                off_h,
-                off_z,
-                off_hz,
                 start_n,
                 num_block_m,
                 num_block_n,
@@ -488,7 +480,6 @@ def attention_prefill_backward_triton_impl(
     stride_kz, stride_kh, stride_kn, stride_kk = k_strides
     stride_vz, stride_vh, stride_vn, stride_vk = v_strides
     stride_oz, stride_oh, stride_om, stride_ok = o_strides
-    batch_headsize = batch * nheads_q
     is_varlen = layout == "thd"
 
     # FIXME: some configs lead to oom for some reason when using 64 x 64 blocks
@@ -570,7 +561,7 @@ def attention_prefill_backward_triton_impl(
     else:
         stride_deltaz, stride_deltah, stride_deltam = delta.stride()
 
-    _bwd_preprocess_use_o[(num_blocks_m, batch_headsize)](
+    _bwd_preprocess_use_o[(num_blocks_m, batch * nheads_q)](
         o,
         do,
         delta,
@@ -622,7 +613,7 @@ def attention_prefill_backward_triton_impl(
         print("num_blocks_m:", num_blocks_m)
         print("num_blocks_n:", num_blocks_n)
 
-    _bwd_kernel[(batch_headsize, num_blocks_n if sequence_parallel else 1)](
+    _bwd_kernel[(batch * nheads_q, num_blocks_n if sequence_parallel else 1)](
         q,
         k,
         v,
@@ -641,6 +632,7 @@ def attention_prefill_backward_triton_impl(
         stride_deltaz, stride_deltah, stride_deltam,
         batch,
         nheads_q,
+        nheads_k,
         num_blocks_m,
         num_blocks_n,
         cu_seqlens_q,
