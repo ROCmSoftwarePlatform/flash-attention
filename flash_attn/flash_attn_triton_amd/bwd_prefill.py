@@ -124,6 +124,7 @@ def _bwd_kernel_one_col_block(
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    IS_GQA: tl.constexpr,
 ):
     if CAUSAL:
         # TODO: Causal can skip more blocks with something like lo = start_m * BLOCK_M
@@ -220,8 +221,12 @@ def _bwd_kernel_one_col_block(
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
     
     # write-back
-    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
-    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
+    if IS_GQA:
+        tl.atomic_add(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
+        tl.atomic_add(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
+    else:
+        tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
+        tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
 
 @triton.jit
 def _bwd_kernel(
@@ -278,10 +283,14 @@ def _bwd_kernel(
     off_hq = off_hz % HQ
 
     GROUP_SIZE = HQ // HK
-    if GROUP_SIZE != 1:
+    IS_GQA = GROUP_SIZE != 1
+    if IS_GQA:
         off_hk = off_hq // GROUP_SIZE
     else:
         off_hk = off_hq
+
+    print("off_hq:", off_hq)
+    print("off_hk:", off_hk)
 
     if IS_VARLEN:
         # Compute sequence lengths for the current batch
@@ -367,6 +376,7 @@ def _bwd_kernel(
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
             CAUSAL=CAUSAL,
             USE_EXP2=USE_EXP2,
+            IS_GQA=IS_GQA
         )
     else:
         for start_n in range(0, num_block_n):
@@ -419,6 +429,7 @@ def _bwd_kernel(
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
                 CAUSAL=CAUSAL,
                 USE_EXP2=USE_EXP2,
+                IS_GQA=IS_GQA
             )
 
 
