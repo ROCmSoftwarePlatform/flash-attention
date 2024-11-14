@@ -194,12 +194,7 @@ def _bwd_kernel_one_col_block(
         p = tl.where(p_mask, p, 0.0)
         
         # compute dv
-        if GROUP_SIZE != 1:
-            # for GQA/MQA, we need to accumulate over groups
-            dv_local = tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
-            dv += (GROUP_SIZE * dv_local)
-        else:
-            dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
+        dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
 
         # compute dp
         dp = tl.dot(do, tl.trans(v))
@@ -211,12 +206,7 @@ def _bwd_kernel_one_col_block(
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         
         # compute dk = dot(ds.T, q)
-        if GROUP_SIZE != 1:
-            # for GQA/MQA, we need to accumulate over groups
-            dk_local= tl.dot(tl.trans(ds), q)
-            dk += (GROUP_SIZE * dk_local)
-        else:
-            dk += tl.dot(tl.trans(ds), q)
+        dk += tl.dot(tl.trans(ds), q)
 
         # compute dq
         if SEQUENCE_PARALLEL:
@@ -521,7 +511,7 @@ def attention_prefill_backward_triton_impl(
 
     do = do.contiguous()
     # NOTE: we might need to copy the output tensor if they are not continuous or have other issues
-    copy_back = {"dq": False, "dk": False, "dv": False}
+    copy_back = {"dq": True, "dk": True, "dv": True}
 
     # deal with dq
     if dq is None:
@@ -545,21 +535,28 @@ def attention_prefill_backward_triton_impl(
 
     # deal with dk, dv
     if (dk is None) or (dv is None):
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
+        dk = torch.zeros_like(k)
+        dv = torch.zeros_like(v)
     else:
+        # store og
+        dk_og = dk
+        dv_og = dv
+
+
         if (not dk.is_contiguous()):
-            dk_og = dk
             dk = dk.contiguous()
             copy_back["dk"] = True
 
         if (not dv.is_contiguous()):
-            dv_og = dv
             dv = dv.contiguous()
             copy_back["dv"] = True
 
     if DEBUG:
         print("copy_back:", copy_back)
+
+    dq.zero_()
+    dk.zero_()
+    dv.zero_()
 
     # assert contigious
     assert do.is_contiguous()
@@ -597,7 +594,7 @@ def attention_prefill_backward_triton_impl(
         IS_VARLEN=is_varlen
     )
 
-    if DEBUG:
+    if False:
         print("_bwd_kernel inputs")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
@@ -668,7 +665,7 @@ def attention_prefill_backward_triton_impl(
         IS_VARLEN=is_varlen
     )
 
-    if DEBUG:
+    if False:
         print("_bwd_kernel outputs")
         print("dq:", dq, dq.shape)
         print("dk:", dk, dk.shape)

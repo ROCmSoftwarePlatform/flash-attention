@@ -2,8 +2,10 @@ import torch
 import math
 from .utils import DEBUG
 
+DEBUG_CORE = DEBUG and False
+
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
-    if DEBUG:
+    if DEBUG_CORE:
         print()
         print("attention_forward_core_ref_impl")
         print("q:", q, q.shape)
@@ -15,12 +17,12 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
     
     # Compute attention scores
     attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
-    if DEBUG:
+    if DEBUG_CORE:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
     # Scale scores
     attention_scaled_scores = sm_scale * attention_scores
-    if DEBUG:
+    if DEBUG_CORE:
         print("attention_scaled_scores:", attention_scaled_scores, attention_scaled_scores.shape)
 
     # Apply causal mask if necessary
@@ -42,7 +44,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
 
     # Compute max for numerical stability
     max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
-    if DEBUG:
+    if DEBUG_CORE:
         print("max_scores:", max_scores, max_scores.shape)
     if causal:
         # Replace -inf in max_scores with zeros to avoid NaN in subtraction
@@ -54,7 +56,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
 
     # Shift scores
     attention_shifted_scaled_scores = attention_scaled_scores - max_scores
-    if DEBUG:
+    if DEBUG_CORE:
             print("attention_shifted_scaled_scores:", attention_shifted_scaled_scores, attention_shifted_scaled_scores.shape)
 
     # Exponentiate
@@ -64,12 +66,12 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
     else:
         exp_scores = torch.exp(attention_shifted_scaled_scores)
 
-    if DEBUG:
+    if DEBUG_CORE:
         print("exp_scores:", exp_scores, exp_scores.shape)
 
     # Sum of exponentials
     sum_exp_scores = torch.sum(exp_scores, dim=-1, keepdim=True)
-    if DEBUG:
+    if DEBUG_CORE:
         print("sum_exp_scores:", sum_exp_scores, sum_exp_scores.shape)
     if causal:
         # if sum of exp scores is 0.0 it means scores where -inf, we cannot compute softmax and softmax_lse. Setting to 1 deals with -inf case cleanly 
@@ -78,13 +80,13 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         torch.ones_like(sum_exp_scores),
         sum_exp_scores
         )
-    if DEBUG:
+    if DEBUG_CORE:
         print("sum_exp_scores:", sum_exp_scores, sum_exp_scores.shape)
 
     # Compute softmax probabilities
     softmax = exp_scores / sum_exp_scores
 
-    if DEBUG:
+    if DEBUG_CORE:
         print("softmax:", softmax, softmax.shape)
 
     # Compute log-sum-exp
@@ -99,12 +101,12 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, use_exp2):
         softmax_lse = max_scores + torch.log(sum_exp_scores)
         softmax_lse = softmax_lse.squeeze(-1)
 
-    if DEBUG:
+    if DEBUG_CORE:
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
     # Compute output
     o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
-    if DEBUG:
+    if DEBUG_CORE:
         print("o:", o, o.shape)
 
     return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores

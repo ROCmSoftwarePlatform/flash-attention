@@ -2,10 +2,12 @@ import torch
 import math
 from .utils import DEBUG
 
+DEBUG_CORE = DEBUG and False
+
 def attention_backward_core_ref_impl(
     do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2
 ):
-    if DEBUG:
+    if DEBUG_CORE:
         print()
         print("attention_backward_core_ref_impl")
         print("do:", do, do.shape)
@@ -29,12 +31,12 @@ def attention_backward_core_ref_impl(
 
     # recompute attention_scores. Make sure it matches the forward impl. i.e. It use float32
     attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
-    if DEBUG:
+    if DEBUG_CORE:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
     # scale scores
     attention_scaled_scores = sm_scale * attention_scores
-    if DEBUG:
+    if DEBUG_CORE:
         print("attention_scaled_scores:", attention_scaled_scores, attention_scaled_scores.shape)
 
     # Apply causal mask if necessary
@@ -44,13 +46,13 @@ def attention_backward_core_ref_impl(
         col_idx = torch.arange(L_k, device=q.device).unsqueeze(0)
         col_offset = L_q-L_k
         causal_mask = row_idx >= (col_offset + col_idx)
-        if DEBUG:
+        if DEBUG_CORE:
             print("causal_mask:", causal_mask)
         # set -inf to places the causal mask is false
         attention_scaled_scores = attention_scaled_scores.masked_fill(
              torch.logical_not(causal_mask.unsqueeze(0)), float('-inf')
         )
-        if DEBUG:
+        if DEBUG_CORE:
             print("attention_scaled_scores after causal:", attention_scaled_scores, attention_scaled_scores.shape)
 
     # compute probabilities using softmax_lse
@@ -64,17 +66,17 @@ def attention_backward_core_ref_impl(
         softmax_lse_3d =  softmax_lse.unsqueeze(-1)
         p = torch.exp(attention_scaled_scores - softmax_lse_3d)
 
-    if DEBUG:
+    if DEBUG_CORE:
         print("softmax_lse_3d:", softmax_lse_3d, softmax_lse_3d.shape)
         print("p:", p, p.shape)
     # compute gradient wrt v
     dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
-    if DEBUG:
+    if DEBUG_CORE:
         print("dv:", dv, dv.shape)
 
     # compute dp
     dp = torch.matmul(do, v.transpose(-2, -1))
-    if DEBUG:
+    if DEBUG_CORE:
         print("dp:", dp, dp.shape)
 
     # calculate ds using dp
@@ -84,21 +86,21 @@ def attention_backward_core_ref_impl(
     else:
         delta = torch.sum(p * dp, axis=-1) # what the math says you should use
         delta_3d = delta.unsqueeze(-1)
-    if DEBUG:
+    if DEBUG_CORE:
         print("delta_3d:", delta_3d, delta_3d.shape)
     ds = (p * (dp - delta_3d)) * sm_scale
-    if DEBUG:
+    if DEBUG_CORE:
         print("ds:", ds, ds.shape)
    
 
     # compute gradient wrt k
     dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
-    if DEBUG:
+    if DEBUG_CORE:
         print("dk:", dk, dk.shape)
 
     # compute gradient wrt q
     dq = torch.matmul(ds, k.to(torch.float32))
-    if DEBUG:
+    if DEBUG_CORE:
         print("dq:", dq, dq.shape)
 
     # cast back to original dtype
@@ -109,7 +111,7 @@ def attention_backward_core_ref_impl(
     # remove d dim with size 1
     delta = delta_3d.squeeze(-1)
 
-    if DEBUG:
+    if DEBUG_CORE:
         print("attention_backward_core_ref_impl output")
         print("dq:", dq, dq.shape)
         print("dk:", dk, dk.shape)
@@ -364,6 +366,26 @@ def attention_backward_pytorch_ref_impl(
     max_seqlen_k,
     use_exp2
 ):
+
+    if DEBUG:
+        print()
+        print("attention_backward_pytorch_ref_impl")
+        print("do:", do, do.shape)
+        print("q:", q, q.shape)
+        print("k:", k, k.shape)
+        print("v:", v, v.shape)
+        print("o:", o, o.shape)
+        print("softmax_lse:", softmax_lse)
+        print("sm_scale:", sm_scale)
+        print("causal:", causal)
+        print("layout:", layout)
+        print("cu_seqlens_q:", cu_seqlens_q)
+        print("cu_seqlens_k:", cu_seqlens_k)
+        print("max_seqlen_q:", max_seqlen_q)
+        print("max_seqlen_k:", max_seqlen_k)
+        print("use_exp2:", use_exp2)
+
+
     if layout == "thd":
         dq, dk, dv, delta = attention_varlen_backward_pytorch_ref_impl(
             do,
@@ -395,5 +417,13 @@ def attention_backward_pytorch_ref_impl(
             use_exp2,
         )
         
+
+    if DEBUG:
+        print()
+        print("attention_backward_pytorch_ref_impl outputs")
+        print("dq:", dq, dq.shape)
+        print("dk:", dk, dk.shape)
+        print("dv:", dv, dv.shape)
+        print("delta:", delta, delta.shape)
 
     return dq, dk, dv, delta
