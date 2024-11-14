@@ -222,8 +222,13 @@ def _bwd_kernel_one_col_block(
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
     
     # write-back
-    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
-    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
+    if GROUP_SIZE != 1:
+        # use atomic_add to properly accumulate gradients from multiple query heads
+        tl.atomic_add(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
+        tl.atomic_add(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
+    else:
+        tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
+        tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
 
 @triton.jit
 def _bwd_kernel(
