@@ -290,9 +290,6 @@ def _bwd_kernel(
     else:
         off_hk = off_hq
 
-    # print("off_hq:", off_hq)
-    # print("off_hk:", off_hk)
-
     if IS_VARLEN:
         # Compute sequence lengths for the current batch
         q_start = tl.load(cu_seqlens_q + off_z)
@@ -454,7 +451,7 @@ def attention_prefill_backward_triton_impl(
     max_seqlen_q: int,
     max_seqlen_k: int,
     use_exp2: bool,
-    sequence_parallel = False,
+    sequence_parallel = True,
 ):
     
     dq.zero_()
@@ -521,7 +518,7 @@ def attention_prefill_backward_triton_impl(
 
     do = do.contiguous()
     # NOTE: we might need to copy the output tensor if they are not continuous or have other issues
-    copy_back = {"dq": True, "dk": True, "dv": True}
+    copy_back = {"dq": False, "dk": False, "dv": False}
 
     # deal with dq
     if dq is None:
@@ -601,7 +598,7 @@ def attention_prefill_backward_triton_impl(
         IS_VARLEN=is_varlen
     )
 
-    if False:
+    if DEBUG:
         print("_bwd_kernel inputs")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
@@ -671,13 +668,6 @@ def attention_prefill_backward_triton_impl(
         waves_per_eu = waves_per_eu,
         IS_VARLEN=is_varlen
     )
-
-    if False:
-        print("_bwd_kernel outputs")
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
-        print("dv:", dv, dv.shape)
-        print("delta:", delta, delta.shape)
 
     if sequence_parallel:
         dq = dq.sum(dim=0)
