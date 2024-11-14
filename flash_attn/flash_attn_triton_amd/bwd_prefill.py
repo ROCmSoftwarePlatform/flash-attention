@@ -124,7 +124,7 @@ def _bwd_kernel_one_col_block(
     SEQUENCE_PARALLEL: tl.constexpr,
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
-    IS_GQA: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
 ):
     if CAUSAL:
         # TODO: Causal can skip more blocks with something like lo = start_m * BLOCK_M
@@ -194,7 +194,12 @@ def _bwd_kernel_one_col_block(
         p = tl.where(p_mask, p, 0.0)
         
         # compute dv
-        dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
+        if GROUP_SIZE != 1:
+            # for GQA/MQA, we need to accumulate over groups
+            dv_local = tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
+            dv += (GROUP_SIZE * dv_local)
+        else:
+            dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
 
         # compute dp
         dp = tl.dot(do, tl.trans(v))
@@ -206,7 +211,12 @@ def _bwd_kernel_one_col_block(
         ds = tl.where(p_mask, ds, 0.0).to(Q.dtype.element_ty)
         
         # compute dk = dot(ds.T, q)
-        dk += tl.dot(tl.trans(ds), q)
+        if GROUP_SIZE != 1:
+            # for GQA/MQA, we need to accumulate over groups
+            dk_local= tl.dot(tl.trans(ds), q)
+            dk += (GROUP_SIZE * dk_local)
+        else:
+            dk += tl.dot(tl.trans(ds), q)
 
         # compute dq
         if SEQUENCE_PARALLEL:
@@ -221,12 +231,8 @@ def _bwd_kernel_one_col_block(
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
     
     # write-back
-    if IS_GQA:
-        tl.atomic_add(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
-        tl.atomic_add(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
-    else:
-        tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
-        tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
+    tl.store(dk_ptrs, dk.to(K.dtype.element_ty), mask=kv_mask)
+    tl.store(dv_ptrs, dv.to(V.dtype.element_ty), mask=kv_mask)
 
 @triton.jit
 def _bwd_kernel(
@@ -276,21 +282,20 @@ def _bwd_kernel(
     IS_VARLEN: tl.constexpr,
 ):
     # program ids
-    off_hz = tl.program_id(0)
+    off_zh = tl.program_id(0)
     if SEQUENCE_PARALLEL:
         start_n = tl.program_id(1)
-    off_z = off_hz // HQ
-    off_hq = off_hz % HQ
+    off_z = off_zh // HQ
+    off_hq = off_zh % HQ
 
     GROUP_SIZE = HQ // HK
-    IS_GQA = GROUP_SIZE != 1
-    if IS_GQA:
+    if GROUP_SIZE != 1:
         off_hk = off_hq // GROUP_SIZE
     else:
         off_hk = off_hq
 
-    print("off_hq:", off_hq)
-    print("off_hk:", off_hk)
+    # print("off_hq:", off_hq)
+    # print("off_hk:", off_hk)
 
     if IS_VARLEN:
         # Compute sequence lengths for the current batch
@@ -376,7 +381,7 @@ def _bwd_kernel(
             SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
             CAUSAL=CAUSAL,
             USE_EXP2=USE_EXP2,
-            IS_GQA=IS_GQA
+            GROUP_SIZE=GROUP_SIZE
         )
     else:
         for start_n in range(0, num_block_n):
@@ -429,7 +434,7 @@ def _bwd_kernel(
                 SEQUENCE_PARALLEL=SEQUENCE_PARALLEL,
                 CAUSAL=CAUSAL,
                 USE_EXP2=USE_EXP2,
-                IS_GQA=IS_GQA
+                GROUP_SIZE=GROUP_SIZE
             )
 
 
@@ -457,7 +462,7 @@ def attention_prefill_backward_triton_impl(
 ):
     if DEBUG:
         print()
-        print("attention_prefill_backward_triton_new_impl")
+        print("attention_prefill_backward_triton_impl")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
         print("k:", k, k.shape)
@@ -674,7 +679,7 @@ def attention_prefill_backward_triton_impl(
         dq = dq.sum(dim=0)
 
     if DEBUG:
-        print("attention_prefill_backward_triton_new_impl outputs")
+        print("attention_prefill_backward_triton_impl outputs")
         print("dq:", dq, dq.shape)
         print("dk:", dk, dk.shape)
         print("dv:", dv, dv.shape)
