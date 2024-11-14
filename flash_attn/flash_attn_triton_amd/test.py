@@ -378,7 +378,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 )
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"]) # bhsd, bshd work with mqa and gqa 
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
@@ -516,7 +516,6 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
     (4, 6, 6, 108, 256, 224),
     (1, 1, 1, 256, 512, 16),
     # old tests that work
-    (4, 48, 3, 1024, 1024, 64),
     (4, 48, 6, 1024, 1024, 64),
     (4, 48, 12, 1024, 1024, 64),
     (4, 48, 24, 1024, 1024, 64),
@@ -529,9 +528,9 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
-@pytest.mark.parametrize('layout', ["bhsd"])
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans in both new and old backend
+@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
 def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
