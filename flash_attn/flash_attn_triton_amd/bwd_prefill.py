@@ -538,8 +538,8 @@ def attention_prefill_backward_triton_impl(
 
     # deal with dk, dv
     if (dk is None) or (dv is None):
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
+        dk = torch.zeros_like(k)
+        dv = torch.zeros_like(v)
     else:
         # store og
         dk_og = dk
