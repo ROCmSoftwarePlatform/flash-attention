@@ -44,7 +44,6 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         if DEBUG:
             print("attention_scaled_scores after causal:", attention_scaled_scores, attention_scaled_scores.shape)
 
-
     # Compute max for numerical stability
     max_scores = torch.max(attention_scaled_scores, dim=-1, keepdim=True)[0]
     if DEBUG_CORE:
@@ -91,6 +90,22 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
 
     if DEBUG_CORE:
         print("softmax:", softmax, softmax.shape)
+        
+    # apply dropout if specified
+    if dropout_p > 0.0:
+        torch.manual_seed(philox_seed)
+        
+        # generate offsets for each position in the softmax tensor
+        _, L_q, L_k = softmax.shape
+        offsets = torch.arange(L_q * L_k, device=softmax.device)
+        offsets = offsets.reshape(1, 1, L_q, L_k) + philox_offset
+        
+        # generate random numbers using philox
+        rng_keep = torch.rand(softmax.shape, device=softmax.device, generator=torch.Generator(device=softmax.device).manual_seed(philox_seed)) > dropout_p
+        
+        # apply dropout mask and scale
+        softmax = torch.where(rng_keep, softmax / (1 - dropout_p), torch.zeros_like(softmax))
+        exp_scores = torch.where(rng_keep, exp_scores / (1 - dropout_p), torch.zeros_like(exp_scores))
 
     # Compute log-sum-exp
     if use_exp2:
@@ -113,7 +128,6 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("o:", o, o.shape)
 
     return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
-
 def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
