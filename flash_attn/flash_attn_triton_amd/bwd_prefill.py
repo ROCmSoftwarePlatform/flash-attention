@@ -453,10 +453,6 @@ def attention_prefill_backward_triton_impl(
     use_exp2: bool,
     sequence_parallel = True,
 ):
-    
-    dq.zero_()
-    dk.zero_()
-    dv.zero_()
     if DEBUG:
         print()
         print("attention_prefill_backward_triton_impl")
@@ -542,8 +538,8 @@ def attention_prefill_backward_triton_impl(
 
     # deal with dk, dv
     if (dk is None) or (dv is None):
-        dk = torch.zeros_like(k)
-        dv = torch.zeros_like(v)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
     else:
         # store og
         dk_og = dk
