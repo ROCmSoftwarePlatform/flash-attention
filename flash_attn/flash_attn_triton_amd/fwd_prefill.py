@@ -547,15 +547,18 @@ def attention_prefill_forward_triton_impl(
                                         alibi_slopes,
                                         causal,
                                         bias,
-                                        dropout_p,
                                         layout,
+                                        # varlen
                                         cu_seqlens_q, 
                                         cu_seqlens_k,
                                         max_seqlens_q, 
                                         max_seqlens_k, 
-                                        return_scores,
+                                        # dropout
+                                        dropout_p,
                                         philox_seed,
                                         philox_offset,
+                                        # misc
+                                        return_scores,
                                         use_exp2):
 
     if DEBUG:

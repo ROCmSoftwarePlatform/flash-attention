@@ -4,7 +4,7 @@ from .utils import DEBUG
 
 DEBUG_CORE = DEBUG and False
 
-def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, use_exp2):
+def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2):
     if DEBUG_CORE:
         print()
         print("attention_forward_core_ref_impl")
@@ -14,6 +14,8 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, use_ex
         print("sm_scale:", sm_scale)
         print("causal:", causal)
         print("dropout_p:", dropout_p)
+        print("philox_seed:", philox_seed)
+        print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
     
     # Compute attention scores
@@ -112,7 +114,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, use_ex
 
     return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
 
-def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, dropout_p, layout, use_exp2):
+def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
     # Ensure the layout is 'bhsd'
@@ -148,7 +150,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, dropou
 
     # Call the core attention function
     o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores = attention_forward_core_ref_impl(
-        q, k, v, sm_scale, causal, dropout_p, use_exp2
+        q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2
     )
 
     if group_size != 1:
@@ -186,12 +188,14 @@ def attention_varlen_forward_pytorch_ref_impl(
     v,
     sm_scale,
     causal,
-    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
+    dropout_p, 
+    philox_seed, 
+    philox_offset,
     use_exp2
 ):
     # Ensure the layout is 'thd'
@@ -303,12 +307,14 @@ def attention_forward_pytorch_ref_impl(
     v,
     sm_scale,
     causal,
-    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
+    dropout_p,
+    philox_seed,
+    philox_offset,
     use_exp2
     ):
     if DEBUG:
@@ -343,12 +349,14 @@ def attention_forward_pytorch_ref_impl(
             v.clone(), 
             sm_scale, 
             causal,
-            dropout_p,
             layout,
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
+            dropout_p,
+            philox_seed,
+            philox_offset,
             use_exp2,
         )
     else:
@@ -365,8 +373,10 @@ def attention_forward_pytorch_ref_impl(
                                                        v.clone(),
                                                        sm_scale,
                                                        causal,
-                                                       dropout_p,
                                                        layout,
+                                                       dropout_p,
+                                                       philox_seed,
+                                                       philox_offset,
                                                        use_exp2)
 
     if DEBUG:
