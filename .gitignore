@@ -35,3 +35,5 @@ core.*
 *.csv
 *.png
 *.html
+*.json
+*.txt

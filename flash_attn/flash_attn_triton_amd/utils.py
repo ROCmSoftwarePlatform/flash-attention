@@ -1,4 +1,7 @@
 
+import csv
+import json
+import math
 import torch
 import os
 import triton
@@ -24,7 +27,9 @@ class MetaData():
     seqlen_new = None
     k_new = None
     v_new = None
-    dropout_p, return_scores= 0.0, False
+    return_scores= False
+    dropout_p= 0.0
+    philox_seed, philox_offset = None, None # if dropout_p > 0.0 seed the RNG so we get reproducible results for testing.
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = False
     rotary_sin = None
@@ -95,9 +100,10 @@ class MetaData():
         self.rotary_interleaved = rotary_interleaved
         self.rotary_conjunction = rotary_conjunction
 
-    def need_dropout(self, dropout_p, return_scores):
+    def need_dropout(self, dropout_p):
         self.dropout_p = dropout_p
-        self.return_scores = return_scores
+        self.return_scores = True
+        self.philox_seed, self.philox_offset = 0x1BF58, 0x1D4B49
 
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()
@@ -254,6 +260,40 @@ def get_padded_headsize(size):
     padded_d_model = max(padded_d_model, 16)
     return padded_d_model
 
+def write_dropout_mask(x, tensor_name = "tensor"):
+    batch, head, seqlen_m, seqlen_n = x.shape
+    x = x.tolist()
+
+    with open(f'{tensor_name}.csv', 'w') as f:
+        writer = csv.writer(f)
+        for b in range(batch):
+            for h in range(head):
+                dropout_mask = x[b][h]
+                if True:
+                    BLOCK_M = 64
+                    BLOCK_N = 64
+                
+                    # Calculate number of blocks in each dimension
+                    m_blocks = math.ceil(seqlen_m / BLOCK_M)
+                    n_blocks = math.ceil(seqlen_n / BLOCK_N)
+                    
+                    # Process each block
+                    for m_block in range(m_blocks):
+                        # Calculate row range for current block
+                        row_start = m_block * BLOCK_M
+                        row_end = min(row_start + BLOCK_M, seqlen_m)
+                        
+                        for n_block in range(n_blocks):
+                            # Calculate column range for current block
+                            col_start = n_block * BLOCK_N
+                            col_end = min(col_start + BLOCK_N, seqlen_n)
+                            
+                            # Extract and write the current block
+                            for row_idx in range(row_start, row_end):
+                                row_data = dropout_mask[row_idx][col_start:col_end]
+                                writer.writerow(row_data)
+                else:
+                    writer.writerows(dropout_mask)
 
 def _strides(x: torch.Tensor, *stride_names: str):
     if x is None:

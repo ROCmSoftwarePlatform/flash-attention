@@ -1,32 +1,204 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG, PERF
+from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG, write_dropout_mask
 
 @triton.jit
-def cdiv_fn(x, y):
-    return (x + y - 1) // y
+def _bwd_preprocess_use_p(
+    Q,
+    K,
+    V,
+    sm_scale,
+    DO,
+    L,
+    Delta,
+    stride_dq_all,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    stride_deltaz, 
+    stride_deltah, 
+    stride_deltam,
+    Z,
+    HQ,
+    HK,
+    num_block_m,
+    num_block_n,
+    cu_seqlens_q,  
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    dropout_p, 
+    philox_seed, 
+    philox_offset_base,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SEQUENCE_PARALLEL: tl.constexpr,
+    CAUSAL: tl.constexpr,
+    DROPOUT: tl.constexpr,
+    USE_EXP2: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    # program ids
+    off_zh = tl.program_id(0)
+    start_m = tl.program_id(1)
+    off_z = off_zh // HQ
+    off_hq = off_zh % HQ
 
-@triton.jit
-def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
-    # tl.device_print('bwd_philox_offset:', philox_offset)
-    ms = tl.arange(0, m)
-    ns = tl.arange(0, n)
-    return philox_offset + ms[:, None] * stride + ns[None, :]
+    GROUP_SIZE = HQ // HK
+    if GROUP_SIZE != 1:
+        off_hk = off_hq // GROUP_SIZE
+    else:
+        off_hk = off_hq
 
+    if IS_VARLEN:
+        # Compute sequence lengths for the current batch
+        q_start = tl.load(cu_seqlens_q + off_z)
+        q_end = tl.load(cu_seqlens_q + off_z + 1)
+        k_start = tl.load(cu_seqlens_k + off_z)
+        k_end = tl.load(cu_seqlens_k + off_z + 1)
 
-@triton.jit
-def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
-    rng_offsets = dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride).to(tl.uint32)
-    # TODO: use tl.randint for better performance
-    return tl.rand(philox_seed, rng_offsets)
+        # Compute actual sequence lengths
+        N_CTX_Q = q_end - q_start
+        N_CTX_K = k_end - k_start
+    else:
+        q_start = 0
+        k_start = 0
+        N_CTX_Q = max_seqlen_q
+        N_CTX_K = max_seqlen_k
 
+    if DROPOUT:
+        stride_sz = HQ * max_seqlen_q * max_seqlen_k
+        stride_sh = max_seqlen_q * max_seqlen_k
+        stride_sm = max_seqlen_k
+        batch_philox_offset = philox_offset_base + off_z * stride_sz + off_hq * stride_sh + q_start * stride_sm
+    else:
+        batch_philox_offset = 0
 
-@triton.jit
-def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
-    rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride)
-    rng_keep = rng_output > dropout_p
-    return rng_keep
+    # input tensor offsets
+    q_offset = Q + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
+    k_offset = K + off_z * stride_kz + off_hk * stride_kh + k_start * stride_kn
+    v_offset = V + off_z * stride_vz + off_hk * stride_vh + k_start * stride_vn
+    do_offset = DO + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
+    l_offset = L + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
+    delta_offset = Delta + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
+
+    if CAUSAL:
+        # TODO: Causal can skip more blocks with something like lo = start_m * BLOCK_M
+        lo = 0
+    else:
+        lo = 0
+
+    # initialize head offsets
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+
+    # masks
+    mask_d = offs_d < ACTUAL_BLOCK_DMODEL
+
+    # loop over rows
+    offs_m = start_m* BLOCK_M + tl.arange(0, BLOCK_M)
+    # offs_m = start_m + tl.arange(0, BLOCK_M)
+    q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
+    do_ptrs = do_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
+    
+    # update mask as row block changes
+    mask_m = offs_m < N_CTX_Q
+    q_mask = mask_m[:, None] & mask_d[None, :]
+
+    # load q, k, v, do on-chip
+    q = tl.load(q_ptrs, mask=q_mask, other=0.0).to(tl.float32)
+    do = tl.load(do_ptrs, mask=q_mask, other=0.0).to(tl.float32)
+
+    # delta
+    delta_ptrs = delta_offset + offs_m * stride_deltam
+    delta_partial = tl.zeros([BLOCK_M], dtype=tl.float32)
+    
+    for start_n in range(lo, num_block_n):
+        # print("start_n:", start_n)
+        # offs_n = start_n + tl.arange(0, BLOCK_N)
+        offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        mask_n = offs_n < N_CTX_K
+        kv_mask = mask_n[:, None] & mask_d[None, :]
+
+        # load k and v once per column block
+        k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
+        v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
+
+        # recompute p = softmax(qk, dim=-1).T
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        # print("q:", q)
+        # print("k:", k)
+        qk += tl.dot(q, tl.trans(k))
+
+        if CAUSAL:
+            col_offset = N_CTX_Q - N_CTX_K
+            causal_mask = offs_m[:, None] >= (col_offset + offs_n[None, :])
+            qk = tl.where(causal_mask, qk, float("-inf"))
+
+        l_ptrs = l_offset + offs_m * stride_deltam
+        l_i = tl.load(l_ptrs, mask=mask_m)
+
+        # compute p
+        if USE_EXP2:
+            RCP_LN2: tl.constexpr = 1.4426950408889634
+            qk *= sm_scale * RCP_LN2
+            l_i *= RCP_LN2
+            p = tl.math.exp2(qk - l_i[:, None])
+        else:
+            qk *= sm_scale
+            p = tl.math.exp(qk - l_i[:, None])
+
+        # mask block in the cases where the data is smaller the block size
+        p_mask = mask_m[:, None] & mask_n[None, :]
+        p = tl.where(p_mask, p, 0.0)
+        # print("p:", p)
+        
+        # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
+        if DROPOUT:
+            stride_sm = N_CTX_K
+            stride_sn = 1
+            philox_offset = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
+            # print("philox_seed:", philox_seed)
+            # print("philox_offset:", philox_offset)
+            rand_vals = tl.rand(philox_seed, philox_offset)
+            dropout_mask = rand_vals > dropout_p
+            dropout_scale = 1/ (1 - dropout_p)
+            p_drop = tl.where(dropout_mask, p, 0.0)
+            p_drop_scaled = p_drop * dropout_scale
+
+            # compute dp
+            dp_drop_scaled = tl.dot(do, tl.trans(v))
+            dp = tl.where(dropout_mask, dp_drop_scaled, 0.0) * dropout_scale
+            # dp = tl.where(p_mask, dp, 0.0)
+
+            # print("dp:", dp)
+
+            # compute delta
+            delta = tl.sum(p * dp, axis=1)
+        else:
+            # compute dp
+            dp = tl.dot(do, tl.trans(v))
+
+            # compute delta
+            delta = tl.sum(p * dp, axis=1)
+        # print("delta:", delta)
+
+        delta_partial += delta
+
+    tl.store(delta_ptrs, delta_partial, mask=mask_m)
 
 @triton.jit
 def _bwd_preprocess_use_o(
@@ -48,8 +220,8 @@ def _bwd_preprocess_use_o(
     H: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    pid_m = tl.program_id(0)
-    pid_bh = tl.program_id(1)
+    pid_bh = tl.program_id(0)
+    pid_m = tl.program_id(1)
 
     # Compute batch and head indices
     off_z = pid_bh // H
@@ -119,8 +291,9 @@ def _bwd_kernel_one_col_block(
     dq_offset,
     dk_offset,
     dv_offset,
-    d_offset,
     l_offset,
+    delta_offset,
+    dropout_offset,
     stride_dq_all,
     stride_qz,
     stride_qh,
@@ -137,12 +310,15 @@ def _bwd_kernel_one_col_block(
     stride_deltaz, 
     stride_deltah, 
     stride_deltam,
+    stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn,
     N_CTX_Q,
     N_CTX_K,
     start_n,
     num_block_m,
     num_block_n,
-    dropout_p, philox_seed, philox_offset_base,
+    dropout_p,
+    philox_seed,
+    batch_philox_offset,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -153,6 +329,9 @@ def _bwd_kernel_one_col_block(
     USE_EXP2: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
 ):
+    DEBUG_DROPOUT = False
+
+    # causal
     if CAUSAL:
         # TODO: Causal can skip more blocks with something like lo = start_m * BLOCK_M
         lo = 0
@@ -179,9 +358,12 @@ def _bwd_kernel_one_col_block(
     k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
     v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
 
+    if DROPOUT:
+        dropout_scale = 1/ (1 - dropout_p)
+
     # loop over rows
-    for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
-        offs_m = start_m + tl.arange(0, BLOCK_M)
+    for start_m in range(lo, num_block_m):
+        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
         q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
         dq_ptrs = dq_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
         do_ptrs = do_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
@@ -223,46 +405,70 @@ def _bwd_kernel_one_col_block(
         
         # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
         if DROPOUT:
-            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
-            p_drop = tl.where(keep, p, 0.0)
+            philox_offset = batch_philox_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
+            # print("philox_seed:", philox_seed)
+            # print("philox_offset:", philox_offset)
+            rand_vals = tl.rand(philox_seed, philox_offset)
+            dropout_mask = rand_vals > dropout_p
 
-            p_drop = p_drop / (1 - dropout_p)
-            p_drop = p_drop.to(Q.dtype.element_ty)
+            if DEBUG_DROPOUT:
+                dropout_ptrs = dropout_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
+                tl.store(dropout_ptrs, dropout_mask, mask=p_mask)
+            
+            # apply dropout mask
+            p_drop = tl.where(dropout_mask, p, 0.0)
+            p_drop_scaled = p_drop * dropout_scale
+
+            # compute dv
+            dv += tl.dot(tl.trans(p_drop_scaled), do) # dropout scale is applied at the end
+
+            # compute dp
+            dp_drop_scaled = tl.dot(do, tl.trans(v))
+            dp = tl.where(dropout_mask, dp_drop_scaled, 0.0) * dropout_scale
+
+            # compute ds
+            delta_ptrs = delta_offset + offs_m * stride_deltam
+            delta_i = tl.load(delta_ptrs, mask=mask_m)
+            dscores_scaled = (p * (dp - delta_i[:, None]))
+            ds = dscores_scaled * sm_scale
+            ds = tl.where(p_mask, ds, 0.0)
+            ds = ds.to(tl.float16)
+            
+            # compute dk
+            dk += tl.dot(tl.trans(ds), q)
+
+            # compute dq
+            if SEQUENCE_PARALLEL:
+                dq = tl.dot(ds, k)
+            else:
+                dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
+                dq += tl.dot(ds, k)
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
         else:
-            p_drop = p
-        
-        # compute dv
-        dv += tl.dot(tl.trans(p), do)
+            # compute dv
+            dv += tl.dot(tl.trans(p), do)
 
-        # compute dp
-        dp = tl.dot(do, tl.trans(v))
+            # compute dp
+            dp = tl.dot(do, tl.trans(v))
 
-        if DROPOUT:
-            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
-            dp = tl.where(keep, dp, 0.0)
+            # compute ds
+            delta_ptrs = delta_offset + offs_m * stride_deltam
+            delta_i = tl.load(delta_ptrs, mask=mask_m)
+            dscores_scaled = (p * (dp - delta_i[:, None]))
+            ds = dscores_scaled * sm_scale
+            ds = tl.where(p_mask, ds, 0.0)
+            ds = ds.to(tl.float16)
+            
+            # compute dk
+            dk += tl.dot(tl.trans(ds), q)
 
-            dp = dp / (1 - dropout_p)
-            dp = dp.to(Q.dtype.element_ty)
-
-        # compute ds , ds = p * (dp - delta[:, None])
-        d_ptrs = d_offset + offs_m * stride_deltam
-        Di = tl.load(d_ptrs, mask=mask_m)
-        ds = (p * (dp - Di[:, None])) * sm_scale
-        ds = tl.where(p_mask, ds, 0.0)
-        ds = ds.to(tl.float16)
-        
-        # compute dk = dot(ds.T, q)
-        dk += tl.dot(tl.trans(ds), q)
-
-        # compute dq
-        if SEQUENCE_PARALLEL:
-            dq = tl.dot(ds, k)
-        else:
-            dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
-            dq += tl.dot(ds, k)
-        tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
+            # compute dq
+            if SEQUENCE_PARALLEL:
+                dq = tl.dot(ds, k)
+            else:
+                dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
+                dq += tl.dot(ds, k)
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
 
     # write-back dv and dk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
@@ -289,7 +495,8 @@ def _bwd_kernel(
     DK,
     DV,
     L,
-    D,
+    Delta,
+    Dropout_mask,
     stride_dq_all,
     stride_qz,
     stride_qh,
@@ -306,6 +513,7 @@ def _bwd_kernel(
     stride_deltaz, 
     stride_deltah, 
     stride_deltam,
+    stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn,
     Z,
     HQ,
     HK,
@@ -315,7 +523,9 @@ def _bwd_kernel(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    dropout_p, philox_seed, philox_offset,
+    dropout_p, 
+    philox_seed, 
+    philox_offset_base,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -339,11 +549,6 @@ def _bwd_kernel(
     else:
         off_hk = off_hq
 
-    if DROPOUT:
-        batch_philox_offset = philox_offset + off_hq * max_seqlen_q * max_seqlen_k
-    else:
-        batch_philox_offset = 0
-
     if IS_VARLEN:
         # Compute sequence lengths for the current batch
         q_start = tl.load(cu_seqlens_q + off_z)
@@ -359,7 +564,6 @@ def _bwd_kernel(
         k_start = 0
         N_CTX_Q = max_seqlen_q
         N_CTX_K = max_seqlen_k
-    
 
     # input tensor offsets
     q_offset = Q + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
@@ -367,7 +571,15 @@ def _bwd_kernel(
     v_offset = V + off_z * stride_vz + off_hk * stride_vh + k_start * stride_vn
     do_offset = DO + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
     l_offset = L + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
-    d_offset = D + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
+    delta_offset = Delta + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
+
+    if DROPOUT:
+        batch_philox_offset = philox_offset_base + off_z * stride_dropoutz + off_hq * stride_dropouth #+ q_start * stride_dropoutm
+        dropout_offset = Dropout_mask + off_z * stride_dropoutz + off_hq * stride_dropouth #+ q_start * stride_dropoutm
+    else:
+        batch_philox_offset = 0
+        dropout_offset = 0
+    
 
     # output tensor offsets
     dk_offset = DK + off_z * stride_kz + off_hk * stride_kh + k_start * stride_kn
@@ -390,7 +602,7 @@ def _bwd_kernel(
             DK,
             DV,
             L,
-            D,
+            Delta,
             q_offset,
             k_offset,
             v_offset,
@@ -398,8 +610,9 @@ def _bwd_kernel(
             dq_offset,
             dk_offset,
             dv_offset,
-            d_offset,
             l_offset,
+            delta_offset,
+            dropout_offset,
             stride_dq_all,
             stride_qz,
             stride_qh,
@@ -413,9 +626,10 @@ def _bwd_kernel(
             stride_vh,
             stride_vn,
             stride_vk,
-            stride_deltaz, 
-            stride_deltah, 
+            stride_deltaz,
+            stride_deltah,
             stride_deltam,
+            stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn,
             N_CTX_Q,
             N_CTX_K,
             start_n,
@@ -445,7 +659,7 @@ def _bwd_kernel(
                 DK,
                 DV,
                 L,
-                D,
+                Delta,
                 q_offset,
                 k_offset,
                 v_offset,
@@ -453,8 +667,9 @@ def _bwd_kernel(
                 dq_offset,
                 dk_offset,
                 dv_offset,
-                d_offset,
                 l_offset,
+                delta_offset,
+                dropout_offset,
                 stride_dq_all,
                 stride_qz,
                 stride_qh,
@@ -468,9 +683,10 @@ def _bwd_kernel(
                 stride_vh,
                 stride_vn,
                 stride_vk,
-                stride_deltaz, 
-                stride_deltah, 
+                stride_deltaz,
+                stride_deltah,
                 stride_deltam,
+                stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn,
                 N_CTX_Q,
                 N_CTX_K,
                 start_n,
@@ -503,14 +719,15 @@ def attention_prefill_backward_triton_impl(
     sm_scale: float,
     alibi_slopes,
     causal,
-    dropout_p,
     layout: str,
     cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q: int,
     max_seqlen_k: int,
+    dropout_p, 
+    philox_seed, 
+    philox_offset,
     use_exp2: bool,
-    rng_state: torch.Tensor,
     sequence_parallel = True,
 ):
     if DEBUG:
@@ -533,8 +750,10 @@ def attention_prefill_backward_triton_impl(
         print("cu_seqlens_k:", cu_seqlens_k)
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
+        print("dropout_p:", dropout_p)
+        print("philox_seed:", philox_seed)
+        print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
-        print("rng_state", rng_state)
         print("sequence_parallel:", sequence_parallel)
 
     # make contigious
@@ -551,13 +770,7 @@ def attention_prefill_backward_triton_impl(
     stride_vz, stride_vh, stride_vn, stride_vk = v_strides
     stride_oz, stride_oh, stride_om, stride_ok = o_strides
     is_varlen = layout == "thd"
-    
-
-    # get dropout metadata
-    if dropout_p > 0.0:
-        philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
-    else:
-        philox_seed, philox_offset = None, None
+    use_dropout = (dropout_p > 0.0)
 
     # FIXME: some configs lead to oom for some reason when using 64 x 64 blocks
     if max_seqlen_q <= 32 or max_seqlen_k <= 32:
@@ -566,6 +779,10 @@ def attention_prefill_backward_triton_impl(
     else:
         BLOCK_M = 64 
         BLOCK_N = 64
+    if DEBUG:
+        print("BLOCK_M:", BLOCK_M)
+        print("BLOCK_N:", BLOCK_N)
+
     num_warps = 4 # NOTE: originial is 8. changing it to 1 caused issues be careful
     num_stages = 1
     waves_per_eu = 1
@@ -646,27 +863,74 @@ def attention_prefill_backward_triton_impl(
     else:
         stride_deltaz, stride_deltah, stride_deltam = delta.stride()
 
-    _bwd_preprocess_use_o[(num_blocks_m, batch * nheads_q)](
-        o,
-        do,
-        delta,
-        stride_oz, stride_oh, stride_om, stride_ok,
-        stride_oz, stride_oh, stride_om, stride_ok,
-        stride_deltaz, stride_deltah, stride_deltam,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        BLOCK_M=BLOCK_M,
-        BLOCK_DMODEL=BLOCK_DMODEL,
-        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-        N_CTX_Q=max_seqlen_q,
-        Z=batch,
-        H=nheads_q,
-        IS_VARLEN=is_varlen
-    )
+    # dropout mask tensor for debugging. We dump the dropout mask created in the kernel for testing
+    if use_dropout:
+        dropout_mask = torch.zeros((batch, nheads_q, max_seqlen_q, max_seqlen_k), device=q.device,
+                                        dtype=torch.float32)
+        stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn = (dropout_mask.stride(0), dropout_mask.stride(1), dropout_mask.stride(2), dropout_mask.stride(3))
+    else:
+        dropout_mask = None
+        stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn = (0, 0 , 0 , 0)
 
-    if DEBUG:
+    if False: #dropout_p > 0.0:
+        _bwd_preprocess_use_p[(batch * nheads_q, num_blocks_m)](
+            q,
+            k,
+            v,
+            sm_scale,
+            do,
+            softmax_lse,
+            delta,
+            stride_dq_all,
+            stride_qz, stride_qh, stride_qm, stride_qk,
+            stride_kz, stride_kh, stride_kn, stride_kk,
+            stride_vz, stride_vh, stride_vn, stride_vk,
+            stride_deltaz, stride_deltah, stride_deltam,
+            batch,
+            nheads_q,
+            nheads_k,
+            num_blocks_m,
+            num_blocks_n,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p, philox_seed, philox_offset,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+            SEQUENCE_PARALLEL=sequence_parallel,
+            CAUSAL=causal,
+            DROPOUT=use_dropout,
+            USE_EXP2=use_exp2,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            waves_per_eu = waves_per_eu,
+            IS_VARLEN=is_varlen
+            )
+    else:
+        _bwd_preprocess_use_o[(batch * nheads_q, num_blocks_m)](
+            o,
+            do,
+            delta,
+            stride_oz, stride_oh, stride_om, stride_ok,
+            stride_oz, stride_oh, stride_om, stride_ok,
+            stride_deltaz, stride_deltah, stride_deltam,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            BLOCK_M=BLOCK_M,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+            N_CTX_Q=max_seqlen_q,
+            Z=batch,
+            H=nheads_q,
+            IS_VARLEN=is_varlen
+        )
+
+    if False:
         print("_bwd_kernel inputs")
         print("do:", do, do.shape)
         print("q:", q, q.shape)
@@ -695,6 +959,7 @@ def attention_prefill_backward_triton_impl(
         print("ACTUAL_BLOCK_DMODEL:",ACTUAL_BLOCK_DMODEL)
         print("SEQUENCE_PARALLEL:",sequence_parallel)
         print("CAUSAL:",causal)
+        print("DROPOUT:", use_dropout)
         print("num_warps:",num_warps)
         print("num_stages:", num_stages)
         print("USE_EXP2:", use_exp2)
@@ -713,11 +978,13 @@ def attention_prefill_backward_triton_impl(
         dv,
         softmax_lse,
         delta,
+        dropout_mask,
         stride_dq_all,
         stride_qz, stride_qh, stride_qm, stride_qk,
         stride_kz, stride_kh, stride_kn, stride_kk,
         stride_vz, stride_vh, stride_vn, stride_vk,
         stride_deltaz, stride_deltah, stride_deltam,
+        stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn,
         batch,
         nheads_q,
         nheads_k,
@@ -734,7 +1001,7 @@ def attention_prefill_backward_triton_impl(
         ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
         SEQUENCE_PARALLEL=sequence_parallel,
         CAUSAL=causal,
-        DROPOUT=dropout_p>0.0,
+        DROPOUT=use_dropout,
         USE_EXP2=use_exp2,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -747,11 +1014,15 @@ def attention_prefill_backward_triton_impl(
 
     if DEBUG:
         print("attention_prefill_backward_triton_impl outputs")
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
-        print("dv:", dv, dv.shape)
         print("delta:", delta, delta.shape)
+        print("dv:", dv, dv.shape)
+        print("dk:", dk, dk.shape)
+        print("dq:", dq, dq.shape)
         print("copy_back:", copy_back)
+        if use_dropout:
+            print("dropout_mask:", dropout_mask, dropout_mask.shape if dropout_mask is not None else None)
+            print("dropout_fraction bwd:", 1.0 - (dropout_mask.sum()/ dropout_mask.numel()).item())
+            write_dropout_mask(dropout_mask, "dropout_mask_bwd")
 
     if copy_back["dq"]:
         dq_og.copy_(dq)
