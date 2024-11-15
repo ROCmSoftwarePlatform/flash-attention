@@ -24,7 +24,9 @@ class MetaData():
     seqlen_new = None
     k_new = None
     v_new = None
-    dropout_p, return_scores= 0.0, False
+    return_scores= False
+    dropout_p= 0.0
+    philox_seed, philox_offset = None, None # if dropout_p > 0.0 seed the RNG so we get reproducible results for testing.
     # NOTE: scale sm_scale by log_2(e) and use 2^x in the loop as we do not have native e^x support in HW.
     use_exp2 = False
     
@@ -88,6 +90,7 @@ class MetaData():
     def need_dropout(self, dropout_p, return_scores):
         self.dropout_p = dropout_p
         self.return_scores = return_scores
+        self.philox_seed, self.philox_offset = 0x1BF58, 0x1D4B49
 
     def check_args(self, q, k, v, o):
         assert q.dim() == k.dim() and q.dim() == v.dim()

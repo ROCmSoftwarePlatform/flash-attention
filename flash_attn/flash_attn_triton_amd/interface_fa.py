@@ -62,6 +62,9 @@ def fwd(q,
     
     if dropout_p > 0.0:
         metadata.need_dropout(dropout_p, return_softmax)
+        rng_state = torch.Tensor([metadata.philox_seed, metadata.philox_offset])
+    else:
+        rng_state = None
     
     # Check arguments
     metadata.check_args(q, k, v, o)
@@ -83,8 +86,8 @@ def fwd(q,
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
-                                                metadata.layout,
                                                 dropout_p,
+                                                metadata.layout,
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
                                                 metadata.max_seqlens_q, 
@@ -99,10 +102,7 @@ def fwd(q,
         exp_scores, 
         _, 
         _, 
-        philox_seed, 
-        philox_offset, 
-        _, 
-        _) = attention_prefill_forward_triton_impl(
+        ) = attention_prefill_forward_triton_impl(
                                                 q, 
                                                 k, 
                                                 v, 
@@ -117,11 +117,10 @@ def fwd(q,
                                                 metadata.cu_seqlens_k,
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k, 
-                                                metadata.return_scores, 
+                                                metadata.return_scores,
+                                                metadata.philox_seed,
+                                                metadata.philox_offset,
                                                 metadata.use_exp2)
-        
-        # Init rng_state if dropout is enabled
-        rng_state = torch.Tensor([philox_seed, philox_offset]) if dropout_p > 0.0 else None
 
     if DEBUG:
         print("fwd outputs")

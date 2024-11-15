@@ -553,7 +553,9 @@ def attention_prefill_forward_triton_impl(
                                         cu_seqlens_k,
                                         max_seqlens_q, 
                                         max_seqlens_k, 
-                                        return_scores, 
+                                        return_scores,
+                                        philox_seed,
+                                        philox_offset,
                                         use_exp2):
 
     if DEBUG:
@@ -625,10 +627,6 @@ def attention_prefill_forward_triton_impl(
         softmax_lse = torch.empty((batch, nheads_q, max_seqlens_q), device=q.device, dtype=torch.float32)
         stride_lse_z, stride_lse_h, stride_lse_m = softmax_lse.stride()
 
-    # Seed the RNG so we get reproducible results for testing.
-    philox_seed = 0x1BF58
-    philox_offset = 0x1D4B49
-
     if bias is not None:
         bias_strides = (bias.stride(0), bias.stride(1),bias.stride(2),
                         bias.stride(3))
@@ -658,4 +656,4 @@ def attention_prefill_forward_triton_impl(
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None)
 
-    return o, softmax_lse, exp_scores, grid, head_size, philox_seed, philox_offset, scores, scores_scaled_shifted
+    return o, softmax_lse, exp_scores, scores, scores_scaled_shifted
