@@ -601,9 +601,9 @@ def attention_prefill_backward_triton_impl(
         print("copy_back:", copy_back)
 
     # zero out
-    dq.zero_()
-    dk.zero_()
-    dv.zero_()
+    # dq.zero_()
+    # dk.zero_()
+    # dv.zero_()
 
     # assert contigious
     assert do.is_contiguous()

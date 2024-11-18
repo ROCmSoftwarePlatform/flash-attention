@@ -908,7 +908,7 @@ def test_flash_attn_varlen_qkvpacked(
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-@pytest.mark.parametrize("d", [32])
+@pytest.mark.parametrize("d", [8])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [

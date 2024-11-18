@@ -151,6 +151,10 @@ def bwd(
     gen_,
     rng_state,
 ):
+    dq.zero_()
+    dk.zero_()
+    dv.zero_()
+
     if DEBUG:
         print()
         print("flash_attn_triton_amd.py::bwd")

@@ -104,6 +104,8 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         rng_output = torch.rand(softmax.shape, device=softmax.device, 
                               generator=torch.Generator(device=softmax.device).manual_seed(philox_seed))
         rng_keep = rng_output > dropout_p
+        if DEBUG:
+            print("rng_keep:", rng_keep)
         
         # Apply dropout mask and scale
         # Set -1 for dropped positions and 1 for kept positions in exp_scores
