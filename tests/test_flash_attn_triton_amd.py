@@ -1171,9 +1171,15 @@ def test_flash_attn_output(
     assert (out - out_ref).abs().max().item() <= 2 * (out_pt - out_ref).abs().max().item()
 
     if dropout_p > 0.0:
-        # assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
+        if DEBUG:
+            print("attn:", attn, attn.shape)
+            print("attn_ref:", attn_ref, attn_ref.shape)
+        assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
         # With alibi, many of the prob values are 0.0 & -0.0 so dropout_fraction isn't accurate
         if not alibi:
+            if DEBUG:
+                print("dropout_fraction:", dropout_fraction)
+                print("dropout_p:", dropout_p)
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
     if test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):

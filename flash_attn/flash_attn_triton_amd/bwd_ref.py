@@ -2,7 +2,7 @@ import torch
 import math
 from .utils import DEBUG, generate_dropout_mask
 
-DEBUG_CORE = DEBUG and False
+DEBUG_CORE = DEBUG and True
 
 def attention_backward_core_ref_impl(
     do, q, k, v, o, softmax_lse, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2
@@ -30,7 +30,7 @@ def attention_backward_core_ref_impl(
 
 
     # recompute attention_scores. Make sure it matches the forward impl. i.e. It use float32
-    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+    attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if DEBUG_CORE:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
@@ -65,19 +65,18 @@ def attention_backward_core_ref_impl(
     else:
         softmax_lse_3d =  softmax_lse.unsqueeze(-1)
         p = torch.exp(attention_scaled_scores - softmax_lse_3d)
-
-    if dropout_p > 0.0:
-        dropout_mask = generate_dropout_mask(
-            p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype
-        )
-        p = p * dropout_mask / (1 - dropout_p)
-
-
     if DEBUG_CORE:
         print("softmax_lse_3d:", softmax_lse_3d, softmax_lse_3d.shape)
         print("p:", p, p.shape)
+    
+    if dropout_p > 0.0:
+        dropout_mask = generate_dropout_mask(p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype)
+        
+        dropout_scale = (1.0 / (1 - dropout_p))
+
+        p = p * dropout_mask * dropout_scale
     # compute gradient wrt v
-    dv = torch.matmul(p.transpose(-2, -1), do.to(torch.float32))
+    dv = torch.matmul(p.transpose(-2, -1), do)
     if DEBUG_CORE:
         print("dv:", dv, dv.shape)
 
@@ -85,14 +84,12 @@ def attention_backward_core_ref_impl(
     dp = torch.matmul(do, v.transpose(-2, -1))
     if DEBUG_CORE:
         print("dp:", dp, dp.shape)
+    if dropout_p > 0.0:
+        dp = dp * dropout_scale  # Add scaling here since reference scales v
 
     # calculate ds using dp
-    if True:
-        delta = torch.sum(o * do, axis=-1).to(torch.float32)  # what OAI kernel uses
-        delta_3d = delta.unsqueeze(-1)
-    else:
-        delta = torch.sum(p * dp, axis=-1) # what the math says you should use
-        delta_3d = delta.unsqueeze(-1)
+    delta = torch.sum(o * do, axis=-1)  # what OAI kernel uses
+    delta_3d = delta.unsqueeze(-1)
     if DEBUG_CORE:
         print("delta_3d:", delta_3d, delta_3d.shape)
     ds = (p * (dp - delta_3d)) * sm_scale
@@ -101,12 +98,12 @@ def attention_backward_core_ref_impl(
    
 
     # compute gradient wrt k
-    dk = torch.matmul(ds.transpose(-2, -1), q.to(torch.float32))
+    dk = torch.matmul(ds.transpose(-2, -1), q)
     if DEBUG_CORE:
         print("dk:", dk, dk.shape)
 
     # compute gradient wrt q
-    dq = torch.matmul(ds, k.to(torch.float32))
+    dq = torch.matmul(ds, k)
     if DEBUG_CORE:
         print("dq:", dq, dq.shape)
 
