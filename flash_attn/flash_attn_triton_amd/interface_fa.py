@@ -62,14 +62,12 @@ def fwd(q,
     
     if dropout_p > 0.0:
         metadata.need_dropout(dropout_p, return_softmax)
-        rng_state = torch.Tensor([metadata.philox_seed, metadata.philox_offset])
+        rng_state = torch.as_tensor([metadata.philox_seed, metadata.philox_offset]) # as_tensors uses the underlying data and doesnot cast
     else:
         rng_state = None
     
     # Check arguments
     metadata.check_args(q, k, v, o)
-
-    rng_state = None
 
     if USE_REF:
         if DEBUG:
@@ -176,6 +174,11 @@ def bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
+    if dropout_p > 0.0:
+        philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
+    else:
+        philox_seed, philox_offset = None, None
+
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
@@ -189,14 +192,15 @@ def bwd(
             softmax_lse,
             softmax_scale,
             causal,
-            dropout_p,
             "bshd",
             None,
             None,
             None,
             None,
+            dropout_p, 
+            philox_seed, 
+            philox_offset,
             False,
-            rng_state
         )
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)
@@ -218,14 +222,15 @@ def bwd(
             softmax_scale,
             alibi_slopes,
             causal,
-            dropout_p,
             "bshd",
             None,
             None,
             None,
             None,
+            dropout_p, 
+            philox_seed, 
+            philox_offset,
             False,
-            rng_state
         )
         delta = delta_triton
 

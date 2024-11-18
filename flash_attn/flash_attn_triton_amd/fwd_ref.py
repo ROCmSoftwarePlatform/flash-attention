@@ -342,12 +342,14 @@ def attention_forward_pytorch_ref_impl(
         print("v:", v, v.shape)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
-        print("dropout_p:", dropout_p)
         print("layout:", layout)
         print("cu_seqlens_q:", cu_seqlens_q)
         print("cu_seqlens_k:", cu_seqlens_k)
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
+        print("dropout_p:", dropout_p)
+        print("philox_seed:", philox_seed)
+        print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
 
      # compute reference

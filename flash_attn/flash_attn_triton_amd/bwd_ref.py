@@ -5,7 +5,7 @@ from .utils import DEBUG
 DEBUG_CORE = DEBUG and False
 
 def attention_backward_core_ref_impl(
-    do, q, k, v, o, softmax_lse, sm_scale, causal, use_exp2
+    do, q, k, v, o, softmax_lse, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2
 ):
     if DEBUG_CORE:
         print()
@@ -134,6 +134,9 @@ def attention_varlen_backward_pytorch_ref_impl(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
+    dropout_p, 
+    philox_seed, 
+    philox_offset,
     use_exp2,
 ):
     # Ensure the layout is 'thd'
@@ -208,6 +211,9 @@ def attention_varlen_backward_pytorch_ref_impl(
             softmax_lse_i,
             sm_scale,
             causal,
+            dropout_p, 
+            philox_seed, 
+            philox_offset,
             use_exp2
         )
 
@@ -251,6 +257,9 @@ def attention_vanilla_backward_pytorch_ref_impl(
     sm_scale,
     causal,
     layout,
+    dropout_p, 
+    philox_seed, 
+    philox_offset,
     use_exp2,
 ):
     if layout == "bshd":
@@ -312,6 +321,9 @@ def attention_vanilla_backward_pytorch_ref_impl(
         softmax_lse,
         sm_scale,
         causal,
+        dropout_p, 
+        philox_seed, 
+        philox_offset,
         use_exp2
     )
 
@@ -359,14 +371,15 @@ def attention_backward_pytorch_ref_impl(
     softmax_lse,
     sm_scale,
     causal,
-    dropout_p,
     layout,
     cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
+    dropout_p, 
+    philox_seed, 
+    philox_offset,
     use_exp2,
-    rng_state
 ):
 
     if DEBUG:
@@ -385,6 +398,9 @@ def attention_backward_pytorch_ref_impl(
         print("cu_seqlens_k:", cu_seqlens_k)
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
+        print("dropout_p:", dropout_p)
+        print("philox_seed:", philox_seed)
+        print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
 
 
@@ -403,6 +419,7 @@ def attention_backward_pytorch_ref_impl(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
+            dropout_p, philox_seed, philox_offset,
             use_exp2,
         )
     else:
@@ -416,6 +433,7 @@ def attention_backward_pytorch_ref_impl(
             sm_scale,
             causal,
             layout,
+            dropout_p, philox_seed, philox_offset,
             use_exp2,
         )
         
