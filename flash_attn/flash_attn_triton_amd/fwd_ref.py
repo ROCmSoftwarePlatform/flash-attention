@@ -100,13 +100,16 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         offsets = torch.arange(L_q * L_k, device=softmax.device)
         offsets = offsets.reshape(1, 1, L_q, L_k) + philox_offset
         
-        # generate random numbers using philox
-        rng_keep = torch.rand(softmax.shape, device=softmax.device, generator=torch.Generator(device=softmax.device).manual_seed(philox_seed)) > dropout_p
+        # Generate random numbers using philox
+        rng_output = torch.rand(softmax.shape, device=softmax.device, 
+                              generator=torch.Generator(device=softmax.device).manual_seed(philox_seed))
+        rng_keep = rng_output > dropout_p
         
-        # apply dropout mask and scale
+        # Apply dropout mask and scale
+        # Set -1 for dropped positions and 1 for kept positions in exp_scores
+        exp_scores = torch.where(rng_keep, exp_scores, -exp_scores)
+        # Zero out dropped positions in softmax and scale kept positions
         softmax = torch.where(rng_keep, softmax / (1 - dropout_p), torch.zeros_like(softmax))
-        exp_scores = torch.where(rng_keep, exp_scores / (1 - dropout_p), torch.zeros_like(exp_scores))
-
     # Compute log-sum-exp
     if use_exp2:
         LN2 = math.log(2)
