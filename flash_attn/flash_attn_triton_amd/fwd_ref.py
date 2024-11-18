@@ -1,6 +1,6 @@
 import torch
 import math
-from .utils import DEBUG
+from .utils import DEBUG, generate_dropout_mask
 
 DEBUG_CORE = DEBUG and False
 
@@ -93,25 +93,15 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         
     # apply dropout if specified
     if dropout_p > 0.0:
-        torch.manual_seed(philox_seed)
-        
-        # generate offsets for each position in the softmax tensor
-        _, L_q, L_k = softmax.shape
-        offsets = torch.arange(L_q * L_k, device=softmax.device)
-        offsets = offsets.reshape(1, 1, L_q, L_k) + philox_offset
-        
-        # Generate random numbers using philox
-        rng_output = torch.rand(softmax.shape, device=softmax.device, 
-                              generator=torch.Generator(device=softmax.device).manual_seed(philox_seed))
-        rng_keep = rng_output > dropout_p
+        dropout_mask = generate_dropout_mask(softmax.shape, dropout_p, philox_seed, philox_offset, softmax.device, softmax.dtype)
         if DEBUG:
-            print("rng_keep:", rng_keep)
+            print("dropout_mask:", dropout_mask)
         
         # Apply dropout mask and scale
         # Set -1 for dropped positions and 1 for kept positions in exp_scores
-        exp_scores = torch.where(rng_keep, exp_scores, -exp_scores)
+        exp_scores = torch.where(dropout_mask, exp_scores, -exp_scores)
         # Zero out dropped positions in softmax and scale kept positions
-        softmax = torch.where(rng_keep, softmax / (1 - dropout_p), torch.zeros_like(softmax))
+        softmax = torch.where(dropout_mask, softmax / (1 - dropout_p), torch.zeros_like(softmax))
     # Compute log-sum-exp
     if use_exp2:
         LN2 = math.log(2)

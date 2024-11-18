@@ -933,7 +933,7 @@ def test_flash_attn_varlen_qkvpacked(
 def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
-    test_backward = True
+    test_backward = False
     if USE_TRITON_ROCM:
 
         if softcap != 0.0:

@@ -1,6 +1,6 @@
 import torch
 import math
-from .utils import DEBUG
+from .utils import DEBUG, generate_dropout_mask
 
 DEBUG_CORE = DEBUG and False
 
@@ -65,6 +65,13 @@ def attention_backward_core_ref_impl(
     else:
         softmax_lse_3d =  softmax_lse.unsqueeze(-1)
         p = torch.exp(attention_scaled_scores - softmax_lse_3d)
+
+    if dropout_p > 0.0:
+        dropout_mask = generate_dropout_mask(
+            p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype
+        )
+        p = p * dropout_mask / (1 - dropout_p)
+
 
     if DEBUG_CORE:
         print("softmax_lse_3d:", softmax_lse_3d, softmax_lse_3d.shape)
