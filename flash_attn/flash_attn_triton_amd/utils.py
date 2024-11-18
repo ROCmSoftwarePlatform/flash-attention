@@ -273,34 +273,8 @@ def is_rdna():
     return is_hip() and triton.runtime.driver.active.get_current_target().arch in ("gfx1030", "gfx1100", "gfx1101",
                                                                                    "gfx1102", "gfx1200", "gfx1201")
 
-def generate_dropout_mask_fwd(shape, dropout_p, seed, offset, device, dtype):
-    torch.manual_seed(seed)
-    # Generate random numbers using philox
-    gen = torch.Generator(device=device).manual_seed(seed)
-    rng_output = torch.rand(shape, device=device, generator=gen)
-    dropout_mask = rng_output > dropout_p
-    return dropout_mask
-
-
-def generate_dropout_mask_new(shape, dropout_p, seed, offset, device, dtype):
-    gen = torch.Generator(device=device)
-    # gen.manual_seed(seed)
-    gen.manual_seed(seed + offset)
-    rand_vals = torch.rand(shape, generator=gen, device=device, dtype=dtype)
-    dropout_mask = rand_vals >= dropout_p
-    return dropout_mask
-
-def generate_dropout_mask_old(shape, dropout_p, seed, offset, device, dtype):
-    torch.manual_seed(seed)
-    gen = torch.Generator(device=device).manual_seed(seed)
-    rand_vals = torch.rand(shape, generator=gen, device=device, dtype=dtype)
-    dropout_mask = rand_vals >= dropout_p
-    return dropout_mask
-
 def generate_dropout_mask(shape, dropout_p, seed, offset, device, dtype):
-    if False:
-        return generate_dropout_mask_new(shape, dropout_p, seed, offset, device, dtype)
-    elif True:
-        return generate_dropout_mask_fwd(shape, dropout_p, seed, offset, device, dtype)
-    else:
-        return generate_dropout_mask_old(shape, dropout_p, seed, offset, device, dtype)
+    torch.manual_seed(seed)
+    gen = torch.Generator(device=device).manual_seed(seed)
+    rand_vals = torch.rand(shape, generator=gen, device=device, dtype=dtype)
+    return rand_vals >= dropout_p
