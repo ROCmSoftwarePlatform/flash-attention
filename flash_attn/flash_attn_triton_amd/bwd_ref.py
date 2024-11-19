@@ -70,10 +70,10 @@ def attention_backward_core_ref_impl(
         print("p:", p, p.shape)
     
     if dropout_p > 0.0:
-        dropout_mask = generate_dropout_mask(p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype)
-        dropout_scale = (1.0 / (1 - dropout_p))
-        p = p * dropout_mask * dropout_scale
+        dropout_mask, dropout_scale= generate_dropout_mask(p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype)
+        p = torch.where(dropout_mask, p * dropout_scale, torch.zeros_like(p))
         if DEBUG_CORE:
+            print("dropout_scale:", dropout_scale)
             print("p after dropout:", p, p.shape)
     
     # compute gradient wrt v
@@ -86,12 +86,12 @@ def attention_backward_core_ref_impl(
     if DEBUG_CORE:
         print("dp:", dp, dp.shape)
     if dropout_p > 0.0:
-        dp = dp * dropout_mask
+        dp = torch.where(dropout_mask, dp * dropout_scale, torch.zeros_like(dp))
         if DEBUG_CORE:
             print("dp after dropout:", dp, dp.shape)
 
     # calculate ds
-    delta = torch.sum(o * do, axis=-1).unsqueeze(-1)     
+    delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
     dscores_scaled = (p * (dp - delta))
     ds = dscores_scaled * sm_scale
     if DEBUG_CORE:
@@ -447,9 +447,10 @@ def attention_backward_pytorch_ref_impl(
     if DEBUG:
         print()
         print("attention_backward_pytorch_ref_impl outputs")
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
-        print("dv:", dv, dv.shape)
         print("delta:", delta, delta.shape)
+        print("dv:", dv, dv.shape)
+        print("dk:", dk, dk.shape)
+        print("dq:", dq, dq.shape)
+        
 
     return dq, dk, dv, delta

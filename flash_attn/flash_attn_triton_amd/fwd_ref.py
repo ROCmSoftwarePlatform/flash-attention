@@ -93,15 +93,13 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         
     # apply dropout if specified
     if dropout_p > 0.0:
-        dropout_mask = generate_dropout_mask(softmax.shape, dropout_p, philox_seed, philox_offset, softmax.device, softmax.dtype)
+        dropout_mask, dropout_scale = generate_dropout_mask(softmax.shape, dropout_p, philox_seed, philox_offset, softmax.device, softmax.dtype)
         if DEBUG:
             print("dropout_mask:", dropout_mask)
-        
         # Apply dropout mask and scale
-        # Set -1 for dropped positions and 1 for kept positions in exp_scores
-        exp_scores = torch.where(dropout_mask, exp_scores, -exp_scores)
-        # Zero out dropped positions in softmax and scale kept positions
-        softmax = torch.where(dropout_mask, softmax / (1 - dropout_p), torch.zeros_like(softmax))
+        # Set -1 for dropped positions and 1 for kept positions in exp_scores 
+        exp_scores = torch.where(dropout_mask, exp_scores, -exp_scores) # TODO: think about if we need to add dropout_scale
+        softmax = torch.where(dropout_mask, softmax * dropout_scale, torch.zeros_like(softmax))
     # Compute log-sum-exp
     if use_exp2:
         LN2 = math.log(2)

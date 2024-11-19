@@ -277,4 +277,4 @@ def generate_dropout_mask(shape, dropout_p, seed, offset, device, dtype):
     torch.manual_seed(seed)
     gen = torch.Generator(device=device).manual_seed(seed)
     rand_vals = torch.rand(shape, generator=gen, device=device, dtype=dtype)
-    return rand_vals >= dropout_p
+    return rand_vals >= dropout_p,  (1.0 / (1 - dropout_p))
