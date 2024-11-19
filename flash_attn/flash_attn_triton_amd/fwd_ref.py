@@ -2,7 +2,7 @@ import torch
 import math
 from .utils import DEBUG, generate_dropout_mask
 
-DEBUG_CORE = DEBUG and False
+DEBUG_CORE = DEBUG and True
 
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2):
     if DEBUG_CORE:
@@ -96,10 +96,15 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         dropout_mask, dropout_scale = generate_dropout_mask(softmax.shape, dropout_p, philox_seed, philox_offset, softmax.device, softmax.dtype)
         if DEBUG:
             print("dropout_mask:", dropout_mask)
+            print("dropout_scale:", dropout_scale)
         # Apply dropout mask and scale
         # Set -1 for dropped positions and 1 for kept positions in exp_scores 
-        exp_scores = torch.where(dropout_mask, exp_scores, -exp_scores) # TODO: think about if we need to add dropout_scale
+        sd_mask = torch.where(dropout_mask, exp_scores, -exp_scores)
         softmax = torch.where(dropout_mask, softmax * dropout_scale, torch.zeros_like(softmax))
+        if DEBUG:
+            print("softmax after dropout:", softmax)
+            print("sd_mask:", sd_mask)
+    
     # Compute log-sum-exp
     if use_exp2:
         LN2 = math.log(2)
@@ -120,7 +125,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
     if DEBUG_CORE:
         print("o:", o, o.shape)
 
-    return o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
+    return o, softmax_lse, sd_mask, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
 def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 

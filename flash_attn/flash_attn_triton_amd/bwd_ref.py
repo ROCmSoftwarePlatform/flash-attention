@@ -91,7 +91,10 @@ def attention_backward_core_ref_impl(
             print("dp after dropout:", dp, dp.shape)
 
     # calculate ds
-    delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
+    if False:
+        delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
+    else:
+        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
     dscores_scaled = (p * (dp - delta))
     ds = dscores_scaled * sm_scale
     if DEBUG_CORE:
