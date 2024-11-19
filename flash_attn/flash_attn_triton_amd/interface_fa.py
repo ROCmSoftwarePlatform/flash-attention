@@ -285,6 +285,9 @@ def varlen_fwd(
         print("window_size_left:", window_size_left)
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
+
+    if dropout_p != 0.0:
+        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
     
     if o is None:
         o = torch.empty_like(q)
@@ -327,7 +330,6 @@ def varlen_fwd(
                                                 v,
                                                 metadata.sm_scale, 
                                                 metadata.causal,
-                                                dropout_p,
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
@@ -343,8 +345,8 @@ def varlen_fwd(
         exp_scores, 
         _, 
         _, 
-        philox_seed, 
-        philox_offset, 
+        _, 
+        _, 
         _, 
         _) = attention_prefill_forward_triton_impl(
                                                             q, 
@@ -363,15 +365,14 @@ def varlen_fwd(
                                                             metadata.max_seqlens_k, 
                                                             metadata.return_scores, 
                                                             metadata.use_exp2)
-        # Init rng_state if dropout is enabled
-        rng_state = torch.Tensor([philox_seed, philox_offset]) if dropout_p > 0.0 else None
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None )
 
-    return o, softmax_lse, exp_scores, rng_state
+
+    return o, softmax_lse, exp_scores, None
 
 def varlen_bwd(
     dout,
@@ -425,6 +426,9 @@ def varlen_bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
+    if dropout_p != 0.0:
+        raise ValueError("dropout is not supported on AMD yet")
+
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
@@ -437,14 +441,12 @@ def varlen_bwd(
             softmax_lse,
             softmax_scale,
             causal,
-            dropout_p,
             "thd",
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
             False,
-            rng_state
         )
         dq.copy_(dq_ref)
         dk.copy_(dk_ref)
@@ -466,14 +468,12 @@ def varlen_bwd(
             softmax_scale,
             alibi_slopes,
             causal,
-            dropout_p,
             "thd",
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
             False,
-            rng_state
         )
         delta = delta_triton
 
