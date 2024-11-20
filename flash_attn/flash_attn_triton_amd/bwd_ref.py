@@ -86,12 +86,13 @@ def attention_backward_core_ref_impl(
         dp_drop = torch.where(dropout_mask, dp * dropout_scale, torch.zeros_like(dp))
         if DEBUG_CORE:
             print("dp:", dp, dp.shape)
+            print("dp_drop:", dp_drop, dp_drop.shape)
 
         # calculate ds
-        if True:
+        if False:
             delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
         else:
-            delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
+            delta = torch.sum(p * dp_drop, axis=-1).unsqueeze(-1)
         dscores_scaled = p * (dp_drop - delta)
         ds = dscores_scaled * sm_scale
         if DEBUG_CORE:
