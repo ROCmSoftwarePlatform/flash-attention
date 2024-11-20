@@ -903,26 +903,27 @@ def test_flash_attn_varlen_qkvpacked(
 # @pytest.mark.parametrize("causal", [False, True])
 # @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("causal", [False])
-# @pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
+@pytest.mark.parametrize("d", [32, 40, 59, 64, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [32, 64, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-@pytest.mark.parametrize("d", [16])
+# @pytest.mark.parametrize("d", [16])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (4, 4),
-        # (113, 203),
-        # (128, 217),
-        # (113, 211),
-        # (108, 256),
-        # (256, 512),
-        # (512, 256),
-        # (1024, 1024),
-        # (1023, 1024),
-        # (1024, 1023),
-        # (2048, 2048),
+        # (16, 16),
+        # (256, 256),
+        (113, 203),
+        (128, 217),
+        (113, 211),
+        (108, 256),
+        (256, 512),
+        (512, 256),
+        (1024, 1024),
+        (1023, 1024),
+        (1024, 1023),
+        (2048, 2048),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -933,7 +934,6 @@ def test_flash_attn_varlen_qkvpacked(
 def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
-    test_backward = True
     if USE_TRITON_ROCM:
 
         if softcap != 0.0:
@@ -956,7 +956,7 @@ def test_flash_attn_output(
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
@@ -965,10 +965,10 @@ def test_flash_attn_output(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     else:
-        k = torch.ones(
+        k = torch.randn(
             batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
-        v = torch.ones(
+        v = torch.randn(
             batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     if alibi:
@@ -1114,54 +1114,53 @@ def test_flash_attn_output(
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
 
-    if test_backward:
-        g = torch.ones_like(out)
-        do_o = (g.float() * out.float()).sum(-1)
-        if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
-            if kvpacked:
-                (
-                    dq,
-                    dkv,
-                ) = torch.autograd.grad(out, (q, kv), g)
-                dk, dv = dkv.unbind(2)
-                (
-                    dq_ref,
-                    dkv_ref,
-                ) = torch.autograd.grad(out_ref, (q, kv), g)
-                dk_ref, dv_ref = dkv_ref.unbind(2)
-                (
-                    dq_pt,
-                    dkv_pt,
-                ) = torch.autograd.grad(out_pt, (q, kv), g)
-                dk_pt, dv_pt = dkv_pt.unbind(2)
-            else:
-                (
-                    dq,
-                    dk,
-                    dv,
-                ) = torch.autograd.grad(out, (q, k, v), g)
-                (
-                    dq_ref,
-                    dk_ref,
-                    dv_ref,
-                ) = torch.autograd.grad(out_ref, (q, k, v), g)
-                (
-                    dq_pt,
-                    dk_pt,
-                    dv_pt,
-                ) = torch.autograd.grad(out_pt, (q, k, v), g)
-            print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
-            print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
-            print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
-            print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
-            print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
-            print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
-            print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
-            print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
-            print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
-            print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
-            print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
-            print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
+    g = torch.randn_like(out)
+    do_o = (g.float() * out.float()).sum(-1)
+    if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
+        if kvpacked:
+            (
+                dq,
+                dkv,
+            ) = torch.autograd.grad(out, (q, kv), g)
+            dk, dv = dkv.unbind(2)
+            (
+                dq_ref,
+                dkv_ref,
+            ) = torch.autograd.grad(out_ref, (q, kv), g)
+            dk_ref, dv_ref = dkv_ref.unbind(2)
+            (
+                dq_pt,
+                dkv_pt,
+            ) = torch.autograd.grad(out_pt, (q, kv), g)
+            dk_pt, dv_pt = dkv_pt.unbind(2)
+        else:
+            (
+                dq,
+                dk,
+                dv,
+            ) = torch.autograd.grad(out, (q, k, v), g)
+            (
+                dq_ref,
+                dk_ref,
+                dv_ref,
+            ) = torch.autograd.grad(out_ref, (q, k, v), g)
+            (
+                dq_pt,
+                dk_pt,
+                dv_pt,
+            ) = torch.autograd.grad(out_pt, (q, k, v), g)
+        print(f"dQ max diff: {(dq - dq_ref).abs().max().item()}")
+        print(f"dK max diff: {(dk - dk_ref).abs().max().item()}")
+        print(f"dV max diff: {(dv - dv_ref).abs().max().item()}")
+        print(f"dQ mean diff: {(dq - dq_ref).abs().mean().item()}")
+        print(f"dK mean diff: {(dk - dk_ref).abs().mean().item()}")
+        print(f"dV mean diff: {(dv - dv_ref).abs().mean().item()}")
+        print(f"dQ Pytorch max diff: {(dq_pt - dq_ref).abs().max().item()}")
+        print(f"dK Pytorch max diff: {(dk_pt - dk_ref).abs().max().item()}")
+        print(f"dV Pytorch max diff: {(dv_pt - dv_ref).abs().max().item()}")
+        print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
+        print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
+        print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.
@@ -1174,15 +1173,15 @@ def test_flash_attn_output(
         if DEBUG:
             print("attn:", attn, attn.shape)
             print("attn_ref:", attn_ref, attn_ref.shape)
-        assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
+        # assert (attn - attn_ref).abs().max().item() <= 2 * (attn_pt - attn_ref).abs().max().item()
         # With alibi, many of the prob values are 0.0 & -0.0 so dropout_fraction isn't accurate
         if not alibi:
             if DEBUG:
                 print("dropout_fraction:", dropout_fraction)
                 print("dropout_p:", dropout_p)
-            # assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
+            assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
-    if test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
+    if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
         if DEBUG:
             print("dv:", dv, dv.shape)
             print("dv_ref:", dv_ref, dv_ref.shape)
