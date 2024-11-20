@@ -428,7 +428,9 @@ def attention_backward_pytorch_ref_impl(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
-            dropout_p, philox_seed, philox_offset,
+            dropout_p, 
+            philox_seed, 
+            philox_offset,
             use_exp2,
         )
     else:
@@ -442,7 +444,9 @@ def attention_backward_pytorch_ref_impl(
             sm_scale,
             causal,
             layout,
-            dropout_p, philox_seed, philox_offset,
+            dropout_p, 
+            philox_seed, 
+            philox_offset,
             use_exp2,
         )
         
