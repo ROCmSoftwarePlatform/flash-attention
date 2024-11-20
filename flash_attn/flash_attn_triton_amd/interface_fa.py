@@ -286,9 +286,6 @@ def varlen_fwd(
         print("window_size_right:", window_size_right)
         print("gen_:", gen_)
 
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD's Triton Backend yet")
-    
     if o is None:
         o = torch.empty_like(q)
 
@@ -309,6 +306,9 @@ def varlen_fwd(
     
     if dropout_p > 0.0:
         metadata.need_dropout(dropout_p, return_softmax)
+        rng_state = torch.as_tensor([metadata.philox_seed, metadata.philox_offset]) # as_tensors uses the underlying data and doesnot cast
+    else:
+        rng_state = None
     
     # Check arguments
     metadata.check_args(q, k, v, o)
@@ -320,7 +320,7 @@ def varlen_fwd(
             print("Using reference implementation")
         (output, 
         softmax_lse, 
-        exp_scores, 
+        sd_mask, 
         _, 
         _,
         _, 
@@ -335,6 +335,9 @@ def varlen_fwd(
                                                 metadata.cu_seqlens_k,
                                                 metadata.max_seqlens_q, 
                                                 metadata.max_seqlens_k,
+                                                metadata.dropout_p, 
+                                                metadata.philox_seed,
+                                                metadata.philox_offset,
                                                 metadata.use_exp2)
         o.copy_(output)
     else:
@@ -342,7 +345,7 @@ def varlen_fwd(
             print("Using Triton implementation")
         (_, 
         softmax_lse, 
-        exp_scores, 
+        sd_mask, 
         _, 
         _, 
         _, 
@@ -356,23 +359,25 @@ def varlen_fwd(
                                                             metadata.sm_scale, 
                                                             metadata.alibi_slopes, 
                                                             metadata.causal, 
-                                                            metadata.bias, 
-                                                            metadata.dropout_p, 
+                                                            metadata.bias,
                                                             metadata.layout, 
                                                             metadata.cu_seqlens_q, 
                                                             metadata.cu_seqlens_k,
                                                             metadata.max_seqlens_q, 
-                                                            metadata.max_seqlens_k, 
+                                                            metadata.max_seqlens_k,
+                                                            metadata.dropout_p, 
+                                                            metadata.philox_seed,
+                                                            metadata.philox_offset, 
                                                             metadata.return_scores, 
                                                             metadata.use_exp2)
     if DEBUG:
         print("varlen_fwd outputs")
         print("o:", o, o.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None )
+        print("sd_mask:", sd_mask, sd_mask.shape if sd_mask is not None else None )
 
 
-    return o, softmax_lse, exp_scores, None
+    return o, softmax_lse, sd_mask, rng_state
 
 def varlen_bwd(
     dout,
@@ -426,9 +431,10 @@ def varlen_bwd(
         print("gen_:", gen_)
         print("rng_state:", rng_state)
 
-    if dropout_p != 0.0:
-        raise ValueError("dropout is not supported on AMD yet")
-
+    if dropout_p > 0.0:
+        philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
+    else:
+        philox_seed, philox_offset = None, None
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
@@ -446,6 +452,9 @@ def varlen_bwd(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
+            dropout_p, 
+            philox_seed,
+            philox_offset, 
             False,
         )
         dq.copy_(dq_ref)
@@ -473,6 +482,9 @@ def varlen_bwd(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
+            dropout_p, 
+            philox_seed,
+            philox_offset,
             False,
         )
         delta = delta_triton
