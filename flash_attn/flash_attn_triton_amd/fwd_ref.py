@@ -104,6 +104,8 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         if DEBUG:
             print("softmax after dropout:", softmax)
             print("sd_mask:", sd_mask)
+    else:
+        sd_mask = exp_scores
     
     # Compute log-sum-exp
     if use_exp2:

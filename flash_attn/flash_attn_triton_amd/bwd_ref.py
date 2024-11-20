@@ -68,7 +68,7 @@ def attention_backward_core_ref_impl(
     if DEBUG_CORE:
         print("softmax_lse_3d:", softmax_lse_3d, softmax_lse_3d.shape)
         print("p:", p, p.shape)
-    
+
     if dropout_p > 0.0:
         dropout_mask, dropout_scale= generate_dropout_mask(p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype)
         p = torch.where(dropout_mask, p * dropout_scale, torch.zeros_like(p))
@@ -85,17 +85,10 @@ def attention_backward_core_ref_impl(
     dp = torch.matmul(do, v.transpose(-2, -1))
     if DEBUG_CORE:
         print("dp:", dp, dp.shape)
-    if dropout_p > 0.0:
-        dp = torch.where(dropout_mask, dp * dropout_scale, torch.zeros_like(dp))
-        if DEBUG_CORE:
-            print("dp after dropout:", dp, dp.shape)
 
     # calculate ds
-    if False:
-        delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
-    else:
-        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
-    dscores_scaled = (p * (dp - delta))
+    delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
+    dscores_scaled = p * (dp - delta)
     ds = dscores_scaled * sm_scale
     if DEBUG_CORE:
         print("delta:", delta, delta.shape)
@@ -118,7 +111,7 @@ def attention_backward_core_ref_impl(
     dk = dk.to(torch.float16)
     dv = dv.to(torch.float16)
     # remove d dim with size 1
-    delta = delta.squeeze(-1) 
+    delta = delta.squeeze(-1)
 
     if DEBUG_CORE:
         print("attention_backward_core_ref_impl output")
@@ -388,7 +381,7 @@ def attention_backward_pytorch_ref_impl(
     dropout_p, 
     philox_seed, 
     philox_offset,
-    use_exp2,
+    use_exp2
 ):
 
     if DEBUG:
@@ -458,6 +451,5 @@ def attention_backward_pytorch_ref_impl(
         print("dv:", dv, dv.shape)
         print("dk:", dk, dk.shape)
         print("dq:", dq, dq.shape)
-        
 
     return dq, dk, dv, delta
