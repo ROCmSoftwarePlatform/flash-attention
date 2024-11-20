@@ -17,9 +17,14 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
+
+    # cast to float32
+    q = q.to(torch.float32)
+    k = k.to(torch.float32)
+    v = v.to(torch.float32)
     
     # Compute attention scores
-    attention_scores = torch.matmul(q.to(torch.float32), k.transpose(-2, -1).to(torch.float32))
+    attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if DEBUG_CORE:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
@@ -123,11 +128,16 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
     # Compute output
-    o = torch.matmul(softmax, v.to(torch.float32)).to(torch.float16)
+    o = torch.matmul(softmax, v)
     if DEBUG_CORE:
         print("o:", o, o.shape)
 
-    return o, softmax_lse, sd_mask, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores
+    # cast back to original dtype
+    o = o.to(torch.float16)
+    # softmax_lse = softmax_lse.to(torch.float16) # NOTE: if you cast lse to fp16 it cause accuracy issues. keep fp32
+    sd_mask = sd_mask.to(torch.float16)
+
+    return o, softmax_lse, sd_mask
 
 def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
@@ -164,7 +174,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
         v = v.reshape(batch_size * nheads_k, seq_len_k, head_dim)
 
     # Call the core attention function
-    o, softmax_lse, exp_scores, softmax, attention_shifted_scaled_scores, attention_scaled_scores, attention_scores = attention_forward_core_ref_impl(
+    o, softmax_lse, sd_mask = attention_forward_core_ref_impl(
         q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2
     )
 
@@ -174,27 +184,19 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
         o = o.reshape(batch_size, nheads_q, seq_len_q, head_dim)
         softmax_lse = softmax_lse.reshape(batch_size, nheads_k, group_size, seq_len_q)
         softmax_lse = softmax_lse.reshape(batch_size, nheads_q, seq_len_q)
-        exp_scores = exp_scores.reshape(batch_size, nheads_k, group_size, seq_len_q, seq_len_k)
-        exp_scores = exp_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
-        softmax = softmax.reshape(batch_size, nheads_k, group_size, seq_len_q, seq_len_k)
-        softmax = softmax.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
-        attention_scaled_scores = attention_scaled_scores.reshape(batch_size, nheads_k, group_size, seq_len_q, seq_len_k)
-        attention_scaled_scores = attention_scaled_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        sd_mask = sd_mask.reshape(batch_size, nheads_k, group_size, seq_len_q, seq_len_k)
+        sd_mask = sd_mask.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
     else:
         # Standard case
         o = o.reshape(batch_size, nheads_q, seq_len_q, head_dim)
         softmax_lse = softmax_lse.reshape(batch_size, nheads_q, seq_len_q)
-        exp_scores = exp_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
-        softmax = softmax.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
-        attention_shifted_scaled_scores = attention_shifted_scaled_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
-        attention_scaled_scores = attention_scaled_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
-        attention_scores = attention_scores.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
+        sd_mask = sd_mask.reshape(batch_size, nheads_q, seq_len_q, seq_len_k)
 
     # Restore original layout if necessary
     if layout == "bshd":
         o = o.transpose(1, 2)
 
-    return o, softmax_lse, exp_scores, None, None, None, None
+    return o, softmax_lse, sd_mask
 
 
 def attention_varlen_forward_pytorch_ref_impl(
@@ -298,8 +300,8 @@ def attention_varlen_forward_pytorch_ref_impl(
             # Outputs are already in the correct shape
             pass
 
-        # Convert back to 'thd' layout and float16
-        o_i = o_i.permute(1, 0, 2).to(torch.float16)  # [L_q_i, nheads_q, head_dim]
+        # Convert back to 'thd' layout
+        o_i = o_i.permute(1, 0, 2)  # [L_q_i, nheads_q, head_dim]
         softmax_lse_i = softmax_lse_i.permute(1, 0)  # [L_q_i, nheads_q]
         sd_mask_i = sd_mask_i # [nheads_q, L_q_i, L_k_i]
 
@@ -359,15 +361,7 @@ def attention_forward_pytorch_ref_impl(
 
      # compute reference
     if layout == "thd":
-        (
-            o_ref,
-            softmax_lse_ref,
-            sd_mask_ref,
-            _,
-            _,
-            _,
-            _,
-        ) = attention_varlen_forward_pytorch_ref_impl(
+        o_ref, softmax_lse_ref, sd_mask_ref = attention_varlen_forward_pytorch_ref_impl(
             q.clone(), 
             k.clone(), 
             v.clone(), 
@@ -384,15 +378,7 @@ def attention_forward_pytorch_ref_impl(
             use_exp2,
         )
     else:
-        (
-            o_ref,
-            softmax_lse_ref,
-            sd_mask_ref,
-            _,
-            _,
-            _,
-            _,
-        ) = attention_vanilla_forward_pytorch_ref_impl(q.clone(),
+        o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(q.clone(),
                                                        k.clone(),
                                                        v.clone(),
                                                        sm_scale,
@@ -410,19 +396,4 @@ def attention_forward_pytorch_ref_impl(
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
         print("sd_mask_ref:", sd_mask_ref, sd_mask_ref.shape if sd_mask_ref is not None else None)
 
-    return (
-            o_ref,
-            softmax_lse_ref,
-            sd_mask_ref,
-            _,
-            _,
-            _,
-            _,
-    )
-
-
-def compute_alibi_tensor_ref(alibi_slopes, seqlen_q, seqlen_k):
-    q_idx = torch.arange(seqlen_q, dtype=torch.int32, device="cuda").unsqueeze(-1)  # (N_CTX_Q, 1)
-    k_idx = torch.arange(seqlen_k, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, N_CTX_K)
-    relative_pos = torch.abs(q_idx + seqlen_k - seqlen_q - k_idx)  # (N_CTX_Q, N_CTX_K)
-    return -1 * alibi_slopes.unsqueeze(-1).unsqueeze(-1) * relative_pos  # (Z, H, N_CTX_Q, N_CTX_K)
+    return o_ref, softmax_lse_ref, sd_mask_ref

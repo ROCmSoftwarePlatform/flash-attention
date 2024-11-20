@@ -72,13 +72,7 @@ def fwd(q,
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        (output, 
-        softmax_lse, 
-        exp_scores, 
-        _, 
-        _,
-        _, 
-        _) = attention_forward_pytorch_ref_impl(
+        output, softmax_lse, exp_scores = attention_forward_pytorch_ref_impl(
                                                 q, 
                                                 k, 
                                                 v,
@@ -97,12 +91,7 @@ def fwd(q,
     else:
         if DEBUG:
             print("Using Triton implementation")
-        (_, 
-        softmax_lse, 
-        exp_scores, 
-        _, 
-        _, 
-        ) = attention_prefill_forward_triton_impl(
+        output, softmax_lse, exp_scores = attention_prefill_forward_triton_impl(
                                                 q, 
                                                 k, 
                                                 v, 
