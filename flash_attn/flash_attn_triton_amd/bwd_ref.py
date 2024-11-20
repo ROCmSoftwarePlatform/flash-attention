@@ -71,40 +71,67 @@ def attention_backward_core_ref_impl(
 
     if dropout_p > 0.0:
         dropout_mask, dropout_scale= generate_dropout_mask(p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype)
-        p = torch.where(dropout_mask, p * dropout_scale, torch.zeros_like(p))
+        p_drop = torch.where(dropout_mask, p * dropout_scale, torch.zeros_like(p))
         if DEBUG_CORE:
             print("dropout_scale:", dropout_scale)
-            print("p after dropout:", p, p.shape)
+            print("p after dropout:", p_drop, p_drop.shape)
+        
+        # compute gradient wrt v
+        dv = torch.matmul(p_drop.transpose(-2, -1), do)
+        if DEBUG_CORE:
+            print("dv:", dv, dv.shape)
+
+        # compute dp
+        dp = torch.matmul(do, v.transpose(-2, -1))
+        dp_drop = torch.where(dropout_mask, dp * dropout_scale, torch.zeros_like(dp))
+        if DEBUG_CORE:
+            print("dp:", dp, dp.shape)
+
+        # calculate ds
+        if True:
+            delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
+        else:
+            delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
+        dscores_scaled = p * (dp_drop - delta)
+        ds = dscores_scaled * sm_scale
+        if DEBUG_CORE:
+            print("delta:", delta, delta.shape)
+            print("dscores_scaled:", dscores_scaled, dscores_scaled.shape)
+            print("ds:", ds, ds.shape)
+
+        # compute gradient wrt k & q
+        dk = torch.matmul(ds.transpose(-2, -1), q)
+        dq = torch.matmul(ds, k)
+        if DEBUG_CORE:
+            print("dk:", dk, dk.shape)
+            print("dq:", dq, dq.shape)
+    else:
+        # compute gradient wrt v
+        dv = torch.matmul(p.transpose(-2, -1), do)
+        if DEBUG_CORE:
+            print("dv:", dv, dv.shape)
+
+        # compute dp
+        dp = torch.matmul(do, v.transpose(-2, -1))
+        if DEBUG_CORE:
+            print("dp:", dp, dp.shape)
+
+        # calculate ds
+        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
+        dscores_scaled = p * (dp - delta)
+        ds = dscores_scaled * sm_scale
+        if DEBUG_CORE:
+            print("delta:", delta, delta.shape)
+            print("dscores_scaled:", dscores_scaled, dscores_scaled.shape)
+            print("ds:", ds, ds.shape)
     
-    # compute gradient wrt v
-    dv = torch.matmul(p.transpose(-2, -1), do)
-    if DEBUG_CORE:
-        print("dv:", dv, dv.shape)
 
-    # compute dp
-    dp = torch.matmul(do, v.transpose(-2, -1))
-    if DEBUG_CORE:
-        print("dp:", dp, dp.shape)
-
-    # calculate ds
-    delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
-    dscores_scaled = p * (dp - delta)
-    ds = dscores_scaled * sm_scale
-    if DEBUG_CORE:
-        print("delta:", delta, delta.shape)
-        print("dscores_scaled:", dscores_scaled, dscores_scaled.shape)
-        print("ds:", ds, ds.shape)
-   
-
-    # compute gradient wrt k
-    dk = torch.matmul(ds.transpose(-2, -1), q)
-    if DEBUG_CORE:
-        print("dk:", dk, dk.shape)
-
-    # compute gradient wrt q
-    dq = torch.matmul(ds, k)
-    if DEBUG_CORE:
-        print("dq:", dq, dq.shape)
+        # compute gradient wrt k & q
+        dk = torch.matmul(ds.transpose(-2, -1), q)
+        dq = torch.matmul(ds, k)
+        if DEBUG_CORE:
+            print("dk:", dk, dk.shape)
+            print("dq:", dq, dq.shape)
 
     # cast back to original dtype
     dq = dq.to(torch.float16)
