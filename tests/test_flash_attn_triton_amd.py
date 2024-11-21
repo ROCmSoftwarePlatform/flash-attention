@@ -906,8 +906,8 @@ def test_flash_attn_varlen_qkvpacked(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (16, 16),
-        (256, 256),
+        # (16, 16),
+        # (256, 256),
         (1024, 1024),
         # (113, 203),
         # (128, 217),

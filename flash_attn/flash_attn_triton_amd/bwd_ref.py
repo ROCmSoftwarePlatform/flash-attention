@@ -18,6 +18,9 @@ def attention_backward_core_ref_impl(
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
+        print("dropout_p:", dropout_p)
+        print("philox_seed:", philox_seed)
+        print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
     
     # cast to float32
@@ -118,7 +121,7 @@ def attention_backward_core_ref_impl(
             print("dp:", dp, dp.shape)
 
         # calculate ds
-        delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
+        delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
         dscores_scaled = p * (dp - delta)
         ds = dscores_scaled * sm_scale
         if DEBUG_CORE:
