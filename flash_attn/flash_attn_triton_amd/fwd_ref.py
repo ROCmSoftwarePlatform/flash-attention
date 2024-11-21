@@ -1,6 +1,7 @@
 import torch
 import math
-from .utils import DEBUG, generate_dropout_mask
+from .utils import DEBUG
+from .common import generate_dropout_mask_ref
 
 DEBUG_CORE = DEBUG and False
 
@@ -98,7 +99,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         
     # apply dropout if specified
     if dropout_p > 0.0:
-        dropout_mask, dropout_scale = generate_dropout_mask(softmax.shape, dropout_p, philox_seed, philox_offset, softmax.device, softmax.dtype)
+        dropout_mask, dropout_scale = generate_dropout_mask_ref(softmax.shape, dropout_p, philox_seed, philox_offset, softmax.device, softmax.dtype)
         if DEBUG:
             print("dropout_mask:", dropout_mask)
             print("dropout_scale:", dropout_scale)
