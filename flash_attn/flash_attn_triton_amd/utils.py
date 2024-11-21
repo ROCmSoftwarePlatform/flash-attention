@@ -87,9 +87,9 @@ class MetaData():
     def need_causal(self):
         self.causal = True
 
-    def need_dropout(self, dropout_p, return_scores):
+    def need_dropout(self, dropout_p):
         self.dropout_p = dropout_p
-        self.return_scores = return_scores
+        self.return_scores = True
         self.philox_seed, self.philox_offset = 0x1BF58, 0x1D4B49
 
     def check_args(self, q, k, v, o):

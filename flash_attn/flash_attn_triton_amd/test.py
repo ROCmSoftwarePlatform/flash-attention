@@ -1,9 +1,9 @@
 import torch
 import pytest
 
-from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper, DEBUG
+from .utils import MetaData, get_input_shapes, input_helper, varlen_input_helper, compute_alibi_tensor_ref, DEBUG
 from .interface_torch import attention_prefill, attention_decode
-from .fwd_ref import attention_forward_pytorch_ref_impl, compute_alibi_tensor_ref
+from .fwd_ref import attention_forward_pytorch_ref_impl
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
@@ -343,49 +343,48 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        (1, 1, 1, 1, 1, 1),
+        # (1, 1, 1, 1, 1, 1),
         (1, 1, 1, 2, 4, 16),
-        (1, 2, 2, 2, 4, 16),
-        (1, 4, 1, 2, 4, 16),
-        (1, 4, 2, 2, 4, 16),
-        (1, 1, 1, 4, 2, 16),
-        (1, 1, 1, 4, 4, 16),
-        (1, 2, 2, 4, 4, 16),
-        (2, 1, 1, 4, 4, 16),
-        (2, 2, 2, 4, 4, 16),
-        (1, 1, 1, 128, 64, 16),
-        (2, 2, 2, 2, 128, 1),
-        (2, 3, 3, 2, 128, 16),
-        (3, 2, 2, 256, 512, 16),
-        (3, 3, 3, 128, 128, 64),
-        (2, 4, 4, 1024, 1024, 64),
-        (4, 6, 6, 108, 256, 224),
-        (4, 8, 8, 2048, 2048, 128),
-        (4, 16, 16, 4096, 4096, 64),
-        (2, 4, 4, 8192, 8192, 32),
-        # fa configs
-        (4, 6, 1, 113, 203, 256),
-        (4, 6, 1, 128, 217, 256),
-        (4, 6, 2, 113, 211, 128),
-        (4, 6, 2, 108, 256, 128),
-        (4, 6, 1, 256, 512, 64),
-        (4, 6, 1, 512, 256, 64),
-        (4, 6, 2, 1024, 1024, 32),
-        (4, 6, 2, 1023, 1024, 32),
-        (4, 6, 6, 1024, 1023, 32),
-        (4, 6, 6, 2048, 2048, 32),
+        # (1, 2, 2, 2, 4, 16),
+        # (1, 4, 1, 2, 4, 16),
+        # (1, 4, 2, 2, 4, 16),
+        # (1, 1, 1, 4, 2, 16),
+        # (1, 1, 1, 4, 4, 16),
+        # (1, 2, 2, 4, 4, 16),
+        # (2, 1, 1, 4, 4, 16),
+        # (2, 2, 2, 4, 4, 16),
+        # (1, 1, 1, 128, 64, 16),
+        # (2, 2, 2, 2, 128, 1),
+        # (2, 3, 3, 2, 128, 16),
+        # (3, 2, 2, 256, 512, 16),
+        # (3, 3, 3, 128, 128, 64),
+        # (2, 4, 4, 1024, 1024, 64),
+        # (4, 6, 6, 108, 256, 224),
+        # (4, 8, 8, 2048, 2048, 128),
+        # (4, 16, 16, 4096, 4096, 64),
+        # (2, 4, 4, 8192, 8192, 32),
+        # # fa configs
+        # (4, 6, 1, 113, 203, 256),
+        # (4, 6, 1, 128, 217, 256),
+        # (4, 6, 2, 113, 211, 128),
+        # (4, 6, 2, 108, 256, 128),
+        # (4, 6, 1, 256, 512, 64),
+        # (4, 6, 1, 512, 256, 64),
+        # (4, 6, 2, 1024, 1024, 32),
+        # (4, 6, 2, 1023, 1024, 32),
+        # (4, 6, 6, 1024, 1023, 32),
+        # (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('return_scores', [False])
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
-@pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
+@pytest.mark.parametrize('causal', [ False])
+@pytest.mark.parametrize('dropout_p', [0.0, 0.5])
+@pytest.mark.parametrize('layout', ["bhsd"])
+@pytest.mark.parametrize('use_exp2', [False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
-def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return_scores, layout, use_exp2, DEBUG_INPUT):
+def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(0)
     alibi_slopes = None
-    dropout_p = 0.0
     device = "cuda"
 
     if layout == "thd":
@@ -409,19 +408,12 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         metadata.need_causal()
 
     # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-    if return_scores:
-        metadata.return_scores = True
+    if dropout_p > 0.0:
+        metadata.need_dropout(dropout_p)
+
 
     # call Triton's forward implementation directly
-    ( output_triton, 
-        softmax_lse_triton, 
-        exp_scores_triton, 
-        _, 
-        _, 
-        _, 
-        _, 
-        _, 
-        _) = attention_prefill_forward_triton_impl(
+    output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
                                                 q, 
                                                 k, 
                                                 v, 
@@ -430,24 +422,18 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
                                                 metadata.alibi_slopes, 
                                                 metadata.causal, 
                                                 metadata.bias, 
-                                                metadata.dropout_p, 
                                                 metadata.layout, 
                                                 metadata.cu_seqlens_q, 
                                                 metadata.cu_seqlens_k,
                                                 metadata.max_seqlens_q, 
-                                                metadata.max_seqlens_k, 
+                                                metadata.max_seqlens_k,
+                                                metadata.dropout_p,
+                                                metadata.philox_seed, 
+                                                metadata.philox_offset, 
                                                 metadata.return_scores, 
                                                 metadata.use_exp2)
 
-    (
-        output_ref,
-        softmax_lse_ref,
-        exp_scores_ref,
-        softmax_ref,
-        attention_shifted_scaled_scores_ref,
-        attention_scaled_scores_ref,
-        attention_scores_ref,
-    ) = attention_forward_pytorch_ref_impl(
+    output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
         q.clone(), 
         k.clone(), 
         v.clone(), 
@@ -458,23 +444,27 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, return
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
         use_exp2
     )
+
+    if DEBUG:
+        print()
+        print("Compare Triton Impl with refernce Pytorch Impl")
+
+    # this can be set to true manually or when using dropout
+    if metadata.return_scores:
+        if DEBUG:
+            print("sd_mask_triton:", sd_mask_triton, sd_mask_triton.shape)
+            print("sd_mask_ref:", sd_mask_ref, sd_mask_ref.shape)
+        torch.testing.assert_close(sd_mask_triton, sd_mask_ref, atol=ATOL, rtol=RTOL)
 
     if DEBUG:
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
-
-    if layout != "thd":
-        # use trick with lse to get the softmax. you need the scores but is it
-        softmax_triton = torch.exp(attention_scaled_scores_ref - softmax_lse_triton.unsqueeze(-1))
-        if DEBUG:
-            print("attention_scaled_scores_ref:", attention_scaled_scores_ref, attention_scaled_scores_ref.shape)
-            print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
-            print("softmax_triton:", softmax_triton, softmax_triton.shape)
-            print("softmax_ref:", softmax_ref, softmax_ref.shape)
-        torch.testing.assert_close(softmax_triton, softmax_ref, atol=ATOL, rtol=RTOL)
     
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)

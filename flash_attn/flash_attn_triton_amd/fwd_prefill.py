@@ -634,4 +634,4 @@ def attention_prefill_forward_triton_impl(
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
         print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None)
 
-    return o, softmax_lse, exp_scores, scores, scores_scaled_shifted
+    return o, softmax_lse, exp_scores.to(o.dtype) if return_scores else None 
