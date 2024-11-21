@@ -90,15 +90,6 @@ def test_dropout():
         print("✓ Implementations match!")
     else:
         print("✗ Implementations differ!")
-        # Print a small sample of differences if they exist
-        if False and  matches < 1.0:
-            diff_mask = triton_output != torch_output
-            diff_indices = diff_mask.nonzero() 
-            print("\nDifferences (row, col):")
-            for idx in diff_indices:
-                row, col = idx.cpu()[0].item(),idx.cpu()[1].item()
-                print(f"Position ({row}, {col}): Triton={triton_output[row,col].item()}, PyTorch={torch_output[row,col].item()}")
-    
     return triton_output, torch_output
 
 
