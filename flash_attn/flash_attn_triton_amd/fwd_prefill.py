@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .common import dropout_mask, cdiv_fn
+from .common import dropout_mask
 from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, DEBUG, AUTOTUNE
 
 # Convenience function to load with optional boundary checks.
@@ -293,14 +293,14 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
     # inf written to LSE. We don't need to do any GEMMs in this case.
     # This block of code determines what N is, and if this WG is operating
     # on those M rows.
-    n_blocks = cdiv_fn(seqlen_k, BLOCK_N)
+    n_blocks = tl.cdiv(seqlen_k, BLOCK_N)
     if (IS_CAUSAL):
         # If seqlen_q == seqlen_k, the attn scores are a square matrix.
         # If seqlen_q != seqlen_k, attn scores are rectangular which means
         # the causal mask boundary is bottom right aligned, and ends at either
         # the top edge (seqlen_q < seqlen_k) or left edge.
         # This captures the decrease in n_blocks if we have a rectangular attn matrix
-        n_blocks_seqlen = cdiv_fn((start_m + 1) * BLOCK_M + seqlen_k - seqlen_q, BLOCK_N)
+        n_blocks_seqlen = tl.cdiv((start_m + 1) * BLOCK_M + seqlen_k - seqlen_q, BLOCK_N)
         # This is what adjusts the block_max for the current WG, only
         # if IS_CAUSAL. Otherwise we want to always iterate through all n_blocks
         n_blocks = min(n_blocks, n_blocks_seqlen)

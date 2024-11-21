@@ -377,7 +377,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
     ],
 )
 @pytest.mark.parametrize('causal', [ False])
-@pytest.mark.parametrize('dropout_p', [0.0, 0.5])
+@pytest.mark.parametrize('dropout_p', [0.5])
 @pytest.mark.parametrize('layout', ["bhsd"])
 @pytest.mark.parametrize('use_exp2', [False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues

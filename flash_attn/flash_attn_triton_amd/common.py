@@ -2,10 +2,6 @@ import triton
 import triton.language as tl
 
 @triton.jit
-def cdiv_fn(x, y):
-    return (x + y - 1) // y
-
-@triton.jit
 def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
     # calculate RNG offsets using the philox_offset and strides
     ms = tl.arange(0, m)
