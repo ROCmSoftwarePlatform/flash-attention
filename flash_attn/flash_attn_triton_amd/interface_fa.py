@@ -72,7 +72,7 @@ def fwd(q,
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        output, softmax_lse, exp_scores = attention_forward_pytorch_ref_impl(
+        output, softmax_lse, sd_mask = attention_forward_pytorch_ref_impl(
                                                 q, 
                                                 k, 
                                                 v,
@@ -91,7 +91,7 @@ def fwd(q,
     else:
         if DEBUG:
             print("Using Triton implementation")
-        output, softmax_lse, exp_scores = attention_prefill_forward_triton_impl(
+        output, softmax_lse, sd_mask = attention_prefill_forward_triton_impl(
                                                 q, 
                                                 k, 
                                                 v, 
@@ -115,9 +115,9 @@ def fwd(q,
         print("fwd outputs")
         print("o:", o, o.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None )
+        print("exp_scores:", sd_mask, sd_mask.shape if sd_mask is not None else None )
 
-    return o, softmax_lse, exp_scores, rng_state
+    return o, softmax_lse, sd_mask, rng_state
 
 def bwd(
     dout,

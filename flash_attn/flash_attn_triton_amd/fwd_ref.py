@@ -2,7 +2,7 @@ import torch
 import math
 from .utils import DEBUG, generate_dropout_mask
 
-DEBUG_CORE = DEBUG and True
+DEBUG_CORE = DEBUG and False
 
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2):
     if DEBUG_CORE:
@@ -313,15 +313,7 @@ def attention_varlen_forward_pytorch_ref_impl(
         
         sd_mask[i, :, :seqlen_q, :seqlen_k] = sd_mask_i
 
-    return (
-        o,
-        softmax_lse,
-        sd_mask,
-        None,
-        None,
-        None,
-        None,
-    )
+    return o, softmax_lse, sd_mask
 
 
 
