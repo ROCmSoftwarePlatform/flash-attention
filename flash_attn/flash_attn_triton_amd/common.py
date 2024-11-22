@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def dropout_mask(philox_seed, philox_offset, dropout_p, m: tl.constexpr, n: tl.constexpr, stride):
     # calculate RNG offsets using the philox_offset and strides
@@ -63,14 +64,45 @@ def kernel_that_uses_dropout(
     tl.store(output_ptrs, block_mask, mask=mask)
 
 
+def tl_rand_ref(philox_seed, rng_offsets):
+    device = rng_offsets.device
+    # Ensure rng_offsets is contiguous
+    rng_offsets = rng_offsets.contiguous()
+    N = rng_offsets.numel()
+    # Prepare output tensor
+    output = torch.empty_like(rng_offsets, dtype=torch.float32)
+    # Define block size
+    BLOCK_SIZE = 1024
+
+    @triton.jit
+    def _tl_rand_kernel(output_ptr, offsets_ptr, philox_seed, N,
+                        BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(0)
+        idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = idx < N
+        offsets = tl.load(offsets_ptr + idx, mask=mask, other=0)
+        r = tl.rand(philox_seed, offsets)
+        tl.store(output_ptr + idx, r, mask=mask)
+
+    grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']),)
+
+    # Launch the Triton kernel
+    _tl_rand_kernel[grid](
+        output_ptr=output,
+        offsets_ptr=rng_offsets,
+        philox_seed=philox_seed,
+        N=N,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    return output
+
 def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device):
     # calculate RNG offsets (same as in Triton)
     ms = torch.arange(0, m, device=device)
     ns = torch.arange(0, n, device=device)
-    rng_offsets = (philox_offset + ms[:, None] * stride + ns[None, :]).to(torch.uint32)
+    rng_offsets = (philox_offset + ms[:, None] * stride + ns[None, :]).to(torch.uint32).to(device=device)
 
-    # generate random numbers (using torch.rand for simplicity)
-    rng_output = torch.rand((m, n), device=device)
+    rng_output = tl_rand_ref(philox_seed, rng_offsets) 
 
     # apply dropout mask
     rng_keep = rng_output > dropout_p
@@ -79,7 +111,15 @@ def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device
 
 
 def kernel_that_uses_dropout_ref(
-    output_tensor, philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, shape, device
+    output_tensor,
+    philox_seed,
+    philox_offset,
+    dropout_p,
+    BLOCK_M,
+    BLOCK_N,
+    shape,
+    device,
+    use_triton=False,
 ):
     M, N = shape
     output = output_tensor
@@ -87,18 +127,14 @@ def kernel_that_uses_dropout_ref(
         for j in range(0, N, BLOCK_N):
             m = min(BLOCK_M, M - i)
             n = min(BLOCK_N, N - j)
-            # Calculate the stride (assuming row-major order)
-            stride = N
-            # Compute the starting offset for the current tile
-            tile_offset = philox_offset + i * N + j
             # Generate the dropout mask for the current tile
             mask = dropout_mask_ref(
                 philox_seed=philox_seed,
-                philox_offset=tile_offset,
+                philox_offset=philox_offset,
                 dropout_p=dropout_p,
                 m=m,
                 n=n,
-                stride=stride,
+                stride=N,
                 device=device,
             )
             # Store the result in the output tensor
@@ -108,8 +144,9 @@ def kernel_that_uses_dropout_ref(
 
 def test_dropout():
     # Set test parameters
-    shape = (1024, 1024)
-    BLOCK_M, BLOCK_N = 32, 32
+    shape = (8, 8)
+    # shape = (1024, 1024)
+    BLOCK_M, BLOCK_N = 8, 8
     dropout_p = 0.5
     philox_seed, philox_offset = 0x1BF58, 0x1D4B49
     device = "cuda"
@@ -144,6 +181,7 @@ def test_dropout():
         BLOCK_N=BLOCK_N,
         shape=shape,
         device=device,
+        use_triton=False,
     )
     print("torch_output:", torch_output)
 
