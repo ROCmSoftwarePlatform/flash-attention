@@ -26,6 +26,17 @@ def dropout_kernel_wrapper(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr
 ):
+    
+    # Get program IDs
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    stride_out = BLOCK_N
+    
+    # Calculate the global offsets for the current block
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
+
     mask = dropout_mask(
         philox_seed=philox_seed,
         philox_offset=philox_offset,
@@ -36,27 +47,69 @@ def dropout_kernel_wrapper(
     )
     
     # Store the result
-    output_ptrs = output_ptr + tl.arange(0, BLOCK_M)[:, None] * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
+    output_ptrs = output_ptr + offs_m * stride_out + offs_n
     tl.store(output_ptrs, mask)
 
+def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device):
+    # calculate RNG offsets (same as in Triton)
+    ms = torch.arange(0, m, device=device)
+    ns = torch.arange(0, n, device=device)
+    rng_offsets = (philox_offset + ms[:, None] * stride + ns[None, :]).to(torch.uint32)
+    
+    # generate random numbers (using torch.rand for simplicity)
+    rng_output = torch.rand((m, n), device=device)
+    
+    # apply dropout mask
+    rng_keep = rng_output > dropout_p
 
-def generate_dropout_mask_ref(shape, dropout_p, seed, offset, device, dtype):
-    torch.manual_seed(seed)
-    gen = torch.Generator(device=device).manual_seed(seed)
-    rand_vals = torch.rand(shape, generator=gen, device=device, dtype=dtype)
-    return rand_vals >= dropout_p, (1.0 / (1 - dropout_p))
+    return rng_keep
+
+def dropout_kernel_wrapper_ref(
+    output_tensor,
+    philox_seed,
+    philox_offset,
+    dropout_p,
+    BLOCK_M,
+    BLOCK_N,
+    shape,
+    device
+):
+    M, N = shape
+    output = output_tensor
+    for i in range(0, M, BLOCK_M):
+        for j in range(0, N, BLOCK_N):
+            m = min(BLOCK_M, M - i)
+            n = min(BLOCK_N, N - j)
+            # Calculate the stride (assuming row-major order)
+            stride = N
+            # Compute the starting offset for the current tile
+            tile_offset = philox_offset + i * N + j
+            # Generate the dropout mask for the current tile
+            mask = dropout_mask_ref(
+                philox_seed=philox_seed,
+                philox_offset=tile_offset,
+                dropout_p=dropout_p,
+                m=m,
+                n=n,
+                stride=stride,
+                device=device
+            )
+            # Store the result in the output tensor
+            output[i:i+m, j:j+n] = mask
+    return output
 
 def test_dropout():
     # Set test parameters
-    shape = 1024, 1204
-    BLOCK_M, BLOCK_N = 8, 8
+    shape = (1024, 1024)
+    BLOCK_M, BLOCK_N = 32, 32
     dropout_p = 0.5
     philox_seed, philox_offset = 0x1BF58, 0x1D4B49
     device = 'cuda'
     
     # Run Triton implementation
     triton_output = torch.empty(shape, dtype=torch.bool, device=device)
-    dropout_kernel_wrapper[(1,)](
+    grid = lambda meta: (shape[0] * shape[1] // (meta['BLOCK_M'] * meta['BLOCK_N']),)
+    dropout_kernel_wrapper[grid](
         output_ptr=triton_output,
         philox_seed=philox_seed,
         philox_offset=philox_offset,
@@ -67,13 +120,16 @@ def test_dropout():
     print("triton_output:", triton_output)
     
     # Run PyTorch reference implementation
-    torch_output, scale = generate_dropout_mask_ref(
-        shape=shape,
+    torch_output = torch.empty(shape, dtype=torch.bool, device=device)
+    torch_output = dropout_kernel_wrapper_ref(
+        output_tensor=torch_output,
+        philox_seed=philox_seed,
+        philox_offset=philox_offset,
         dropout_p=dropout_p,
-        seed=philox_seed,
-        offset=philox_offset,
-        device=device,
-        dtype=torch.float32
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        shape=shape,
+        device=device
     )
     print("torch_output:", torch_output)
     
@@ -87,7 +143,7 @@ def test_dropout():
     matches = (triton_output == torch_output).float().mean().item()
     print(f"\nPattern match ratio: {matches:.4f}")
     
-    if matches > 0.99:  # Allow for small floating point differences
+    if matches > 0.99:  # Allow for small differences
         print("✓ Implementations match!")
     else:
         print("✗ Implementations differ!")
