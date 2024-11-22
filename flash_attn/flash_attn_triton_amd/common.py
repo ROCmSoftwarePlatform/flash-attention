@@ -48,13 +48,14 @@ def generate_dropout_mask_ref(shape, dropout_p, seed, offset, device, dtype):
 
 def test_dropout():
     # Set test parameters
+    shape = 1024, 1204
     BLOCK_M, BLOCK_N = 8, 8
     dropout_p = 0.5
     philox_seed, philox_offset = 0x1BF58, 0x1D4B49
     device = 'cuda'
     
     # Run Triton implementation
-    triton_output = torch.empty((BLOCK_M, BLOCK_N), dtype=torch.bool, device=device)
+    triton_output = torch.empty(shape, dtype=torch.bool, device=device)
     dropout_kernel_wrapper[(1,)](
         output_ptr=triton_output,
         philox_seed=philox_seed,
@@ -67,7 +68,7 @@ def test_dropout():
     
     # Run PyTorch reference implementation
     torch_output, scale = generate_dropout_mask_ref(
-        shape=(BLOCK_M, BLOCK_N),
+        shape=shape,
         dropout_p=dropout_p,
         seed=philox_seed,
         offset=philox_offset,
