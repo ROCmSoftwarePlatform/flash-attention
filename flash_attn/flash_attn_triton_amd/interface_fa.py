@@ -307,13 +307,7 @@ def varlen_fwd(
     if USE_REF:
         if DEBUG:
             print("Using reference implementation")
-        (output, 
-        softmax_lse, 
-        sd_mask, 
-        _, 
-        _,
-        _, 
-        _) = attention_forward_pytorch_ref_impl(
+        output, softmax_lse, sd_mask = attention_forward_pytorch_ref_impl(
                                                 q, 
                                                 k, 
                                                 v,

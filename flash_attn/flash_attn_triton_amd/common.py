@@ -112,6 +112,30 @@ def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device
 
     return rng_keep
 
+def generate_dropout_mask_ref(shape, dropout_p, philox_seed, philox_offset, device, dtype, BLOCK_M=128, BLOCK_N = 128):
+    B, M, N = shape
+    
+    output =  torch.empty(shape, dtype=torch.bool, device=device)
+    for i in range(0, M, BLOCK_M):
+        for j in range(0, N, BLOCK_N):
+            m = min(BLOCK_M, M - i)
+            n = min(BLOCK_N, N - j)
+            # Generate the dropout mask for the current tile
+            mask = dropout_mask_ref(
+                philox_seed=philox_seed,
+                philox_offset=philox_offset,
+                dropout_p=dropout_p,
+                m=m,
+                n=n,
+                stride=N,
+                device=device,
+            )
+            # Store the result in the output tensor
+            output[:, i : i + m, j : j + n] = mask
+    
+    return output, (1.0 / (1 - dropout_p))
+
+
 
 def kernel_that_uses_dropout_ref(
     output_tensor,
@@ -122,7 +146,6 @@ def kernel_that_uses_dropout_ref(
     BLOCK_N,
     shape,
     device,
-    use_triton=False,
 ):
     M, N = shape
     output = output_tensor
@@ -183,7 +206,6 @@ def test_dropout():
         BLOCK_N=BLOCK_N,
         shape=shape,
         device=device,
-        use_triton=False,
     )
     print("torch_output:", torch_output)
 
@@ -209,7 +231,6 @@ def compute_alibi_tensor_ref(alibi_slopes, seqlen_q, seqlen_k):
     k_idx = torch.arange(seqlen_k, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, N_CTX_K)
     relative_pos = torch.abs(q_idx + seqlen_k - seqlen_q - k_idx)  # (N_CTX_Q, N_CTX_K)
     return -1 * alibi_slopes.unsqueeze(-1).unsqueeze(-1) * relative_pos  # (Z, H, N_CTX_Q, N_CTX_K)
-
 
 if __name__ == "__main__":
     test_dropout()

@@ -278,15 +278,7 @@ def attention_varlen_forward_pytorch_ref_impl(
             v_i = v_i.reshape(nheads_k, seqlen_k, head_dim)
 
         # Call the core attention function for this sequence
-        (
-            o_i,
-            softmax_lse_i,
-            sd_mask_i,
-            _,
-            _,
-            _,
-            _,
-        ) = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2)
+        o_i, softmax_lse_i, sd_mask_i = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2)
 
         # Reshape outputs back to original dimensions
         if group_size != 1:
