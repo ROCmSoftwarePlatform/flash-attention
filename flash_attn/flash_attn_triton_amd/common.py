@@ -1,3 +1,4 @@
+import math
 import torch
 import triton
 import triton.language as tl
@@ -17,62 +18,68 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m: tl.constexpr, n: tl.c
 
     return rng_keep
 
+
 @triton.jit
 def kernel_that_uses_dropout(
     output_ptr,
     philox_seed,
     philox_offset,
     dropout_p,
+    M,
+    N,
+    stride_out,
     BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr
+    BLOCK_N: tl.constexpr,
 ):
-    
     # Get program IDs
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    stride_out = BLOCK_N
-    
     # Calculate the global offsets for the current block
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
 
-    mask = dropout_mask(
+    # Create masks to handle boundaries
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+    mask = mask_m & mask_n
+
+    # Adjust offsets to be within bounds
+    offs_m = tl.where(mask_m, offs_m, 0)
+    offs_n = tl.where(mask_n, offs_n, 0)
+
+    # Generate the dropout mask
+    block_mask = dropout_mask(
         philox_seed=philox_seed,
         philox_offset=philox_offset,
         dropout_p=dropout_p,
         m=BLOCK_M,
         n=BLOCK_N,
-        stride=BLOCK_N
+        stride=stride_out,
     )
-    
+
     # Store the result
     output_ptrs = output_ptr + offs_m * stride_out + offs_n
-    tl.store(output_ptrs, mask)
+    tl.store(output_ptrs, block_mask, mask=mask)
+
 
 def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device):
     # calculate RNG offsets (same as in Triton)
     ms = torch.arange(0, m, device=device)
     ns = torch.arange(0, n, device=device)
     rng_offsets = (philox_offset + ms[:, None] * stride + ns[None, :]).to(torch.uint32)
-    
+
     # generate random numbers (using torch.rand for simplicity)
     rng_output = torch.rand((m, n), device=device)
-    
+
     # apply dropout mask
     rng_keep = rng_output > dropout_p
 
     return rng_keep
 
+
 def kernel_that_uses_dropout_ref(
-    output_tensor,
-    philox_seed,
-    philox_offset,
-    dropout_p,
-    BLOCK_M,
-    BLOCK_N,
-    shape,
-    device
+    output_tensor, philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, shape, device
 ):
     M, N = shape
     output = output_tensor
@@ -92,11 +99,12 @@ def kernel_that_uses_dropout_ref(
                 m=m,
                 n=n,
                 stride=stride,
-                device=device
+                device=device,
             )
             # Store the result in the output tensor
-            output[i:i+m, j:j+n] = mask
+            output[i : i + m, j : j + n] = mask
     return output
+
 
 def test_dropout():
     # Set test parameters
@@ -104,21 +112,27 @@ def test_dropout():
     BLOCK_M, BLOCK_N = 32, 32
     dropout_p = 0.5
     philox_seed, philox_offset = 0x1BF58, 0x1D4B49
-    device = 'cuda'
-    
+    device = "cuda"
+
     # Run Triton implementation
     triton_output = torch.empty(shape, dtype=torch.bool, device=device)
-    grid = lambda meta: (shape[0] * shape[1] // (meta['BLOCK_M'] * meta['BLOCK_N']),)
+    grid = lambda meta: (
+        math.ceil(shape[0] / meta["BLOCK_M"]),
+        math.ceil(shape[1] / meta["BLOCK_N"]),
+    )
     kernel_that_uses_dropout[grid](
         output_ptr=triton_output,
         philox_seed=philox_seed,
         philox_offset=philox_offset,
         dropout_p=dropout_p,
+        M=shape[0],
+        N=shape[1],
+        stride_out=shape[1],
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
     )
     print("triton_output:", triton_output)
-    
+
     # Run PyTorch reference implementation
     torch_output = torch.empty(shape, dtype=torch.bool, device=device)
     torch_output = kernel_that_uses_dropout_ref(
@@ -129,20 +143,20 @@ def test_dropout():
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         shape=shape,
-        device=device
+        device=device,
     )
     print("torch_output:", torch_output)
-    
+
     # Compare results
     print(f"Shape: {triton_output.shape}")
+    print(f"Expected ratio: {1 - dropout_p:.4f}")
     print(f"Triton keep ratio: {triton_output.float().mean().item():.4f}")
     print(f"PyTorch keep ratio: {torch_output.float().mean().item():.4f}")
-    print(f"Expected ratio: {1 - dropout_p:.4f}")
-    
+
     # Check if patterns match
     matches = (triton_output == torch_output).float().mean().item()
     print(f"\nPattern match ratio: {matches:.4f}")
-    
+
     if matches > 0.99:  # Allow for small differences
         print("✓ Implementations match!")
     else:
