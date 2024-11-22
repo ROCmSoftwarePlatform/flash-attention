@@ -18,7 +18,7 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m: tl.constexpr, n: tl.c
     return rng_keep
 
 @triton.jit
-def dropout_kernel_wrapper(
+def kernel_that_uses_dropout(
     output_ptr,
     philox_seed,
     philox_offset,
@@ -64,7 +64,7 @@ def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device
 
     return rng_keep
 
-def dropout_kernel_wrapper_ref(
+def kernel_that_uses_dropout_ref(
     output_tensor,
     philox_seed,
     philox_offset,
@@ -109,7 +109,7 @@ def test_dropout():
     # Run Triton implementation
     triton_output = torch.empty(shape, dtype=torch.bool, device=device)
     grid = lambda meta: (shape[0] * shape[1] // (meta['BLOCK_M'] * meta['BLOCK_N']),)
-    dropout_kernel_wrapper[grid](
+    kernel_that_uses_dropout[grid](
         output_ptr=triton_output,
         philox_seed=philox_seed,
         philox_offset=philox_offset,
@@ -121,7 +121,7 @@ def test_dropout():
     
     # Run PyTorch reference implementation
     torch_output = torch.empty(shape, dtype=torch.bool, device=device)
-    torch_output = dropout_kernel_wrapper_ref(
+    torch_output = kernel_that_uses_dropout_ref(
         output_tensor=torch_output,
         philox_seed=philox_seed,
         philox_offset=philox_offset,
