@@ -1,3 +1,4 @@
+import functools
 import math
 import torch
 import triton
@@ -96,6 +97,8 @@ def tl_rand_ref(philox_seed, rng_offsets):
     )
     return output
 
+# NOTE: cache result otherwise it is slow
+@functools.cache 
 def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device):
     # calculate RNG offsets (same as in Triton)
     ms = torch.arange(0, m, device=device)
@@ -144,9 +147,8 @@ def kernel_that_uses_dropout_ref(
 
 def test_dropout():
     # Set test parameters
-    shape = (8, 8)
-    # shape = (1024, 1024)
-    BLOCK_M, BLOCK_N = 8, 8
+    shape = (1024, 1024)
+    BLOCK_M, BLOCK_N = 32, 32
     dropout_p = 0.5
     philox_seed, philox_offset = 0x1BF58, 0x1D4B49
     device = "cuda"
