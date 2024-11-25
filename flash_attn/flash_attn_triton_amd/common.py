@@ -10,6 +10,8 @@ def kernel_that_uses_dropout(
     philox_offset_base,
     dropout_p,
     stride_sz, stride_sh, stride_sm, stride_sn,
+    seqlen_q,
+    seqlen_k,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -26,20 +28,21 @@ def kernel_that_uses_dropout(
 
     # Calculate the global offsets for the current block
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
-    offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
+    n_blocks = tl.cdiv(seqlen_k, BLOCK_N)
+    for start_n in range(0, n_blocks):
+        offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
 
-    batch_philox_offset = philox_offset_base + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-    philox_ptrs = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
+        batch_philox_offset = philox_offset_base + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        philox_offset = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
 
-    # Generate the dropout mask
-    rng_output = tl.rand(philox_seed, philox_ptrs)  # TODO: use tl.randint for better performance
-    keep = rng_output > dropout_p
-    print("keep", keep)
-    
-    # Store the result
-    output_offset = output_ptr +  off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-    output_ptrs = output_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
-    tl.store(output_ptrs, keep)
+        # Generate the dropout mask
+        rng_output = tl.rand(philox_seed, philox_offset)
+        keep = rng_output > dropout_p
+        
+        # Store the result
+        output_offset = output_ptr +  off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
+        output_ptrs = output_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
+        tl.store(output_ptrs, keep)
 
 def tl_rand_ref(philox_seed, rng_offsets):
     device = rng_offsets.device
@@ -165,6 +168,8 @@ def test_dropout():
         stride_sh=stride_sh,
         stride_sm=stride_sm,
         stride_sn=stride_sn,
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
     )
