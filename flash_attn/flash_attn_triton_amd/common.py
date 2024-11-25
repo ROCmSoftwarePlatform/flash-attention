@@ -35,9 +35,16 @@ def kernel_that_uses_dropout(
         batch_philox_offset = philox_offset_base + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
         philox_offset = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
 
+        print("philox_seed:", philox_seed)
+        print("philox_offset:", philox_offset)
+
         # Generate the dropout mask
         rng_output = tl.rand(philox_seed, philox_offset)
+        print("rng_output:", rng_output)
+        # print("dropout_p:", dropout_p)
         keep = rng_output > dropout_p
+
+        # print("keep:", keep)
         
         # Store the result
         output_offset = output_ptr +  off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
@@ -76,91 +83,83 @@ def tl_rand_ref(philox_seed, rng_offsets):
     )
     return output
 
-# NOTE: cache result otherwise it is slow
-@functools.cache 
-def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device):
-    # calculate RNG offsets (same as in Triton)
-    ms = torch.arange(0, m, device=device)
-    ns = torch.arange(0, n, device=device)
-    rng_offsets = (philox_offset + ms[:, None] * stride + ns[None, :]).to(torch.uint32).to(device=device)
-
-    rng_output = tl_rand_ref(philox_seed, rng_offsets) 
-
-    # apply dropout mask
-    rng_keep = rng_output > dropout_p
-
-    return rng_keep
-
-def generate_dropout_mask_ref(shape, dropout_p, philox_seed, philox_offset, device, dtype, BLOCK_M=128, BLOCK_N = 128):
-    B, M, N = shape
-    
-    output =  torch.zeros(shape, dtype=torch.bool, device=device)
-    for i in range(0, M, BLOCK_M):
-        for j in range(0, N, BLOCK_N):
-            m = min(BLOCK_M, M - i)
-            n = min(BLOCK_N, N - j)
-            # Generate the dropout mask for the current tile
-            mask = dropout_mask_ref(
-                philox_seed=philox_seed,
-                philox_offset=philox_offset,
-                dropout_p=dropout_p,
-                m=m,
-                n=n,
-                stride=N,
-                device=device,
-            )
-            # Store the result in the output tensor
-            output[:, i : i + m, j : j + n] = mask
-    
-    return output, (1.0 / (1 - dropout_p))
-
-
 
 def kernel_that_uses_dropout_ref(
     output_tensor,
     philox_seed,
-    philox_offset,
+    philox_offset_base,
     dropout_p,
+    stride_sz, stride_sh, stride_sm, stride_sn,
+    seqlen_q,
+    seqlen_k,
     BLOCK_M,
     BLOCK_N,
     device,
 ):
-    output = output_tensor
-    for i in range(0, M, BLOCK_M):
-        for j in range(0, N, BLOCK_N):
-            m = min(BLOCK_M, M - i)
-            n = min(BLOCK_N, N - j)
-            # Generate the dropout mask for the current tile
-            mask = dropout_mask_ref(
-                philox_seed=philox_seed,
-                philox_offset=philox_offset,
-                dropout_p=dropout_p,
-                m=m,
-                n=n,
-                stride=N,
-                device=device,
-            )
-            # Store the result in the output tensor
-            output[i : i + m, j : j + n] = mask
-    return output
+    batch = output_tensor.size(0)
+    nheads_q = output_tensor.size(1)
+    
+    # Iterate over the same program_id dimensions as Triton
+    for start_m in range(0, seqlen_q, BLOCK_M):
+        for off_h_q in range(nheads_q):
+            for off_z in range(batch):
+                # Calculate actual block size (handle edge cases)
+                current_block_m = min(BLOCK_M, seqlen_q - start_m)
+                
+                # Iterate over seqlen_k dimension in blocks
+                for start_n in range(0, seqlen_k, BLOCK_N):
+                    current_block_n = min(BLOCK_N, seqlen_k - start_n)
+                    
+                    # Create offset grid for current block
+                    ms = torch.arange(current_block_m, device=device)
+                    ns = torch.arange(current_block_n, device=device)
+                    
+                    # Calculate global offsets matching Triton kernel
+                    offs_m = start_m + ms[:, None]
+                    offs_n = start_n + ns[None, :]
+                    
+                    # Calculate philox offsets
+                    batch_philox_offset = (philox_offset_base + 
+                                         off_z * stride_sz + 
+                                         off_h_q * stride_sh)
+                    philox_offset = (batch_philox_offset + 
+                                   offs_m * stride_sm + 
+                                   offs_n * stride_sn)
+
+                    print("philox_seed_ref:", philox_seed)
+                    print("philox_offset_ref:", philox_offset)
+                    
+                    # Generate random values and apply dropout
+                    rng_output = tl_rand_ref(philox_seed, philox_offset.flatten()).reshape(current_block_m, current_block_n)
+                    print("rng_output_ref:", rng_output)
+                    # print("dropout_p_ref:", dropout_p)
+                    keep = rng_output > dropout_p
+                    # print("keep_ref:", keep)
+                    
+                    # Store results in the output tensor
+                    output_tensor[off_z, off_h_q, 
+                                start_m:start_m + current_block_m, 
+                                start_n:start_n + current_block_n] = keep
+
+    return output_tensor
 
 
 def test_dropout():
     # Set test parameters
-    shape = (1, 1, 1024, 1024)
+    shape = (1, 1, 32, 32)
     batch, nheads_q, seqlen_q, seqlen_k = shape
     BLOCK_M, BLOCK_N = 32, 32
     dropout_p = 0.5
     philox_seed, philox_offset = 0x1BF58, 0x1D4B49
     device = "cuda"
 
-    output = torch.zeros(shape, dtype=torch.bool, device=device)
-    stride_sz, stride_sh, stride_sm, stride_sn = (output.stride(0), output.stride(1), output.stride(2), output.stride(3))
+    triton_output = torch.zeros(shape, dtype=torch.bool, device=device)
+    stride_sz, stride_sh, stride_sm, stride_sn = (triton_output.stride(0), triton_output.stride(1), triton_output.stride(2), triton_output.stride(3))
 
     # Run Triton implementation
     grid = lambda META: (triton.cdiv(seqlen_q, META['BLOCK_M']), nheads_q, batch)
     kernel_that_uses_dropout[grid](
-        output_ptr=output,
+        output_ptr=triton_output,
         philox_seed=philox_seed,
         philox_offset_base=philox_offset,
         dropout_p=dropout_p,
@@ -173,36 +172,42 @@ def test_dropout():
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
     )
-    print("triton_output:", output)
+    print("triton_output:", triton_output)
 
     # Run PyTorch reference implementation
-    # torch_output = torch.zeros(shape, dtype=torch.bool, device=device)
-    # torch_output = kernel_that_uses_dropout_ref(
-    #     output_tensor=torch_output,
-    #     philox_seed=philox_seed,
-    #     philox_offset=philox_offset,
-    #     dropout_p=dropout_p,
-    #     BLOCK_M=BLOCK_M,
-    #     BLOCK_N=BLOCK_N,
-    #     device=device,
-    # )
-    # print("torch_output:", torch_output)
+    torch_output = torch.zeros(shape, dtype=torch.bool, device=device)
+    torch_output = kernel_that_uses_dropout_ref(
+        output_tensor=torch_output,
+        philox_seed=philox_seed,
+        philox_offset_base=philox_offset,
+        dropout_p=dropout_p,
+        stride_sz=stride_sz,
+        stride_sh=stride_sh,
+        stride_sm=stride_sm,
+        stride_sn=stride_sn,
+        seqlen_q=seqlen_q,
+        seqlen_k=seqlen_k,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        device=device,
+    )
+    print("torch_output:", torch_output)
 
     # Compare results
-    print(f"Shape: {output.shape}")
+    print(f"Shape: {triton_output.shape}")
     print(f"Expected ratio: {1 - dropout_p:.4f}")
-    print(f"Triton keep ratio: {output.float().mean().item():.4f}")
-    # print(f"PyTorch keep ratio: {torch_output.float().mean().item():.4f}")
+    print(f"Triton keep ratio: {triton_output.float().mean().item():.4f}")
+    print(f"PyTorch keep ratio: {torch_output.float().mean().item():.4f}")
 
     # Check if patterns match
-    # matches = (output == torch_output).float().mean().item()
-    # print(f"\nPattern match ratio: {matches:.4f}")
+    matches = (triton_output == torch_output).float().mean().item()
+    print(f"\nPattern match ratio: {matches:.4f}")
 
-    # if matches > 0.99:  # Allow for small differences
-    #     print("✓ Implementations match!")
-    # else:
-    #     print("✗ Implementations differ!")
-    # return output, torch_output
+    if matches > 0.99:  # Allow for small differences
+        print("✓ Implementations match!")
+    else:
+        print("✗ Implementations differ!")
+    return triton_output, torch_output
 
 
 def compute_alibi_tensor_ref(alibi_slopes, seqlen_q, seqlen_k):
