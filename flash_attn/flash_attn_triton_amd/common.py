@@ -115,7 +115,7 @@ def dropout_mask_ref(philox_seed, philox_offset, dropout_p, m, n, stride, device
 def generate_dropout_mask_ref(shape, dropout_p, philox_seed, philox_offset, device, dtype, BLOCK_M=128, BLOCK_N = 128):
     B, M, N = shape
     
-    output =  torch.empty(shape, dtype=torch.bool, device=device)
+    output =  torch.zeros(shape, dtype=torch.bool, device=device)
     for i in range(0, M, BLOCK_M):
         for j in range(0, N, BLOCK_N):
             m = min(BLOCK_M, M - i)
