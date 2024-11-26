@@ -481,14 +481,15 @@ def attention_prefill_backward_triton_impl(
     sm_scale: float,
     alibi_slopes,
     causal,
-    dropout_p,
     layout: str,
     cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q: int,
     max_seqlen_k: int,
+    dropout_p, 
+    philox_seed, 
+    philox_offset,
     use_exp2: bool,
-    rng_state: torch.Tensor,
     sequence_parallel = True,
 ):
     if DEBUG:
@@ -511,8 +512,10 @@ def attention_prefill_backward_triton_impl(
         print("cu_seqlens_k:", cu_seqlens_k)
         print("max_seqlen_q:", max_seqlen_q)
         print("max_seqlen_k:", max_seqlen_k)
+        print("dropout_p:", dropout_p)
+        print("philox_seed:", philox_seed)
+        print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
-        print("rng_state", rng_state)
         print("sequence_parallel:", sequence_parallel)
 
     # make contigious
@@ -529,13 +532,6 @@ def attention_prefill_backward_triton_impl(
     stride_vz, stride_vh, stride_vn, stride_vk = v_strides
     stride_oz, stride_oh, stride_om, stride_ok = o_strides
     is_varlen = layout == "thd"
-    
-
-    # get dropout metadata
-    if dropout_p > 0.0:
-        philox_seed, philox_offset = rng_state[0].item(), rng_state[1].item()
-    else:
-        philox_seed, philox_offset = None, None
 
     # FIXME: some configs lead to oom for some reason when using 64 x 64 blocks
     if max_seqlen_q <= 32 or max_seqlen_k <= 32:
