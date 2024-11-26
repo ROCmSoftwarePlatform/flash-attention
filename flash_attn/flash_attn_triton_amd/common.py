@@ -4,6 +4,10 @@ import triton
 import triton.language as tl
 
 @triton.jit
+def tl_rand(philox_seed, philox_offset):
+    return tl.rand(philox_seed, philox_offset)
+
+@triton.jit
 def kernel_that_uses_dropout(
     output_ptr,
     philox_seed,
@@ -19,9 +23,6 @@ def kernel_that_uses_dropout(
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
 
-    # use for loop to iterate along seqlen_k dim
-    start_n = 0
-
     # not varlen
     cu_seqlens_q_start = 0
     cu_seqlens_k_start = 0
@@ -33,13 +34,13 @@ def kernel_that_uses_dropout(
         offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
 
         batch_philox_offset = philox_offset_base + off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-        philox_offset = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
+        philox_offset = batch_philox_offset + offs_m * stride_sm + offs_n * stride_sn
 
-        print("philox_seed:", philox_seed)
+        # print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
 
         # Generate the dropout mask
-        rng_output = tl.rand(philox_seed, philox_offset)
+        rng_output = tl_rand(philox_seed, philox_offset)
         print("rng_output:", rng_output)
         # print("dropout_p:", dropout_p)
         keep = rng_output > dropout_p
@@ -48,39 +49,58 @@ def kernel_that_uses_dropout(
         
         # Store the result
         output_offset = output_ptr +  off_z * stride_sz + off_h_q * stride_sh + cu_seqlens_q_start * stride_sm
-        output_ptrs = output_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
+        output_ptrs = output_offset + offs_m * stride_sm + offs_n * stride_sn
         tl.store(output_ptrs, keep)
 
-def tl_rand_ref(philox_seed, rng_offsets):
-    device = rng_offsets.device
-    # Ensure rng_offsets is contiguous
-    rng_offsets = rng_offsets.contiguous()
-    N = rng_offsets.numel()
-    # Prepare output tensor
-    output = torch.empty_like(rng_offsets, dtype=torch.float32)
-    # Define block size
-    BLOCK_SIZE = 1024
 
+
+def tl_rand_ref(philox_seed, philox_offset, BLOCK_M, BLOCK_N):
     @triton.jit
-    def _tl_rand_kernel(output_ptr, offsets_ptr, philox_seed, N,
-                        BLOCK_SIZE: tl.constexpr):
-        pid = tl.program_id(0)
-        idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = idx < N
-        offsets = tl.load(offsets_ptr + idx, mask=mask, other=0)
-        r = tl.rand(philox_seed, offsets)
-        tl.store(output_ptr + idx, r, mask=mask)
+    def tl_rand_kernel(
+        output_ptr,
+        philox_seed,
+        philox_offset_ptr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        # Calculate position in the output grid
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        
+        # Calculate offsets for this block
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)[:, None]
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)[None, :]
+        
+        # Load philox offsets for this block
+        philox_offset = tl.load(philox_offset_ptr + offs_m * BLOCK_N + offs_n)
+        
+        # Generate random numbers
+        rng_output = tl.rand(philox_seed, philox_offset)
+        
+        # Store the result
+        output_ptr = output_ptr + offs_m * BLOCK_N + offs_n
+        tl.store(output_ptr, rng_output)
 
-    grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']),)
 
-    # Launch the Triton kernel
-    _tl_rand_kernel[grid](
+    # Get the shape of the philox_offset tensor
+    shape = philox_offset.shape
+    device = philox_offset.device
+    
+    # Create output tensor
+    output = torch.zeros_like(philox_offset, dtype=torch.float32)
+    
+    # Define grid
+    grid = (triton.cdiv(shape[0], BLOCK_M), triton.cdiv(shape[1], BLOCK_N))
+    
+    # Launch kernel
+    tl_rand_kernel[grid](
         output_ptr=output,
-        offsets_ptr=rng_offsets,
         philox_seed=philox_seed,
-        N=N,
-        BLOCK_SIZE=BLOCK_SIZE,
+        philox_offset_ptr=philox_offset,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
     )
+
     return output
 
 
@@ -103,20 +123,12 @@ def kernel_that_uses_dropout_ref(
     for start_m in range(0, seqlen_q, BLOCK_M):
         for off_h_q in range(nheads_q):
             for off_z in range(batch):
-                # Calculate actual block size (handle edge cases)
-                current_block_m = min(BLOCK_M, seqlen_q - start_m)
-                
                 # Iterate over seqlen_k dimension in blocks
                 for start_n in range(0, seqlen_k, BLOCK_N):
-                    current_block_n = min(BLOCK_N, seqlen_k - start_n)
-                    
-                    # Create offset grid for current block
-                    ms = torch.arange(current_block_m, device=device)
-                    ns = torch.arange(current_block_n, device=device)
                     
                     # Calculate global offsets matching Triton kernel
-                    offs_m = start_m + ms[:, None]
-                    offs_n = start_n + ns[None, :]
+                    offs_m = start_m + torch.arange(0, BLOCK_M, device=device)[:, None]
+                    offs_n = start_n + torch.arange(0, BLOCK_N, device=device)[None, :]
                     
                     # Calculate philox offsets
                     batch_philox_offset = (philox_offset_base + 
@@ -126,11 +138,11 @@ def kernel_that_uses_dropout_ref(
                                    offs_m * stride_sm + 
                                    offs_n * stride_sn)
 
-                    print("philox_seed_ref:", philox_seed)
+                    # print("philox_seed_ref:", philox_seed)
                     print("philox_offset_ref:", philox_offset)
                     
                     # Generate random values and apply dropout
-                    rng_output = tl_rand_ref(philox_seed, philox_offset.flatten()).reshape(current_block_m, current_block_n)
+                    rng_output = tl_rand_ref(philox_seed, philox_offset, BLOCK_M, BLOCK_N)
                     print("rng_output_ref:", rng_output)
                     # print("dropout_p_ref:", dropout_p)
                     keep = rng_output > dropout_p
@@ -138,8 +150,8 @@ def kernel_that_uses_dropout_ref(
                     
                     # Store results in the output tensor
                     output_tensor[off_z, off_h_q, 
-                                start_m:start_m + current_block_m, 
-                                start_n:start_n + current_block_n] = keep
+                                offs_m, 
+                                offs_n] = keep
 
     return output_tensor
 
