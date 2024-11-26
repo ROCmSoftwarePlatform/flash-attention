@@ -1043,9 +1043,6 @@ def test_flash_attn_output(
     else:
         dropout_mask = None
 
-    if DEBUG:
-        print("dropout_mask: ", dropout_mask)
-
     if kvpacked:
         out_ref, attn_ref = attention_kvpacked_ref(
             q,

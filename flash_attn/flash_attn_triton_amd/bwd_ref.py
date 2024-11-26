@@ -75,6 +75,10 @@ def attention_backward_core_ref_impl(
     if dropout_p > 0.0:
         rand_vals = torch.rand(p.shape, generator=torch.Generator(device=p.device).manual_seed(philox_seed), device=p.device, dtype=p.dtype)
         dropout_mask, dropout_scale = rand_vals > dropout_p,  (1.0 / (1 - dropout_p))
+        if DEBUG:
+            print("dropout_scale:", dropout_scale)
+            print("dropout_mask:", dropout_mask)
+            
         p_drop = torch.where(dropout_mask, p, torch.zeros_like(p))
         p_drop_scaled =  p_drop * dropout_scale
         if DEBUG_CORE:
@@ -88,20 +92,18 @@ def attention_backward_core_ref_impl(
             print("dv:", dv, dv.shape)
 
         # compute dp
-        dp = torch.matmul(do, v.transpose(-2, -1))
-        dp_drop = torch.where(dropout_mask, dp , torch.zeros_like(dp))
-        dp_drop_scaled = dp_drop * dropout_scale
+        dp_dropout = torch.matmul(do, v.transpose(-2, -1))
+        dp = torch.where(dropout_mask, dp_dropout , torch.zeros_like(dp_dropout)) * dropout_scale
         if DEBUG_CORE:
+            print("dp_dropout:", dp_dropout, dp_dropout.shape)
             print("dp:", dp, dp.shape)
-            print("dp_drop:", dp_drop, dp_drop.shape)
-            print("dp_drop_scaled:", dp_drop_scaled, dp_drop_scaled.shape)
 
         # calculate ds
         if False:
             delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
         else:
-            delta = torch.sum(p * dp_drop_scaled, axis=-1).unsqueeze(-1)
-        dscores_scaled = p * (dp_drop_scaled - delta)
+            delta = torch.sum(p * dp, axis=-1).unsqueeze(-1)
+        dscores_scaled = p * (dp - delta)
         ds = dscores_scaled * sm_scale
         if DEBUG_CORE:
             print("delta:", delta, delta.shape)
