@@ -117,9 +117,9 @@ def _bwd_kernel_one_col_block(
     start_n,
     num_block_m,
     num_block_n,
-    dropout_p, 
-    philox_seed, 
-    philox_offset_base,
+    dropout_p,
+    philox_seed,
+    batch_philox_offset,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -200,28 +200,24 @@ def _bwd_kernel_one_col_block(
         
         # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
         if DROPOUT:
-            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
-            p_drop = tl.where(keep, p, 0.0)
+            stride_sm = N_CTX_K
+            stride_sn = 1
+            philox_offset = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
+            # print("philox_seed:", philox_seed)
+            # print("philox_offset:", philox_offset)
+            rng_output = tl.rand(philox_seed, philox_offset)
+            keep = rng_output > dropout_p
+            p = tl.where(keep, p, 0.0)
 
-            p_drop = p_drop / (1 - dropout_p)
-            p_drop = p_drop.to(Q.dtype.element_ty)
+            p = p / (1 - dropout_p)
         else:
-            p_drop = p
+            p = p
         
         # compute dv
         dv += tl.dot(tl.trans(p), do)
 
         # compute dp
         dp = tl.dot(do, tl.trans(v))
-
-        if DROPOUT:
-            philox_offset = philox_offset_base + start_m * N_CTX_K + start_n * BLOCK_N
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, N_CTX_K)
-            dp = tl.where(keep, dp, 0.0)
-
-            dp = dp / (1 - dropout_p)
-            dp = dp.to(Q.dtype.element_ty)
 
         # compute ds , ds = p * (dp - delta[:, None])
         d_ptrs = d_offset + offs_m * stride_deltam
@@ -293,7 +289,7 @@ def _bwd_kernel(
     max_seqlen_k,
     dropout_p, 
     philox_seed, 
-    philox_offset,
+    philox_offset_base,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
@@ -317,11 +313,6 @@ def _bwd_kernel(
     else:
         off_hk = off_hq
 
-    if DROPOUT:
-        batch_philox_offset = philox_offset + off_hq * max_seqlen_q * max_seqlen_k
-    else:
-        batch_philox_offset = 0
-
     if IS_VARLEN:
         # Compute sequence lengths for the current batch
         q_start = tl.load(cu_seqlens_q + off_z)
@@ -337,6 +328,15 @@ def _bwd_kernel(
         k_start = 0
         N_CTX_Q = max_seqlen_q
         N_CTX_K = max_seqlen_k
+
+
+    if DROPOUT:
+        stride_sz = HQ * max_seqlen_q * max_seqlen_k
+        stride_sh = max_seqlen_q * max_seqlen_k
+        stride_sm = max_seqlen_k
+        batch_philox_offset = philox_offset_base + off_z * stride_sz + off_hq * stride_sh + q_start * stride_sm
+    else:
+        batch_philox_offset = 0
     
 
     # input tensor offsets
@@ -708,7 +708,7 @@ def attention_prefill_backward_triton_impl(
         ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
         SEQUENCE_PARALLEL=sequence_parallel,
         CAUSAL=causal,
-        DROPOUT=dropout_p>0.0,
+        DROPOUT=1,
         USE_EXP2=use_exp2,
         num_warps=num_warps,
         num_stages=num_stages,

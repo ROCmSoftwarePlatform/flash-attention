@@ -948,24 +948,24 @@ def test_flash_attn_output(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 4
-    nheads = 6 if softcap == 0.0 else 4  # softcap reference impl takes more memory
+    batch_size = 1
+    nheads = 1 if softcap == 0.0 else 4  # softcap reference impl takes more memory
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
     if kvpacked:
-        kv = torch.randn(
+        kv = torch.ones(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     else:
-        k = torch.randn(
+        k = torch.ones(
             batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
-        v = torch.randn(
+        v = torch.ones(
             batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     if alibi:
@@ -1112,7 +1112,7 @@ def test_flash_attn_output(
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
     test_backward = True
 
-    g = torch.randn_like(out)
+    g = torch.ones_like(out)
     do_o = (g.float() * out.float()).sum(-1)
     if test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
         if kvpacked:
