@@ -885,8 +885,8 @@ def test_flash_attn_varlen_qkvpacked(
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("dtype", [torch.float16])
-# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-@pytest.mark.parametrize("mha_type", ["mha"])
+@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+# @pytest.mark.parametrize("mha_type", ["mha"])
 # @pytest.mark.parametrize("deterministic", [False, True])
 # @pytest.mark.parametrize("deterministic", [True])
 @pytest.mark.parametrize("deterministic", [False])
@@ -1204,8 +1204,8 @@ def test_flash_attn_output(
 # @pytest.mark.parametrize('kvpacked', [False])
 # @pytest.mark.parametrize("dtype", ([torch.float16] if is_sm75 else [torch.float16, torch.bfloat16]))
 @pytest.mark.parametrize('dtype', [torch.float16])
-# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-@pytest.mark.parametrize('mha_type', ["mha"])
+@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+# @pytest.mark.parametrize('mha_type', ["mha"])
 # @pytest.mark.parametrize("deterministic", [False, True])
 @pytest.mark.parametrize("deterministic", [False])
 # @pytest.mark.parametrize("alibi", [False, True])
@@ -1214,29 +1214,28 @@ def test_flash_attn_output(
 @pytest.mark.parametrize("local", [False])
 # @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize('causal', [False])
-# @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+@pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
-@pytest.mark.parametrize('d', [32])
+# @pytest.mark.parametrize('d', [32])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        #(128, 128),
-        (1, 147), # FIXME: dropout fails on small tensors in varlen
-        # (113, 203),
-        # (128, 217),
-        # (113, 211),
-        # (108, 256),
-        # (256, 512),
-        # (512, 256),
-        # (1024, 1024),
-        # (1023, 1024),
-        # (1024, 1023),
-        # (2048, 2048),
+        (1, 147),
+        (113, 203),
+        (128, 217),
+        (113, 211),
+        (108, 256),
+        (256, 512),
+        (512, 256),
+        (1024, 1024),
+        (1023, 1024),
+        (1024, 1023),
+        (2048, 2048),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
-# @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-@pytest.mark.parametrize('dropout_p', [0.17])
+@pytest.mark.parametrize("dropout_p", [0.0, 0.17])
+# @pytest.mark.parametrize('dropout_p', [0.17])
 # @pytest.mark.parametrize("softcap", [0.0, 50.0])
 @pytest.mark.parametrize("softcap", [0.0])
 def test_flash_attn_varlen_output(

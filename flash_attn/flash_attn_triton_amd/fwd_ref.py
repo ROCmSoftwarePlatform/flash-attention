@@ -91,23 +91,24 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("sum_exp_scores:", sum_exp_scores, sum_exp_scores.shape)
 
     # Compute softmax probabilities
-    softmax = exp_scores / sum_exp_scores
+    p = exp_scores / sum_exp_scores
 
     if DEBUG_CORE:
-        print("softmax:", softmax, softmax.shape)
+        print("softmax:", p, p.shape)
         
     # apply dropout if specified
     if dropout_p > 0.0:
-        dropout_mask, dropout_scale = generate_dropout_mask_ref(softmax.shape, dropout_p, philox_seed, philox_offset, softmax.device, softmax.dtype)
+        rand_vals = torch.rand(p.shape, generator=torch.Generator(device=p.device).manual_seed(philox_seed), device=p.device, dtype=p.dtype)
+        dropout_mask, dropout_scale = rand_vals > dropout_p,  (1.0 / (1 - dropout_p))
         if DEBUG:
             print("dropout_mask:", dropout_mask)
             print("dropout_scale:", dropout_scale)
         # Apply dropout mask and scale
         # Set -1 for dropped positions and 1 for kept positions in exp_scores 
         sd_mask = torch.where(dropout_mask, exp_scores, -exp_scores)
-        softmax = torch.where(dropout_mask, softmax * dropout_scale, torch.zeros_like(softmax))
+        p = torch.where(dropout_mask, p * dropout_scale, torch.zeros_like(p))
         if DEBUG:
-            print("softmax after dropout:", softmax)
+            print("softmax after dropout:", p)
             print("sd_mask:", sd_mask)
     else:
         sd_mask = exp_scores
@@ -128,7 +129,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
     # Compute output
-    o = torch.matmul(softmax, v)
+    o = torch.matmul(p, v)
     if DEBUG_CORE:
         print("o:", o, o.shape)
 

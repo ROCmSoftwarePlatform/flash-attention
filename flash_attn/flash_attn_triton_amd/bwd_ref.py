@@ -73,7 +73,8 @@ def attention_backward_core_ref_impl(
         print("p:", p, p.shape)
 
     if dropout_p > 0.0:
-        dropout_mask, dropout_scale= generate_dropout_mask_ref(p.shape, dropout_p, philox_seed, philox_offset, p.device, p.dtype)
+        rand_vals = torch.rand(p.shape, generator=torch.Generator(device=p.device).manual_seed(philox_seed), device=p.device, dtype=p.dtype)
+        dropout_mask, dropout_scale = rand_vals > dropout_p,  (1.0 / (1 - dropout_p))
         p_drop = torch.where(dropout_mask, p * dropout_scale, torch.zeros_like(p))
         if DEBUG_CORE:
             print("dropout_scale:", dropout_scale)
