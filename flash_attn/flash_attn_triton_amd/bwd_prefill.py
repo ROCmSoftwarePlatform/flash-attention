@@ -205,25 +205,28 @@ def _bwd_kernel_one_col_block(
             philox_offset = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
             # print("philox_seed:", philox_seed)
             # print("philox_offset:", philox_offset)
-            rng_output = tl.rand(philox_seed, philox_offset)
-            keep = rng_output > dropout_p
+            rand_vals = tl.rand(philox_seed, philox_offset)
+            dropout_mask = rand_vals > dropout_p
             dropout_scale = 1/ (1 - dropout_p)
-            p_drop = tl.where(keep, p * dropout_scale, 0.0)
+            p_drop = tl.where(dropout_mask, p, 0.0)
+            p_drop_scaled = p_drop * dropout_scale
 
             # compute dv
-            dv += tl.dot(tl.trans(p_drop), do)
+            dv += tl.dot(tl.trans(p_drop_scaled) , do)
 
             # compute dp
             dp = tl.dot(do, tl.trans(v))
-            dp_drop = tl.where(keep, dp * dropout_scale, 0.0)
+            dp_drop = tl.where(dropout_mask, dp, 0.0)
+            dp_drop_scaled = dp_drop * dropout_scale 
 
-            # compute ds , ds = p * (dp - delta[:, None])
-            d_ptrs = d_offset + offs_m * stride_deltam
-            Di = tl.load(d_ptrs, mask=mask_m)
-            ds = (p * (dp_drop - Di[:, None])) * sm_scale
+            # compute ds
+            delta_ptrs = d_offset + offs_m * stride_deltam
+            delta_i = tl.load(delta_ptrs, mask=mask_m)
+            dscores_scaled = (p * (dp_drop_scaled - delta_i[:, None]))
+            ds = dscores_scaled * sm_scale
             ds = tl.where(p_mask, ds, 0.0)
             
-            # compute dk = dot(ds.T, q)
+            # compute dk
             dk += tl.dot(tl.trans(ds), q)
 
             # compute dq
@@ -241,9 +244,9 @@ def _bwd_kernel_one_col_block(
             dp = tl.dot(do, tl.trans(v))
 
             # compute ds , ds = p * (dp - delta[:, None])
-            d_ptrs = d_offset + offs_m * stride_deltam
-            Di = tl.load(d_ptrs, mask=mask_m)
-            ds = (p * (dp - Di[:, None])) * sm_scale
+            delta_ptrs = d_offset + offs_m * stride_deltam
+            delta_i = tl.load(delta_ptrs, mask=mask_m)
+            ds = (p * (dp - delta_i[:, None])) * sm_scale
             ds = tl.where(p_mask, ds, 0.0)
             
             # compute dk = dot(ds.T, q)

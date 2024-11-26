@@ -75,29 +75,33 @@ def attention_backward_core_ref_impl(
     if dropout_p > 0.0:
         rand_vals = torch.rand(p.shape, generator=torch.Generator(device=p.device).manual_seed(philox_seed), device=p.device, dtype=p.dtype)
         dropout_mask, dropout_scale = rand_vals > dropout_p,  (1.0 / (1 - dropout_p))
-        p_drop = torch.where(dropout_mask, p * dropout_scale, torch.zeros_like(p))
+        p_drop = torch.where(dropout_mask, p, torch.zeros_like(p))
+        p_drop_scaled =  p_drop * dropout_scale
         if DEBUG_CORE:
             print("dropout_scale:", dropout_scale)
-            print("p after dropout:", p_drop, p_drop.shape)
+            print("p_drop:", p_drop, p_drop.shape)
+            print("p_drop_scaled:", p_drop_scaled, p_drop_scaled.shape)
         
         # compute gradient wrt v
-        dv = torch.matmul(p_drop.transpose(-2, -1), do)
+        dv = torch.matmul(p_drop_scaled.transpose(-2, -1), do)
         if DEBUG_CORE:
             print("dv:", dv, dv.shape)
 
         # compute dp
         dp = torch.matmul(do, v.transpose(-2, -1))
-        dp_drop = torch.where(dropout_mask, dp * dropout_scale, torch.zeros_like(dp))
+        dp_drop = torch.where(dropout_mask, dp , torch.zeros_like(dp))
+        dp_drop_scaled = dp_drop * dropout_scale
         if DEBUG_CORE:
             print("dp:", dp, dp.shape)
             print("dp_drop:", dp_drop, dp_drop.shape)
+            print("dp_drop_scaled:", dp_drop_scaled, dp_drop_scaled.shape)
 
         # calculate ds
         if False:
             delta = torch.sum(o * do, axis=-1).unsqueeze(-1)
         else:
-            delta = torch.sum(p * dp_drop, axis=-1).unsqueeze(-1)
-        dscores_scaled = p * (dp_drop - delta)
+            delta = torch.sum(p * dp_drop_scaled, axis=-1).unsqueeze(-1)
+        dscores_scaled = p * (dp_drop_scaled - delta)
         ds = dscores_scaled * sm_scale
         if DEBUG_CORE:
             print("delta:", delta, delta.shape)
