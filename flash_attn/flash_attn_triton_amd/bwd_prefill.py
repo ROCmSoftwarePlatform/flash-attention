@@ -207,34 +207,55 @@ def _bwd_kernel_one_col_block(
             # print("philox_offset:", philox_offset)
             rng_output = tl.rand(philox_seed, philox_offset)
             keep = rng_output > dropout_p
-            p = tl.where(keep, p, 0.0)
+            dropout_scale = 1/ (1 - dropout_p)
+            p_drop = tl.where(keep, p * dropout_scale, 0.0)
 
-            p = p / (1 - dropout_p)
+            # compute dv
+            dv += tl.dot(tl.trans(p_drop), do)
+
+            # compute dp
+            dp = tl.dot(do, tl.trans(v))
+            dp_drop = tl.where(keep, dp * dropout_scale, 0.0)
+
+            # compute ds , ds = p * (dp - delta[:, None])
+            d_ptrs = d_offset + offs_m * stride_deltam
+            Di = tl.load(d_ptrs, mask=mask_m)
+            ds = (p * (dp_drop - Di[:, None])) * sm_scale
+            ds = tl.where(p_mask, ds, 0.0)
+            
+            # compute dk = dot(ds.T, q)
+            dk += tl.dot(tl.trans(ds), q)
+
+            # compute dq
+            if SEQUENCE_PARALLEL:
+                dq = tl.dot(ds, k)
+            else:
+                dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
+                dq += tl.dot(ds, k)
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
         else:
-            p = p
-        
-        # compute dv
-        dv += tl.dot(tl.trans(p), do)
+            # compute dv
+            dv += tl.dot(tl.trans(p), do)
 
-        # compute dp
-        dp = tl.dot(do, tl.trans(v))
+            # compute dp
+            dp = tl.dot(do, tl.trans(v))
 
-        # compute ds , ds = p * (dp - delta[:, None])
-        d_ptrs = d_offset + offs_m * stride_deltam
-        Di = tl.load(d_ptrs, mask=mask_m)
-        ds = (p * (dp - Di[:, None])) * sm_scale
-        ds = tl.where(p_mask, ds, 0.0)
-        
-        # compute dk = dot(ds.T, q)
-        dk += tl.dot(tl.trans(ds), q)
+            # compute ds , ds = p * (dp - delta[:, None])
+            d_ptrs = d_offset + offs_m * stride_deltam
+            Di = tl.load(d_ptrs, mask=mask_m)
+            ds = (p * (dp - Di[:, None])) * sm_scale
+            ds = tl.where(p_mask, ds, 0.0)
+            
+            # compute dk = dot(ds.T, q)
+            dk += tl.dot(tl.trans(ds), q)
 
-        # compute dq
-        if SEQUENCE_PARALLEL:
-            dq = tl.dot(ds, k)
-        else:
-            dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
-            dq += tl.dot(ds, k)
-        tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
+            # compute dq
+            if SEQUENCE_PARALLEL:
+                dq = tl.dot(ds, k)
+            else:
+                dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
+                dq += tl.dot(ds, k)
+            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
 
     # write-back dv and dk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
