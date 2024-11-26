@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-from .common import dropout_mask
 from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG, PERF
 
 @triton.jit

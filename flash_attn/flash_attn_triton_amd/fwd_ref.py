@@ -1,7 +1,6 @@
 import torch
 import math
 from .utils import DEBUG
-from .common import generate_dropout_mask_ref
 
 DEBUG_CORE = DEBUG and False
 

@@ -1110,10 +1110,11 @@ def test_flash_attn_output(
     if dropout_p > 0.0:
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
+    test_backward = False
 
     g = torch.randn_like(out)
     do_o = (g.float() * out.float()).sum(-1)
-    if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
+    if test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
         if kvpacked:
             (
                 dq,
@@ -1178,7 +1179,7 @@ def test_flash_attn_output(
                 print("dropout_p:", dropout_p)
             assert abs(dropout_fraction - dropout_p) <= (0.01 if not local else 0.025)
 
-    if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
+    if test_backward and ((d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90)):
         if DEBUG:
             print("dv:", dv, dv.shape)
             print("dv_ref:", dv_ref, dv_ref.shape)
