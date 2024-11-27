@@ -2,7 +2,7 @@ import torch
 import math
 from .utils import DEBUG
 
-DEBUG_CORE = DEBUG and True
+DEBUG_CORE = False
 
 def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2):
     if DEBUG_CORE:

@@ -982,10 +982,10 @@ def attention_prefill_backward_triton_impl(
 
     if DEBUG:
         print("attention_prefill_backward_triton_impl outputs")
-        print("dq:", dq, dq.shape)
-        print("dk:", dk, dk.shape)
-        print("dv:", dv, dv.shape)
         print("delta:", delta, delta.shape)
+        print("dv:", dv, dv.shape)
+        print("dk:", dk, dk.shape)
+        print("dq:", dq, dq.shape)
         print("copy_back:", copy_back)
 
     if copy_back["dq"]:
