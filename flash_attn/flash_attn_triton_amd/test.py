@@ -344,46 +344,46 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        # (1, 1, 1, 1, 1, 1),
-        # (1, 1, 1, 2, 4, 16),
+        (1, 1, 1, 1, 1, 1),
+        (1, 1, 1, 2, 4, 16),
         (1, 2, 2, 2, 4, 16),
-        # (1, 4, 1, 2, 4, 16),
-        # (1, 4, 2, 2, 4, 16),
-        # (1, 1, 1, 4, 2, 16),
-        # (1, 1, 1, 4, 4, 16),
-        # (1, 2, 2, 4, 4, 16),
-        # (2, 1, 1, 4, 4, 16),
-        # (2, 2, 2, 4, 4, 16),
-        # (1, 1, 1, 8, 8, 16),
-        # (1, 1, 1, 16, 16, 16),
-        # (1, 1, 1, 64, 64, 16),
-        # (1, 1, 1, 128, 64, 16),
-        # (2, 2, 2, 2, 128, 1),
-        # (2, 3, 3, 2, 128, 16),
-        # (3, 2, 2, 256, 512, 16),
-        # (3, 3, 3, 128, 128, 64),
-        # (2, 4, 4, 1024, 1024, 64),
-        # (4, 6, 6, 108, 256, 224),
-        # (4, 8, 8, 2048, 2048, 128),
-        # (4, 16, 16, 4096, 4096, 64),
-        # (2, 4, 4, 8192, 8192, 32),
-        # # fa configs
-        # (4, 6, 1, 113, 203, 256),
-        # (4, 6, 1, 128, 217, 256),
-        # (4, 6, 2, 113, 211, 128),
-        # (4, 6, 2, 108, 256, 128),
-        # (4, 6, 1, 256, 512, 64),
-        # (4, 6, 1, 512, 256, 64),
-        # (4, 6, 2, 1024, 1024, 32),
-        # (4, 6, 2, 1023, 1024, 32),
-        # (4, 6, 6, 1024, 1023, 32),
-        # (4, 6, 6, 2048, 2048, 32),
+        (1, 4, 1, 2, 4, 16),
+        (1, 4, 2, 2, 4, 16),
+        (1, 1, 1, 4, 2, 16),
+        (1, 1, 1, 4, 4, 16),
+        (1, 2, 2, 4, 4, 16),
+        (2, 1, 1, 4, 4, 16),
+        (2, 2, 2, 4, 4, 16),
+        (1, 1, 1, 8, 8, 16),
+        (1, 1, 1, 16, 16, 16),
+        (1, 1, 1, 64, 64, 16),
+        (1, 1, 1, 128, 64, 16),
+        (2, 2, 2, 2, 128, 1),
+        (2, 3, 3, 2, 128, 16),
+        (3, 2, 2, 256, 512, 16),
+        (3, 3, 3, 128, 128, 64),
+        (2, 4, 4, 1024, 1024, 64),
+        (4, 6, 6, 108, 256, 224),
+        (4, 8, 8, 2048, 2048, 128),
+        (4, 16, 16, 4096, 4096, 64),
+        (2, 4, 4, 8192, 8192, 32),
+        # fa configs
+        (4, 6, 1, 113, 203, 256),
+        (4, 6, 1, 128, 217, 256),
+        (4, 6, 2, 113, 211, 128),
+        (4, 6, 2, 108, 256, 128),
+        (4, 6, 1, 256, 512, 64),
+        (4, 6, 1, 512, 256, 64),
+        (4, 6, 2, 1024, 1024, 32),
+        (4, 6, 2, 1023, 1024, 32),
+        (4, 6, 6, 1024, 1023, 32),
+        (4, 6, 6, 2048, 2048, 32),
     ],
 )
-@pytest.mark.parametrize('causal', [ False])
-@pytest.mark.parametrize('dropout_p', [0.5])
-@pytest.mark.parametrize('layout', ["bhsd"])
-@pytest.mark.parametrize('use_exp2', [False]) # works when use_exp2 is false
+@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('use_exp2', [True, False]) # works when use_exp2 is false
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # NOTE: debug input can overflow when the tensors are large. Just use to figure out issues
 def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, layout, use_exp2, DEBUG_INPUT):
     dtype = torch.float16
@@ -523,11 +523,12 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     (1, 16, 16, 1024, 1024, 128),
 ])
 @pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('dropout_p', [0.0])
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
-def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
+def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
 
@@ -540,6 +541,10 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
         do = torch.ones_like(q).contiguous()
     else:
         do = torch.randn_like(q)
+
+    # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
+    if dropout_p > 0.0:
+        metadata.need_dropout(dropout_p)
 
     # =============================================== Reference ==============================================================
     q_ref = q.clone() 
