@@ -78,7 +78,6 @@ def _bwd_preprocess_use_p(
         N_CTX_Q = max_seqlen_q
         N_CTX_K = max_seqlen_k
 
-
     if DROPOUT:
         stride_sz = HQ * max_seqlen_q * max_seqlen_k
         stride_sh = max_seqlen_q * max_seqlen_k
@@ -86,7 +85,6 @@ def _bwd_preprocess_use_p(
         batch_philox_offset = philox_offset_base + off_z * stride_sz + off_hq * stride_sh + q_start * stride_sm
     else:
         batch_philox_offset = 0
-    
 
     # input tensor offsets
     q_offset = Q + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
@@ -95,7 +93,6 @@ def _bwd_preprocess_use_p(
     do_offset = DO + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
     l_offset = L + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
     delta_offset = Delta + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
-
 
     if CAUSAL:
         # TODO: Causal can skip more blocks with something like lo = start_m * BLOCK_M
@@ -107,14 +104,11 @@ def _bwd_preprocess_use_p(
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
     # masks
-    
     mask_d = offs_d < ACTUAL_BLOCK_DMODEL
-    
-
-
 
     # loop over rows
-    offs_m = start_m + tl.arange(0, BLOCK_M)
+    offs_m = start_m* BLOCK_M + tl.arange(0, BLOCK_M)
+    # offs_m = start_m + tl.arange(0, BLOCK_M)
     q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
     do_ptrs = do_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
     
@@ -126,13 +120,13 @@ def _bwd_preprocess_use_p(
     q = tl.load(q_ptrs, mask=q_mask, other=0.0).to(tl.float32)
     do = tl.load(do_ptrs, mask=q_mask, other=0.0).to(tl.float32)
 
-    
-
     # delta
     delta_ptrs = delta_offset + offs_m * stride_deltam
     delta_partial = tl.zeros([BLOCK_M], dtype=tl.float32)
     
-    for start_n in range(lo, num_block_n * BLOCK_N, BLOCK_N):
+    for start_n in range(lo, num_block_n):
+        # print("start_n:", start_n)
+        # offs_n = start_n + tl.arange(0, BLOCK_N)
         offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
         mask_n = offs_n < N_CTX_K
         kv_mask = mask_n[:, None] & mask_d[None, :]
@@ -145,6 +139,8 @@ def _bwd_preprocess_use_p(
 
         # recompute p = softmax(qk, dim=-1).T
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        # print("q:", q)
+        # print("k:", k)
         qk += tl.dot(q, tl.trans(k))
 
         if CAUSAL:
@@ -168,7 +164,7 @@ def _bwd_preprocess_use_p(
         # mask block in the cases where the data is smaller the block size
         p_mask = mask_m[:, None] & mask_n[None, :]
         p = tl.where(p_mask, p, 0.0)
-        p = p.to(tl.float32)
+        # print("p:", p)
         
         # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
         if DROPOUT:
@@ -186,6 +182,9 @@ def _bwd_preprocess_use_p(
             # compute dp
             dp_drop_scaled = tl.dot(do, tl.trans(v))
             dp = tl.where(dropout_mask, dp_drop_scaled, 0.0) * dropout_scale
+            # dp = tl.where(p_mask, dp, 0.0)
+
+            # print("dp:", dp)
 
             # compute delta
             delta = tl.sum(p * dp, axis=1)
@@ -195,8 +194,9 @@ def _bwd_preprocess_use_p(
 
             # compute delta
             delta = tl.sum(p * dp, axis=1)
+        # print("delta:", delta)
 
-        delta_partial +=delta
+        delta_partial += delta
 
     tl.store(delta_ptrs, delta_partial, mask=mask_m)
 
