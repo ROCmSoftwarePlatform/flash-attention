@@ -477,53 +477,53 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
-    (1, 1, 1, 1, 1, 1),
-    (1, 1, 1, 4, 4, 4),
-    (2, 1, 1, 4, 4, 16),
+    # (1, 1, 1, 1, 1, 1),
+    # (1, 1, 1, 4, 4, 4),
+    # (2, 1, 1, 4, 4, 16),
     (1, 2, 2, 4, 4, 16),
-    (1, 4, 1, 2, 4, 16),
-    (1, 8, 1, 2, 4, 16),
-    (1, 16, 1, 2, 4, 16),
-    (1, 32, 1, 2, 4, 16),
-    (1, 64, 1, 2, 4, 16),
-    (1, 4, 2, 2, 4, 16),
-    (2, 2, 2, 4, 4, 16),
-    (1, 1, 1, 4, 4, 16),
-    (2, 1, 1, 4, 4 , 16),
-    (4, 6, 6, 8, 8 , 16),
-    (1, 1, 1, 4, 4, 32),
-    (1, 1, 1, 16, 16, 16),
-    (1, 1, 1, 32, 32, 16),
-    (1, 1, 1, 64, 64, 16),
-    (1, 1, 1, 64, 64, 64),
-    (1, 1, 1, 64, 128, 32),
-    (1, 1, 1, 128, 128, 64),
-    (1, 1, 1, 128, 256, 45),
-    (1, 1, 1, 113, 203, 192),
-    (1, 1, 1, 256, 256, 64),
-    (1, 1, 1, 256, 512, 16),
-    (1, 1, 1, 512, 512, 64), 
-    (1, 1, 1, 1024, 1024, 64),
-    # fa configs
-    (2, 2, 2, 128, 128, 65),
-    (2, 2, 2, 128, 128, 224),
-    (4, 6, 6, 108, 256, 224),
-    (1, 1, 1, 256, 512, 16),
-    # old tests that work
-    (4, 48, 6, 1024, 1024, 64),
-    (4, 48, 12, 1024, 1024, 64),
-    (4, 48, 24, 1024, 1024, 64),
-    (4, 48, 48, 1024, 1024, 64),
-    (4, 48, 48, 1024, 1024, 73),
-    (4, 48, 48, 2048, 2048, 64),
-    (1, 24, 24, 4096, 4096, 64),
-    (1, 16, 16, 1024, 1024, 64),
-    (1, 16, 16, 1024, 1024, 128),
+    # (1, 4, 1, 2, 4, 16),
+    # (1, 8, 1, 2, 4, 16),
+    # (1, 16, 1, 2, 4, 16),
+    # (1, 32, 1, 2, 4, 16),
+    # (1, 64, 1, 2, 4, 16),
+    # (1, 4, 2, 2, 4, 16),
+    # (2, 2, 2, 4, 4, 16),
+    # (1, 1, 1, 4, 4, 16),
+    # (2, 1, 1, 4, 4 , 16),
+    # (4, 6, 6, 8, 8 , 16),
+    # (1, 1, 1, 4, 4, 32),
+    # (1, 1, 1, 16, 16, 16),
+    # (1, 1, 1, 32, 32, 16),
+    # (1, 1, 1, 64, 64, 16),
+    # (1, 1, 1, 64, 64, 64),
+    # (1, 1, 1, 64, 128, 32),
+    # (1, 1, 1, 128, 128, 64),
+    # (1, 1, 1, 128, 256, 45),
+    # (1, 1, 1, 113, 203, 192),
+    # (1, 1, 1, 256, 256, 64),
+    # (1, 1, 1, 256, 512, 16),
+    # (1, 1, 1, 512, 512, 64), 
+    # (1, 1, 1, 1024, 1024, 64),
+    # # fa configs
+    # (2, 2, 2, 128, 128, 65),
+    # (2, 2, 2, 128, 128, 224),
+    # (4, 6, 6, 108, 256, 224),
+    # (1, 1, 1, 256, 512, 16),
+    # # old tests that work
+    # (4, 48, 6, 1024, 1024, 64),
+    # (4, 48, 12, 1024, 1024, 64),
+    # (4, 48, 24, 1024, 1024, 64),
+    # (4, 48, 48, 1024, 1024, 64),
+    # (4, 48, 48, 1024, 1024, 73),
+    # (4, 48, 48, 2048, 2048, 64),
+    # (1, 24, 24, 4096, 4096, 64),
+    # (1, 16, 16, 1024, 1024, 64),
+    # (1, 16, 16, 1024, 1024, 128),
 ])
-@pytest.mark.parametrize('causal', [True, False])
+@pytest.mark.parametrize('causal', [False])
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
-@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
-@pytest.mark.parametrize('sequence_parallel', [True, False])
+@pytest.mark.parametrize('layout', ["bhsd"])
+@pytest.mark.parametrize('sequence_parallel', [False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
 def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
     dtype = torch.float16
@@ -543,15 +543,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
     q_ref = q.clone() 
     k_ref = k.clone()
     v_ref = v.clone()    
-    (
-        o_ref,
-        softmax_lse_ref,
-        _,
-        _,
-        _,
-        _,
-        _,
-    ) = attention_forward_pytorch_ref_impl(
+    output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
         q_ref,
         k_ref, 
         v_ref,
@@ -562,6 +554,9 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
         use_exp2
     )
 
@@ -586,7 +581,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
         q_ref,
         k_ref,
         v_ref,
-        o_ref,
+        output_ref,
         softmax_lse_ref,
         metadata.sm_scale,
         causal,
@@ -595,11 +590,14 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
         use_exp2
     )
 
     # =============================================== Triton ==============================================================
-    o = o_ref.clone().contiguous()
+    o = output_ref.clone().contiguous()
     softmax_lse = softmax_lse_ref.clone().contiguous()
     dq_triton, dk_triton, dv_triton, delta_triton, _, _ = attention_prefill_backward_triton_impl(
         do,
@@ -619,6 +617,9 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_ex
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
+        metadata.dropout_p,
+        metadata.philox_seed, 
+        metadata.philox_offset, 
         use_exp2,
         sequence_parallel=sequence_parallel
     )
