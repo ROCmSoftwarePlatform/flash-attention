@@ -566,7 +566,7 @@ def attention_prefill_forward_triton_impl(
         scores_strides = (exp_scores.stride(0), exp_scores.stride(1), exp_scores.stride(2), exp_scores.stride(3))
     else:
         exp_scores = None
-        scores_strides = None
+        scores_strides = (0, 0 , 0 , 0)
 
     # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
     if is_varlen:

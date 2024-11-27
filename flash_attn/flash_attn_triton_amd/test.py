@@ -522,10 +522,10 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     (1, 16, 16, 1024, 1024, 64),
     (1, 16, 16, 1024, 1024, 128),
 ])
-@pytest.mark.parametrize('causal', [False])
+@pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
-@pytest.mark.parametrize('layout', ["bhsd"])
-@pytest.mark.parametrize('sequence_parallel', [False])
+@pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
+@pytest.mark.parametrize('sequence_parallel', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
 def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
     dtype = torch.float16

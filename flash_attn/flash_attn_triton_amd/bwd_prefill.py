@@ -354,8 +354,8 @@ def _bwd_kernel_one_col_block(
     v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
 
     # loop over rows
-    for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
-        offs_m = start_m + tl.arange(0, BLOCK_M)
+    for start_m in range(lo, num_block_m):
+        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
         q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
         dq_ptrs = dq_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
         do_ptrs = do_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
