@@ -900,7 +900,7 @@ def attention_prefill_backward_triton_impl(
             IS_VARLEN=is_varlen
         )
 
-    if DEBUG:
+    if False:
         print("_bwd_kernel inputs")
         print("do:", do, do.shape)
         print("q:", q, q.shape)

@@ -377,8 +377,8 @@ def attention_forward_pytorch_ref_impl(
     if DEBUG:
         print()
         print("attention_forward_pytorch_ref_impl outputs")
-        print("o_ref:", o_ref, o_ref.shape)
-        print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
-        print("sd_mask_ref:", sd_mask_ref, sd_mask_ref.shape if sd_mask_ref is not None else None)
+        print("o:", o_ref, o_ref.shape)
+        print("softmax_lse:", softmax_lse_ref, softmax_lse_ref.shape)
+        print("sd_mask:", sd_mask_ref, sd_mask_ref.shape if sd_mask_ref is not None else None)
 
     return o_ref, softmax_lse_ref, sd_mask_ref

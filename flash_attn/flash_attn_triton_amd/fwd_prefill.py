@@ -561,11 +561,11 @@ def attention_prefill_forward_triton_impl(
     # to the dropout mask. The resulting return allows this mask to be fed into the reference implementation for testing
     # only.  This return holds no useful output aside from debugging.
     if return_scores:
-        exp_scores = torch.zeros((batch, nheads_q, max_seqlens_q, max_seqlens_k), device=q.device,
+        sd_mask = torch.zeros((batch, nheads_q, max_seqlens_q, max_seqlens_k), device=q.device,
                                         dtype=torch.float32)
-        scores_strides = (exp_scores.stride(0), exp_scores.stride(1), exp_scores.stride(2), exp_scores.stride(3))
+        scores_strides = (sd_mask.stride(0), sd_mask.stride(1), sd_mask.stride(2), sd_mask.stride(3))
     else:
-        exp_scores = None
+        sd_mask = None
         scores_strides = (0, 0 , 0 , 0)
 
     # stores LSE the log of the normalization constant / sum of expoential score(unnormalzied probablities)
@@ -591,7 +591,7 @@ def attention_prefill_forward_triton_impl(
 
     attn_fwd[grid](q, k, v, bias, sm_scale, softmax_lse, o, *q_strides, *k_strides, *v_strides, *o_strides,
                     *bias_strides, *alibi_strides, *scores_strides, stride_lse_z, stride_lse_h, stride_lse_m, cu_seqlens_q, cu_seqlens_k,
-                    dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, exp_scores=exp_scores, alibi_slopes=alibi_slopes, 
+                    dropout_p=dropout_p, philox_seed=philox_seed, philox_offset_base=philox_offset, exp_scores=sd_mask, alibi_slopes=alibi_slopes, 
                     HQ=nheads_q, HK=nheads_k, ACTUAL_BLOCK_DMODEL=head_size, MAX_SEQLENS_Q=max_seqlens_q,
                     MAX_SEQLENS_K=max_seqlens_k, IS_CAUSAL=causal, VARLEN=is_varlen,
                     BLOCK_DMODEL=padded_d_model, USE_BIAS=False if bias is None else True,
@@ -603,6 +603,6 @@ def attention_prefill_forward_triton_impl(
         print("attention_prefill_forward_triton_impl outputs")
         print("o:", o, o.shape)
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("exp_scores:", exp_scores, exp_scores.shape if exp_scores is not None else None)
+        print("sd_mask:", sd_mask, sd_mask.shape if sd_mask is not None else None)
 
-    return o, softmax_lse, exp_scores.to(o.dtype) if return_scores else None 
+    return o, softmax_lse, sd_mask.to(o.dtype) if return_scores else None 
