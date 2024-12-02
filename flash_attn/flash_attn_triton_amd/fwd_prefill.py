@@ -132,12 +132,12 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
             rng_output = tl.rand(philox_seed, philox_ptrs)  # TODO: use tl.randint for better performance
-            keep = rng_output > dropout_p
+            dropout_mask = rng_output > dropout_p
             if RETURN_SCORES:
                 # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
                 exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-                tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
-            p = tl.where(keep, p, 0.0)
+                tl.store(exp_scores_ptrs, tl.where(dropout_mask, p, -p), mask=exp_score_mask)
+            p = tl.where(dropout_mask, p, 0.0)
         elif RETURN_SCORES:
             # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
             exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
@@ -436,7 +436,8 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, LSE, Out, stride_qz, stride_
     l_recip = 1 / l_i[:, None]
     acc = acc * l_recip
     if ENABLE_DROPOUT:
-        acc = acc / (1 - dropout_p)
+        dropout_scale = 1 / (1 - dropout_p)
+        acc = acc * dropout_scale
     # If seqlen_q > seqlen_k but the delta is not a multiple of BLOCK_M,
     # then we have one block with a row of all NaNs which come from computing
     # softmax over a row of all -infs (-inf - inf = NaN). We check for that here

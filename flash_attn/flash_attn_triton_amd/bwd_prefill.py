@@ -353,6 +353,9 @@ def _bwd_kernel_one_col_block(
     k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
     v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
 
+    if DROPOUT:
+        dropout_scale = 1/ (1 - dropout_p)
+
     # loop over rows
     for start_m in range(lo, num_block_m):
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -404,22 +407,19 @@ def _bwd_kernel_one_col_block(
             # print("philox_offset:", philox_offset)
             rand_vals = tl.rand(philox_seed, philox_offset)
             dropout_mask = rand_vals > dropout_p
-            dropout_scale = 1/ (1 - dropout_p)
             p_drop = tl.where(dropout_mask, p, 0.0)
-            p_drop_scaled = p_drop * dropout_scale
 
             # compute dv
-            dv += tl.dot(tl.trans(p_drop_scaled) , do)
+            dv += tl.dot(tl.trans(p) , do)
 
             # compute dp
-            dp = tl.dot(do, tl.trans(v))
-            dp_drop = tl.where(dropout_mask, dp, 0.0)
-            dp_drop_scaled = dp_drop * dropout_scale 
+            dp_drop_scaled = tl.dot(do, tl.trans(v))
+            dp = tl.where(dropout_mask, dp_drop_scaled, 0.0)
 
             # compute ds
             delta_ptrs = d_offset + offs_m * stride_deltam
             delta_i = tl.load(delta_ptrs, mask=mask_m)
-            dscores_scaled = (p * (dp_drop_scaled - delta_i[:, None]))
+            dscores_scaled = (p * (dp - delta_i[:, None]))
             ds = dscores_scaled * sm_scale
             ds = tl.where(p_mask, ds, 0.0)
             
@@ -460,6 +460,9 @@ def _bwd_kernel_one_col_block(
     # write-back dv and dk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
+
+    if DROPOUT:
+        dv *= dropout_scale
     
     # write-back
     if GROUP_SIZE != 1:
@@ -552,9 +555,9 @@ def _bwd_kernel(
 
 
     if DROPOUT:
-        stride_sz = HQ * max_seqlen_q * max_seqlen_k
-        stride_sh = max_seqlen_q * max_seqlen_k
-        stride_sm = max_seqlen_k
+        stride_sz = HQ * N_CTX_Q * N_CTX_K
+        stride_sh = N_CTX_Q * N_CTX_K
+        stride_sm = N_CTX_K
         batch_philox_offset = philox_offset_base + off_z * stride_sz + off_hq * stride_sh + q_start * stride_sm
     else:
         batch_philox_offset = 0

@@ -953,7 +953,7 @@ def test_flash_attn_output(
     nheads_k = nheads if mha_type == "mha" else (1 if mha_type == "mqa" else 2)
     assert nheads % nheads_k == 0
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
-    q = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
+    q = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True)
     if softcap > 0:
         # Ensure the values of qk are at least within softcap range.
         q = q * softcap
@@ -962,10 +962,10 @@ def test_flash_attn_output(
             batch_size, seqlen_k, 2, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     else:
-        k = torch.randn(
+        k = torch.ones(
             batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
-        v = torch.randn(
+        v = torch.ones(
             batch_size, seqlen_k, nheads_k, d, device=device, dtype=dtype, requires_grad=True
         )
     if alibi:
@@ -1002,7 +1002,7 @@ def test_flash_attn_output(
     if DEBUG:
         print("out:", out, out.shape)
         print("lse:", lse, lse.shape)
-        print("S_dmask:", S_dmask, S_dmask.shape)
+        print("S_dmask:", S_dmask, S_dmask.shape if S_dmask is not None else None)
 
     if dropout_p > 0.0:
         S_dmask_converted = convert_flash_attn_S_to_softmax(
@@ -1108,7 +1108,7 @@ def test_flash_attn_output(
         print(f"Attention max diff: {(attn - attn_ref).abs().max().item()}")
         print(f"Attention Pytorch max diff: {(attn_pt - attn_ref).abs().max().item()}")
 
-    g = torch.randn_like(out)
+    g = torch.ones_like(out)
     do_o = (g.float() * out.float()).sum(-1)
     if (d <= MAX_HEADDIM_SM8x or dropout_p == 0) or (is_sm80 or is_sm90):
         if kvpacked:
