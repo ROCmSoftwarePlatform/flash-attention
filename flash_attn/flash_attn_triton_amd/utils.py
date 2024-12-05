@@ -14,7 +14,7 @@ PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', '
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 if USE_TRITON_ROCM: # TODO remove this
     random.seed(42)
-DROPOUT_USE_PYTORCH = True
+DROPOUT_USE_PYTORCH = False
 DROPOUT_DUMP = False
 
 class MetaData():
@@ -328,12 +328,12 @@ def get_input_shapes():
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
 
+def get_arch():
+    return triton.runtime.driver.active.get_current_target().arch
 
 def is_cdna():
-    return is_hip() and triton.runtime.driver.active.get_current_target().arch in ('gfx940', 'gfx941', 'gfx942',
-                                                                                   'gfx90a', 'gfx908')
+    return is_hip() and get_arch() in ('gfx940', 'gfx941', 'gfx942', 'gfx90a', 'gfx908')
 
 
 def is_rdna():
-    return is_hip() and triton.runtime.driver.active.get_current_target().arch in ("gfx1030", "gfx1100", "gfx1101",
-                                                                                   "gfx1102", "gfx1200", "gfx1201")
+    return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
