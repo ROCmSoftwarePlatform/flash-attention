@@ -2,7 +2,8 @@ import torch
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
-
+from einops import rearrange, repeat, parse_shape
+from flash_attn.layers.rotary import apply_rotary_emb
 
 class _attention_prefill(torch.autograd.Function):
     @staticmethod
@@ -78,6 +79,33 @@ attention_prefill = _attention_prefill.apply
 class _attention_decode(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, metadata):
+        if metadata.rotary_cos is not None:    
+                q_original_shape = parse_shape(q, 'b s g h d')
+                if metadata.causal:     # NOTE: when local support is added. Add `or metadata.local`
+                    q_ro = apply_rotary_emb(
+                        q,
+                        metadata.rotary_cos,
+                        metadata.rotary_sin,
+                        seqlen_offsets=metadata.cache_seqlens if metadata.cache_seqlens else 0,
+                        interleaved=metadata.rotary_interleaved,
+                    )
+                else:
+                    q_ro = rearrange(
+                        apply_rotary_emb(
+                            rearrange(q, "b s g h d -> b 1 (s g h) d"),
+                            metadata.rotary_cos,
+                            metadata.rotary_sin,
+                            seqlen_offsets=metadata.cache_seqlens if metadata.cache_seqlens else 0,
+                            interleaved=metadata.rotary_interleaved,
+                        ),
+                        "b 1 (s g h) d -> b s g h d",
+                        s=q_original_shape['s'],
+                        g=q_original_shape['g'],
+                        h=q_original_shape['h']
+                    )
+
+                q, metadata.k_new = q_ro.to(q.dtype), None
+
         output, softmax_lse = attention_decode_forward_triton_impl(
             q,
             k,
