@@ -1,9 +1,11 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask, create_dropout_mask
 
-DEBUG_DROPOUT: tl.constexpr = False
+# NOTE: triton fails to import tl.constexprs so create them here for the file
+tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
+tl_DROPOUT_DUMP: tl.constexpr = DROPOUT_DUMP
 
 # Convenience function to load with optional boundary checks.
 # "First" is the major dim, "second" is the minor dim.
@@ -130,21 +132,27 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
         else:
             p = tl.math.exp(q_shifted)
 
+        p_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
+
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
-            rng_output = tl.rand(philox_seed, philox_ptrs)  # TODO: use tl.randint for better performance
-            dropout_mask = rng_output > dropout_p
-            if RETURN_SCORES:
-                # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-                p_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-                tl.store(sd_mask_ptrs, tl.where(dropout_mask, p, -p), mask=p_mask)
-                if DEBUG_DROPOUT:
+            if tl_DROPOUT_USE_PYTORCH:
+                dropout_mask = tl.load(dropout_mask_ptrs, mask=p_mask)
+            else:
+                rng_output = tl.rand(philox_seed, philox_ptrs)  # TODO: use tl.randint for better performance
+                dropout_mask = rng_output > dropout_p
+                if tl_DROPOUT_DUMP:
                     tl.store(dropout_mask_ptrs, dropout_mask, mask=p_mask)
+
+            # return scores with negative values for dropped vals
+            sd_mask = tl.where(dropout_mask, p, -p)
+            tl.store(sd_mask_ptrs, sd_mask, mask=p_mask)
+
+            # apply dropout mask in place
             p = tl.where(dropout_mask, p, 0.0)
         elif RETURN_SCORES:
             # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-            p_mask = (OFFS_M[:, None] < actual_seqlen_q) & ((start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
             tl.store(sd_mask_ptrs, p, mask=p_mask)
         
         # -- update output accumulator --
@@ -579,7 +587,10 @@ def attention_prefill_forward_triton_impl(
     if use_dropout or return_softmax:
         sd_mask = torch.zeros((batch, nheads_q, max_seqlens_q, max_seqlens_k), device=q.device,
                                         dtype=torch.float32)
-        dropout_mask = torch.zeros((batch, nheads_q, max_seqlens_q, max_seqlens_k), device=q.device,
+        if DROPOUT_USE_PYTORCH:
+            dropout_mask = create_dropout_mask(dropout_p, (batch, nheads_q, max_seqlens_q, max_seqlens_k), seed = philox_seed)
+        else:
+            dropout_mask = torch.zeros((batch, nheads_q, max_seqlens_q, max_seqlens_k), device=q.device,
                                         dtype=torch.float32)
         scores_strides = (sd_mask.stride(0), sd_mask.stride(1), sd_mask.stride(2), sd_mask.stride(3))
     else:

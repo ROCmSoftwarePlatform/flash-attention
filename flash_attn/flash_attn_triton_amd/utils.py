@@ -14,6 +14,8 @@ PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', '
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 if USE_TRITON_ROCM: # TODO remove this
     random.seed(42)
+DROPOUT_USE_PYTORCH = True
+DROPOUT_DUMP = False
 
 class MetaData():
     cu_seqlens_q = None
@@ -270,6 +272,11 @@ def compute_alibi_tensor_ref(alibi_slopes, seqlen_q, seqlen_k):
     k_idx = torch.arange(seqlen_k, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, N_CTX_K)
     relative_pos = torch.abs(q_idx + seqlen_k - seqlen_q - k_idx)  # (N_CTX_Q, N_CTX_K)
     return -1 * alibi_slopes.unsqueeze(-1).unsqueeze(-1) * relative_pos  # (Z, H, N_CTX_Q, N_CTX_K)
+
+def create_dropout_mask(dropout_p, shape, seed):
+    device = "cuda"
+    rand_vals = torch.rand(shape, generator=torch.Generator(device=device).manual_seed(seed), device=device, dtype=torch.float32)
+    return rand_vals > dropout_p
 
 def write_dropout_mask(x, tensor_name = "tensor"):
     batch, head, seqlen_m, seqlen_n = x.shape

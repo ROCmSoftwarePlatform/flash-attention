@@ -1,9 +1,11 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import DEBUG, get_shape_from_layout, get_strides_from_layout, write_dropout_mask
+from .utils import DEBUG, DROPOUT_USE_PYTORCH, DROPOUT_DUMP, get_shape_from_layout, get_strides_from_layout, write_dropout_mask, create_dropout_mask
 
-DEBUG_DROPOUT: tl.constexpr = False
+# NOTE: triton fails to import tl.constexprs so create them here for the file
+tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
+tl_DROPOUT_DUMP: tl.constexpr = DROPOUT_DUMP
 
 @triton.jit
 def _bwd_preprocess_use_p(
@@ -403,11 +405,15 @@ def _bwd_kernel_one_col_block(
             philox_offset = batch_philox_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
             # print("philox_seed:", philox_seed)
             # print("philox_offset:", philox_offset)
-            rand_vals = tl.rand(philox_seed, philox_offset)
-            dropout_mask = rand_vals > dropout_p
+            if tl_DROPOUT_USE_PYTORCH:
+                dropout_ptrs = dropout_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
+                dropout_mask = tl.load(dropout_ptrs, mask=p_mask)
+            else:
+                rand_vals = tl.rand(philox_seed, philox_offset)
+                dropout_mask = rand_vals > dropout_p
             dropout_scale = 1/ (1 - dropout_p)
 
-            if DEBUG_DROPOUT:
+            if tl_DROPOUT_DUMP:
                 dropout_ptrs = dropout_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
                 tl.store(dropout_ptrs, dropout_mask, mask=p_mask)
             
@@ -853,7 +859,10 @@ def attention_prefill_backward_triton_impl(
 
     # dropout mask tensor for debugging. We dump the dropout mask created in the kernel for testing
     if use_dropout:
-        dropout_mask = torch.zeros((batch, nheads_q, max_seqlen_q, max_seqlen_k), device=q.device,
+        if DROPOUT_USE_PYTORCH:
+            dropout_mask = create_dropout_mask(dropout_p, (batch, nheads_q, max_seqlen_q, max_seqlen_k), seed = philox_seed)
+        else:
+            dropout_mask = torch.zeros((batch, nheads_q, max_seqlen_q, max_seqlen_k), device=q.device,
                                         dtype=torch.float32)
         stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn = (dropout_mask.stride(0), dropout_mask.stride(1), dropout_mask.stride(2), dropout_mask.stride(3))
     else:
