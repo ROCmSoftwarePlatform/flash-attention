@@ -401,10 +401,9 @@ def _bwd_kernel_one_col_block(
         # mask block in the cases where the data is smaller the block size
         p_mask = mask_m[:, None] & mask_n[None, :]
         p = tl.where(p_mask, p, 0.0)
-        p = p.to(tl.float16)
         
-        # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
         if DROPOUT:
+            # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
             philox_offset = batch_philox_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
             # print("philox_seed:", philox_seed)
             # print("philox_offset:", philox_offset)
@@ -418,6 +417,7 @@ def _bwd_kernel_one_col_block(
             # apply dropout mask
             p_drop = tl.where(dropout_mask, p, 0.0)
             p_drop_scaled = p_drop * dropout_scale
+            p_drop_scaled = p_drop_scaled.to(tl.float16)
 
             # compute dv
             dv += tl.dot(tl.trans(p_drop_scaled), do) # dropout scale is applied at the end
@@ -433,18 +433,9 @@ def _bwd_kernel_one_col_block(
             ds = dscores_scaled * sm_scale
             ds = tl.where(p_mask, ds, 0.0)
             ds = ds.to(tl.float16)
-            
-            # compute dk
-            dk += tl.dot(tl.trans(ds), q)
-
-            # compute dq
-            if SEQUENCE_PARALLEL:
-                dq = tl.dot(ds, k)
-            else:
-                dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
-                dq += tl.dot(ds, k)
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
         else:
+            p = p.to(tl.float16)
+
             # compute dv
             dv += tl.dot(tl.trans(p), do)
 
@@ -459,16 +450,16 @@ def _bwd_kernel_one_col_block(
             ds = tl.where(p_mask, ds, 0.0)
             ds = ds.to(tl.float16)
             
-            # compute dk
-            dk += tl.dot(tl.trans(ds), q)
+        # compute dk
+        dk += tl.dot(tl.trans(ds), q)
 
-            # compute dq
-            if SEQUENCE_PARALLEL:
-                dq = tl.dot(ds, k)
-            else:
-                dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
-                dq += tl.dot(ds, k)
-            tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
+        # compute dq
+        if SEQUENCE_PARALLEL:
+            dq = tl.dot(ds, k)
+        else:
+            dq = tl.load(dq_ptrs, mask=q_mask, other=0.0)
+            dq += tl.dot(ds, k)
+        tl.store(dq_ptrs, dq.to(Q.dtype.element_ty), mask=q_mask)
 
     # write-back dv and dk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
