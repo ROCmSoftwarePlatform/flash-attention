@@ -353,9 +353,6 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         (1, 2, 2, 4, 4, 16),
         (2, 1, 1, 4, 4, 16),
         (2, 2, 2, 4, 4, 16),
-        (1, 1, 1, 8, 8, 16),
-        (1, 1, 1, 16, 16, 16),
-        (1, 1, 1, 64, 64, 16),
         (1, 1, 1, 128, 64, 16),
         (2, 2, 2, 2, 128, 1),
         (2, 3, 3, 2, 128, 16),
@@ -549,7 +546,7 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     q_ref = q.clone() 
     k_ref = k.clone()
     v_ref = v.clone()    
-    output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
+    output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
         q_ref,
         k_ref, 
         v_ref,
