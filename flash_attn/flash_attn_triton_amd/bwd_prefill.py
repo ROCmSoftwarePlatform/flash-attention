@@ -8,203 +8,6 @@ tl_DROPOUT_USE_PYTORCH: tl.constexpr = DROPOUT_USE_PYTORCH
 tl_DROPOUT_DUMP: tl.constexpr = DROPOUT_DUMP
 
 @triton.jit
-def _bwd_preprocess_use_p(
-    Q,
-    K,
-    V,
-    sm_scale,
-    DO,
-    L,
-    Delta,
-    stride_dq_all,
-    stride_qz,
-    stride_qh,
-    stride_qm,
-    stride_qk,
-    stride_kz,
-    stride_kh,
-    stride_kn,
-    stride_kk,
-    stride_vz,
-    stride_vh,
-    stride_vn,
-    stride_vk,
-    stride_deltaz, 
-    stride_deltah, 
-    stride_deltam,
-    Z,
-    HQ,
-    HK,
-    num_block_m,
-    num_block_n,
-    cu_seqlens_q,  
-    cu_seqlens_k,
-    max_seqlen_q,
-    max_seqlen_k,
-    dropout_p, 
-    philox_seed, 
-    philox_offset_base,
-    BLOCK_M: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    SEQUENCE_PARALLEL: tl.constexpr,
-    CAUSAL: tl.constexpr,
-    DROPOUT: tl.constexpr,
-    USE_EXP2: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-):
-    # program ids
-    off_zh = tl.program_id(0)
-    start_m = tl.program_id(1)
-    off_z = off_zh // HQ
-    off_hq = off_zh % HQ
-
-    GROUP_SIZE = HQ // HK
-    if GROUP_SIZE != 1:
-        off_hk = off_hq // GROUP_SIZE
-    else:
-        off_hk = off_hq
-
-    if IS_VARLEN:
-        # Compute sequence lengths for the current batch
-        q_start = tl.load(cu_seqlens_q + off_z)
-        q_end = tl.load(cu_seqlens_q + off_z + 1)
-        k_start = tl.load(cu_seqlens_k + off_z)
-        k_end = tl.load(cu_seqlens_k + off_z + 1)
-
-        # Compute actual sequence lengths
-        N_CTX_Q = q_end - q_start
-        N_CTX_K = k_end - k_start
-    else:
-        q_start = 0
-        k_start = 0
-        N_CTX_Q = max_seqlen_q
-        N_CTX_K = max_seqlen_k
-
-    if DROPOUT:
-        stride_sz = HQ * max_seqlen_q * max_seqlen_k
-        stride_sh = max_seqlen_q * max_seqlen_k
-        stride_sm = max_seqlen_k
-        batch_philox_offset = philox_offset_base + off_z * stride_sz + off_hq * stride_sh + q_start * stride_sm
-    else:
-        batch_philox_offset = 0
-
-    # input tensor offsets
-    q_offset = Q + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
-    k_offset = K + off_z * stride_kz + off_hk * stride_kh + k_start * stride_kn
-    v_offset = V + off_z * stride_vz + off_hk * stride_vh + k_start * stride_vn
-    do_offset = DO + off_z * stride_qz + off_hq * stride_qh + q_start * stride_qm
-    l_offset = L + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
-    delta_offset = Delta + off_z * stride_deltaz + off_hq * stride_deltah + q_start * stride_deltam
-
-    if CAUSAL:
-        # TODO: Causal can skip more blocks with something like lo = start_m * BLOCK_M
-        lo = 0
-    else:
-        lo = 0
-
-    # initialize head offsets
-    offs_d = tl.arange(0, BLOCK_DMODEL)
-
-    # masks
-    mask_d = offs_d < ACTUAL_BLOCK_DMODEL
-
-    # loop over rows
-    offs_m = start_m* BLOCK_M + tl.arange(0, BLOCK_M)
-    # offs_m = start_m + tl.arange(0, BLOCK_M)
-    q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
-    do_ptrs = do_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
-    
-    # update mask as row block changes
-    mask_m = offs_m < N_CTX_Q
-    q_mask = mask_m[:, None] & mask_d[None, :]
-
-    # load q, k, v, do on-chip
-    q = tl.load(q_ptrs, mask=q_mask, other=0.0).to(tl.float32)
-    do = tl.load(do_ptrs, mask=q_mask, other=0.0).to(tl.float32)
-
-    # delta
-    delta_ptrs = delta_offset + offs_m * stride_deltam
-    delta_partial = tl.zeros([BLOCK_M], dtype=tl.float32)
-    
-    for start_n in range(lo, num_block_n):
-        # print("start_n:", start_n)
-        # offs_n = start_n + tl.arange(0, BLOCK_N)
-        offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        mask_n = offs_n < N_CTX_K
-        kv_mask = mask_n[:, None] & mask_d[None, :]
-
-        # load k and v once per column block
-        k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
-        v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
-        k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
-        v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
-
-        # recompute p = softmax(qk, dim=-1).T
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        # print("q:", q)
-        # print("k:", k)
-        qk += tl.dot(q, tl.trans(k))
-
-        if CAUSAL:
-            col_offset = N_CTX_Q - N_CTX_K
-            causal_mask = offs_m[:, None] >= (col_offset + offs_n[None, :])
-            qk = tl.where(causal_mask, qk, float("-inf"))
-
-        l_ptrs = l_offset + offs_m * stride_deltam
-        l_i = tl.load(l_ptrs, mask=mask_m)
-
-        # compute p
-        if USE_EXP2:
-            RCP_LN2: tl.constexpr = 1.4426950408889634
-            qk *= sm_scale * RCP_LN2
-            l_i *= RCP_LN2
-            p = tl.math.exp2(qk - l_i[:, None])
-        else:
-            qk *= sm_scale
-            p = tl.math.exp(qk - l_i[:, None])
-
-        # mask block in the cases where the data is smaller the block size
-        p_mask = mask_m[:, None] & mask_n[None, :]
-        p = tl.where(p_mask, p, 0.0)
-        # print("p:", p)
-        
-        # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
-        if DROPOUT:
-            stride_sm = N_CTX_K
-            stride_sn = 1
-            philox_offset = batch_philox_offset + offs_m[:, None] * stride_sm + offs_n[None, :] * stride_sn
-            # print("philox_seed:", philox_seed)
-            # print("philox_offset:", philox_offset)
-            rand_vals = tl.rand(philox_seed, philox_offset)
-            dropout_mask = rand_vals > dropout_p
-            dropout_scale = 1/ (1 - dropout_p)
-            p_drop = tl.where(dropout_mask, p, 0.0)
-            p_drop_scaled = p_drop * dropout_scale
-
-            # compute dp
-            dp_drop_scaled = tl.dot(do, tl.trans(v))
-            dp = tl.where(dropout_mask, dp_drop_scaled, 0.0) * dropout_scale
-            # dp = tl.where(p_mask, dp, 0.0)
-
-            # print("dp:", dp)
-
-            # compute delta
-            delta = tl.sum(p * dp, axis=1)
-        else:
-            # compute dp
-            dp = tl.dot(do, tl.trans(v))
-
-            # compute delta
-            delta = tl.sum(p * dp, axis=1)
-        # print("delta:", delta)
-
-        delta_partial += delta
-
-    tl.store(delta_ptrs, delta_partial, mask=mask_m)
-
-@triton.jit
 def _bwd_preprocess_use_o(
     Out,
     DO,
@@ -869,63 +672,26 @@ def attention_prefill_backward_triton_impl(
         dropout_mask = None
         stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn = (0, 0 , 0 , 0)
 
-    if False: #dropout_p > 0.0:
-        _bwd_preprocess_use_p[(batch * nheads_q, num_blocks_m)](
-            q,
-            k,
-            v,
-            sm_scale,
-            do,
-            softmax_lse,
-            delta,
-            stride_dq_all,
-            stride_qz, stride_qh, stride_qm, stride_qk,
-            stride_kz, stride_kh, stride_kn, stride_kk,
-            stride_vz, stride_vh, stride_vn, stride_vk,
-            stride_deltaz, stride_deltah, stride_deltam,
-            batch,
-            nheads_q,
-            nheads_k,
-            num_blocks_m,
-            num_blocks_n,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p, philox_seed, philox_offset,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_DMODEL=BLOCK_DMODEL,
-            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-            SEQUENCE_PARALLEL=sequence_parallel,
-            CAUSAL=causal,
-            DROPOUT=use_dropout,
-            USE_EXP2=use_exp2,
-            num_warps=num_warps,
-            num_stages=num_stages,
-            waves_per_eu = waves_per_eu,
-            IS_VARLEN=is_varlen
-            )
-    else:
-        _bwd_preprocess_use_o[(batch * nheads_q, num_blocks_m)](
-            o,
-            do,
-            delta,
-            stride_oz, stride_oh, stride_om, stride_ok,
-            stride_oz, stride_oh, stride_om, stride_ok,
-            stride_deltaz, stride_deltah, stride_deltam,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            BLOCK_M=BLOCK_M,
-            BLOCK_DMODEL=BLOCK_DMODEL,
-            ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-            N_CTX_Q=max_seqlen_q,
-            Z=batch,
-            H=nheads_q,
-            IS_VARLEN=is_varlen
-        )
+
+    _bwd_preprocess_use_o[(batch * nheads_q, num_blocks_m)](
+        o,
+        do,
+        delta,
+        stride_oz, stride_oh, stride_om, stride_ok,
+        stride_oz, stride_oh, stride_om, stride_ok,
+        stride_deltaz, stride_deltah, stride_deltam,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        BLOCK_M=BLOCK_M,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+        N_CTX_Q=max_seqlen_q,
+        Z=batch,
+        H=nheads_q,
+        IS_VARLEN=is_varlen
+    )
 
     if False:
         print("_bwd_kernel inputs")
