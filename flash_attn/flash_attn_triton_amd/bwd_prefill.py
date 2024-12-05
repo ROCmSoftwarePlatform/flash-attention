@@ -1,7 +1,9 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout, DEBUG, write_dropout_mask
+from .utils import DEBUG, get_shape_from_layout, get_strides_from_layout, write_dropout_mask
+
+DEBUG_DROPOUT: tl.constexpr = False
 
 @triton.jit
 def _bwd_preprocess_use_p(
@@ -329,9 +331,6 @@ def _bwd_kernel_one_col_block(
     USE_EXP2: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
 ):
-    DEBUG_DROPOUT = False
-
-    # causal
     if CAUSAL:
         # TODO: Causal can skip more blocks with something like lo = start_m * BLOCK_M
         lo = 0
@@ -357,9 +356,6 @@ def _bwd_kernel_one_col_block(
     v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
     k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
     v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
-
-    if DROPOUT:
-        dropout_scale = 1/ (1 - dropout_p)
 
     # loop over rows
     for start_m in range(lo, num_block_m):
@@ -409,6 +405,7 @@ def _bwd_kernel_one_col_block(
             # print("philox_offset:", philox_offset)
             rand_vals = tl.rand(philox_seed, philox_offset)
             dropout_mask = rand_vals > dropout_p
+            dropout_scale = 1/ (1 - dropout_p)
 
             if DEBUG_DROPOUT:
                 dropout_ptrs = dropout_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
@@ -420,7 +417,7 @@ def _bwd_kernel_one_col_block(
             p_drop_scaled = p_drop_scaled.to(tl.float16)
 
             # compute dv
-            dv += tl.dot(tl.trans(p_drop_scaled), do) # dropout scale is applied at the end
+            dv += tl.dot(tl.trans(p_drop_scaled), do)
 
             # compute dp
             dp_drop_scaled = tl.dot(do, tl.trans(v))

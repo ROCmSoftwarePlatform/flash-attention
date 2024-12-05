@@ -18,12 +18,7 @@ from flash_attn import (
 from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import _get_block_size_n
 from flash_attn.layers.rotary import apply_rotary_emb
-from flash_attn.flash_attn_triton_amd.utils import DEBUG, is_rdna
-
-# Test ROCM Triton Backend
-USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
-if USE_TRITON_ROCM:
-    random.seed(42)
+from flash_attn.flash_attn_triton_amd.utils import USE_TRITON_ROCM, DEBUG, is_rdna
 
 MAX_HEADDIM_SM8x = 192
 
@@ -590,7 +585,7 @@ def get_dropout_fraction(
 @pytest.mark.parametrize("seqlen", [97, 128, 200, 384, 768, 1024, 1025, 2048])
 # @pytest.mark.parametrize("seqlen", [128])
 @pytest.mark.parametrize("dropout_p", [0.0, 0.17])
-# @pytest.mark.parametrize("dropout_p", [0.0])
+# @pytest.mark.parametrize("dropout_p", [0.17])
 def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, deterministic, dtype):
     if USE_TRITON_ROCM:
         if local == True:
@@ -601,8 +596,8 @@ def test_flash_attn_qkvpacked(seqlen, d, dropout_p, causal, local, alibi, determ
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 1
-    nheads = 1
+    batch_size = 4
+    nheads = 9
     window_size = (-1, -1) if not local else torch.randint(0, seqlen, (2,))
     qkv = torch.randn(
         batch_size, seqlen, 3, nheads, d, device=device, dtype=dtype, requires_grad=True
@@ -932,7 +927,6 @@ def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
-
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
 
@@ -1216,7 +1210,6 @@ def test_flash_attn_output(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        # (32, 32),
         (1, 147),
         (113, 203),
         (128, 217),

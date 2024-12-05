@@ -1,7 +1,9 @@
 import torch
 import triton
 import triton.language as tl
-from .utils import get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, DEBUG, AUTOTUNE, write_dropout_mask
+from .utils import DEBUG, AUTOTUNE, get_shape_from_layout, get_strides_from_layout, is_cdna, is_rdna, write_dropout_mask
+
+DEBUG_DROPOUT: tl.constexpr = False
 
 # Convenience function to load with optional boundary checks.
 # "First" is the major dim, "second" is the minor dim.
@@ -64,7 +66,6 @@ def _attn_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stri
                     ENABLE_DROPOUT: tl.constexpr, PADDED_HEAD: tl.constexpr,
                     ACTUAL_BLOCK_DMODEL: tl.constexpr, SM_SCALE: tl.constexpr, USE_EXP2: tl.constexpr,
                     RETURN_SCORES: tl.constexpr):
-    DEBUG_DROPOUT = False
     if USE_EXP2:
         RCP_LN2: tl.constexpr = 1.4426950408889634
     
