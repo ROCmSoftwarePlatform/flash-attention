@@ -27,7 +27,7 @@ jobs:
         id: set-matrix
         run: |
           if [ x"${{ github.repository }}" == x"ROCm/flash-attention" ]; then
-            echo '::set-output name=matrix-HIP::[["self-hosted", "gfx90a"], ["self-hosted", "gfx1100"]]'
+            echo '::set-output name=matrix-HIP::[["self-hosted", "gfx90a"]]'
           else
             echo '::set-output name=matrix-HIP::[["ubuntu-latest"]]'
           fi
