@@ -540,7 +540,7 @@ def get_split_k(B: int, G: int, H: int, Mk: int) -> int:
     split_k = max(split_k, 1)
     return split_k
 
-def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes, layout, cache_seqlens, cache_batch_idx, new_kv, k_new, v_new):
+def attention_decode_forward_triton_impl(q, k, v, k_new, v_new, sm_scale, causal, layout, alibi_slopes, cache_seqlens, cache_batch_idx):
     # kernel config
     BLOCK_M = 16
     BLOCK_N = 64
@@ -553,16 +553,18 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
         q=q.unsqueeze(2)
         k=k.unsqueeze(2)
         v=v.unsqueeze(2)
-        if new_kv:
+        if k_new is not None:
             k_new = k_new.unsqueeze(2)
+        if v_new is not None:
             v_new = v_new.unsqueeze(2)
         layout = "bsghd"
     elif layout == "bhsd":
         q=q.permute(0, 2, 1, 3).unsqueeze(2)
         k=k.permute(0, 2, 1, 3).unsqueeze(2)
         v=v.permute(0, 2, 1, 3).unsqueeze(2)
-        if new_kv:
+        if k_new is not None:
             k_new = k_new.permute(0, 2, 1, 3).unsqueeze(2)
+        if v_new is not None:
             v_new = v_new.permute(0, 2, 1, 3).unsqueeze(2)
         layout = "bsghd"
     elif layout == "bsghd":
@@ -570,6 +572,9 @@ def attention_decode_forward_triton_impl(q, k, v, sm_scale, causal, alibi_slopes
     elif layout is None:
         raise ValueError("Layout not given")
     assert layout == "bsghd"
+
+    # check that both are provided or both are none
+    assert ((k_new is None) and (v_new is None)) or ((k_new is not None) and (v_new is not None))
 
     # get dims
     batch_size, seqlen_q, n_group_q, heads_per_group_q, dim_q = q.shape

@@ -8,15 +8,18 @@ import random
 import triton
 import triton.language as tl
 
+# global variables
 AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '0').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
 PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', 'true', 'yes')
+USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
 if USE_TRITON_ROCM: # TODO remove this
     random.seed(42)
 DROPOUT_USE_PYTORCH = False
 DROPOUT_DUMP = False
 
+# Flash Attention Metadata
 class MetaData():
     cu_seqlens_q = None
     cu_seqlens_k = None
@@ -30,10 +33,6 @@ class MetaData():
     layout = None
     cache_seqlens = None
     cache_batch_idx = None
-    new_kv = False
-    seqlen_new = None
-    k_new = None
-    v_new = None
     return_scores= False
     dropout_p= 0.0
     philox_seed, philox_offset = None, None # if dropout_p > 0.0 seed the RNG so we get reproducible results for testing.
@@ -43,7 +42,7 @@ class MetaData():
     rotary_cos = None
     rotary_interleaved = False
     rotary_conjunction = False
-    
+    is_decode = False
 
     def __repr__(self) -> str:
         return (f"MetaData(\n"
@@ -60,16 +59,15 @@ class MetaData():
                 f"  layout={self.layout},\n"
                 f"  cache_seqlens={self.cache_seqlens},\n"
                 f"  cache_batch_idx={self.cache_batch_idx},\n"
-                f"  new_kv={self.new_kv},\n"
-                f"  seqlen_new={self.seqlen_new},\n"
-                f"  k_new={self.k_new},\n"
-                f"  v_new={self.v_new},\n"
                 f"  dropout_p={self.dropout_p},\n"
                 f"  return_scores={self.return_scores}\n"
                 f")")
 
     def __init__(self, sm_scale=1.0):
         self.sm_scale = sm_scale
+
+    def is_decode(self):
+        is_decode = True
 
     def set_varlen_params(self, cu_seqlens_q, cu_seqlens_k):
         self.varlen = True

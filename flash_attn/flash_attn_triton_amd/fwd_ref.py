@@ -140,6 +140,93 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
 
     return o, softmax_lse, sd_mask
 
+def attention_decode_forward_pytorch_ref_impl(
+    q,
+    k_cache,
+    v_cache,
+    k_new,
+    v_new,
+    cache_seqlens,
+    cache_batch_idx, 
+    sm_scale,
+    causal,
+    layout,
+    alibi_slopes,
+    rotary_cos,
+    rotary_sin, 
+    rotary_interleaved,
+    use_exp2
+):
+    if DEBUG:
+        print()
+        print("attention_forward_pytorch_ref_impl")
+        print("q:", q, q.shape)
+        print("k:", k_cache, k_cache.shape)
+        print("v:", v_cache, v_cache.shape)
+        print("k_new:", k_new, k_new.shape if k_new is not None else None)
+        print("v_new:", v_new, v_new.shape if v_new is not None else None)
+        print("cache_seqlens:", cache_seqlens)
+        print("cache_batch_idx:", cache_batch_idx)
+        print("sm_scale:", sm_scale)
+        print("causal:", causal)
+        print("alibi_slopes:", alibi_slopes)
+        print("layout:", layout)
+        print("rotary_cos:", rotary_cos)
+        print("rotary_sin:", rotary_sin)
+        print("rotary_interleaved:", rotary_interleaved)
+        print("use_exp2:", use_exp2)
+    
+    # Ensure the layout is 'bhsd'
+    if layout == "bshd":
+        q = q.transpose(1, 2).contiguous()
+        k_cache = k_cache.transpose(1, 2).contiguous()
+        v_cache = v_cache.transpose(1, 2).contiguous()
+        if k_new is not None:
+            k_new = k_new.transpose(1, 2).contiguous()
+        if v_new is not None:
+            v_new = v_new.transpose(1, 2).contiguous()
+    elif layout != "bhsd":
+        raise ValueError(f"Unknown layout {layout}")
+    
+    # check that both are provided or both are none
+    assert ((k_new is None) and (v_new is None)) or ((k_new is not None) and (v_new is not None))
+
+    # Prepare tensors
+    batch_size, nheads_q, seq_len_q, head_dim = q.shape
+    batch_size, nheads_k_cache, seq_len_k_cache, head_dim = k_cache.shape
+    if k_new:
+        batch_size, nheads_k_new, seq_len_k_new, head_dim = k_new.shape
+
+    # insert new tensors in cache
+    # TODO
+
+    # convert to 3d tensors for core impl
+    q = q.reshape(batch_size * nheads_q, seq_len_q, head_dim)
+    k_cache = k_cache.reshape(batch_size * nheads_k_cache, seq_len_k_cache, head_dim)
+    v_cache = v_cache.reshape(batch_size * nheads_k_cache, seq_len_k_cache, head_dim)
+    # if k_new is not None:
+    #     k_new = k_new.reshape(batch_size * nheads_k_new, seq_len_k_new, head_dim)
+    # if v_new is not None:
+    #     v_new = v_new.reshape(batch_size * nheads_k_new, seq_len_k_new, head_dim)
+
+    
+    # launch core impl
+    output, softmax_lse, sd_mask = attention_forward_core_ref_impl(
+        q, k_cache, v_cache, sm_scale, causal, 0.0, None, None, use_exp2
+    )
+
+    output = output.reshape(batch_size, nheads_q, seq_len_q, head_dim)
+    softmax_lse = softmax_lse.reshape(batch_size, nheads_q, seq_len_q)
+    sd_mask = sd_mask.reshape(batch_size, nheads_q, seq_len_q, seq_len_k_cache)
+
+    if layout == "bshd":
+        output = output.transpose(1, 2)
+
+    return output, softmax_lse
+
+
+    
+
 def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 

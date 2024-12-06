@@ -3,13 +3,11 @@ import os
 from .fwd_prefill import attention_prefill_forward_triton_impl
 from .bwd_prefill import attention_prefill_backward_triton_impl
 from .fwd_decode import attention_decode_forward_triton_impl
-from .fwd_ref import attention_forward_pytorch_ref_impl
+from .fwd_ref import attention_forward_pytorch_ref_impl, attention_decode_forward_pytorch_ref_impl
 from .bwd_ref import attention_backward_pytorch_ref_impl
-from .utils import MetaData, get_shape_from_layout, DEBUG
+from .utils import  DEBUG, USE_REF, MetaData, get_shape_from_layout
 from einops import rearrange, repeat
 from flash_attn.layers.rotary import apply_rotary_emb
-
-USE_REF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_REF', '0').lower() in ('1', 'true', 'yes')
 
 def fwd(q,
         k,
@@ -502,6 +500,20 @@ def fwd_kvcache(
         rotary_interleaved,
         num_splits):
 
+    if DEBUG:
+        print()
+        print("flash_attn_triton_amd.py::fwd_kvcache")
+        print("q:", q, q.shape)
+        print("k:", k, k.shape if k is not None else None)
+        print("v:", v, v.shape if v is not None else None)
+        print("alibi_slopes:", alibi_slopes)
+        print("softmax_scale:", softmax_scale)
+        print("causal:", causal)
+        print("out:", out)
+        print("window_size_left:", window_size_left)
+        print("window_size_right:", window_size_right)
+        print("softcap:", softcap)
+
     if out is None:
         out = torch.empty_like(q)
 
@@ -513,11 +525,6 @@ def fwd_kvcache(
     metadata.cache_seqlens = cache_seqlens
     metadata.cache_batch_idx = cache_batch_idx
 
-    if k is not None and v is not None:
-        metadata.new_kv = True
-        metadata.seqlen_new = k.shape[1]
-        metadata.k_new = k
-        metadata.v_new = v
 
     if causal:
         metadata.need_causal()
@@ -563,20 +570,45 @@ def fwd_kvcache(
 
         q, metadata.k_new = q_ro.to(q.dtype), k_ro.to(q.dtype)
 
-    # launch kernel
-    # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
-    output, softmax_lse = attention_decode_forward_triton_impl(
-        q,
-        k_cache,
-        v_cache,
-        metadata.sm_scale,
-        metadata.causal,
-        metadata.alibi_slopes,
-        metadata.layout,
-        metadata.cache_seqlens,
-        metadata.cache_batch_idx,
-        metadata.new_kv,
-        metadata.k_new,
-        metadata.v_new,
-    )
+    if USE_REF:
+        if DEBUG:
+            print("Using reference implementation")
+        output, softmax_lse = attention_decode_forward_pytorch_ref_impl(
+                                        q,
+                                        k_cache,
+                                        v_cache,
+                                        k,
+                                        v,
+                                        cache_seqlens,
+                                        cache_batch_idx,
+                                        metadata.sm_scale,
+                                        metadata.causal,
+                                        metadata.layout,
+                                        metadata.alibi_slopes,
+                                        metadata.rotary_cos,
+                                        metadata.rotary_sin,
+                                        metadata.rotary_interleaved,
+                                        False
+                                    )
+        out.copy_(output)
+    else:
+        if DEBUG:
+            print("Using Triton implementation")
+
+        # launch kernel
+        # TODO: pass output as an arg. Maybe we are copying output which is causing slow down
+        output, softmax_lse = attention_decode_forward_triton_impl(
+            q,
+            k_cache,
+            v_cache,
+            metadata.sm_scale,
+            metadata.causal,
+            metadata.alibi_slopes,
+            metadata.layout,
+            metadata.cache_seqlens,
+            metadata.cache_batch_idx,
+            metadata.new_kv,
+            metadata.k_new,
+            metadata.v_new,
+        )
     return output, softmax_lse
