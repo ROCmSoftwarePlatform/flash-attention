@@ -930,6 +930,10 @@ def test_flash_attn_output(
     seqlen_q, seqlen_k, d, dropout_p, causal, local, alibi, deterministic, mha_type, dtype, kvpacked, softcap
 ):
     if USE_TRITON_ROCM:
+        if get_arch() == "gfx90a":
+            if causal == True and seqlen_q == 512 and seqlen_k == 256:
+                pytest.skip("This config doesnot work on MI200 Devices but works on MI300 devices.")
+        
         if softcap != 0.0:
             pytest.skip("softcap not supported on AMD's Triton Backend yet")
 
