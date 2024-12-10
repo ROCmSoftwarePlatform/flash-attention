@@ -154,20 +154,50 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cud
 
     if DEBUG_INPUT:
         if layout == "bhsd":
-            q = torch.arange(N_CTX_Q, dtype=torch.float32, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            if dtype in (
+                torch.float8_e4m3fnuz,
+                torch.float8_e4m3fn,  
+                torch.float8_e5m2,
+                torch.float8_e5m2fnuz
+                ):
+                q = torch.arange(N_CTX_Q, dtype=torch.float32, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+                k = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+                v = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+                q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
+            else:
+                q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+                k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+                v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
         elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=torch.float32, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            if dtype in (
+                torch.float8_e4m3fnuz,
+                torch.float8_e4m3fn,  
+                torch.float8_e5m2,
+                torch.float8_e5m2fnuz
+                ):
+                q = torch.arange(N_CTX_Q, dtype=torch.float32, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+                k = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+                v = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+                q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
+            else:
+                q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+                k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+                v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
     else:
-        q = torch.randn(q_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
-        k = torch.randn(k_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
-        v = torch.randn(k_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
-
-    q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
-    q_fp32, k_fp32, v_fp32 = q.to(torch.float32), k.to(torch.float32), v.to(torch.float32)
+        if dtype in (
+            torch.float8_e4m3fnuz,
+            torch.float8_e4m3fn,  
+            torch.float8_e5m2,
+            torch.float8_e5m2fnuz
+        ):
+            q = torch.randn(q_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
+            k = torch.randn(k_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
+            v = torch.randn(k_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
+            q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
+        else:
+            q = torch.randn(q_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+            k = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+            v = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
     
     if DEBUG_INPUT:
         sm_scale = 1
@@ -177,7 +207,7 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cud
     input_metadata.max_seqlens_q = N_CTX_Q
     input_metadata.max_seqlens_k = N_CTX_K
     input_metadata.layout = layout
-    return q, k, v, q_fp32, k_fp32, v_fp32, input_metadata
+    return q, k, v, input_metadata
 
 
 def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device="cuda", equal_seqlens=False, DEBUG_INPUT=False):
@@ -341,18 +371,13 @@ def is_cdna():
 
 def is_rdna():
     return is_hip() and get_arch() in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201")
-
-def check_is_fp8(x: torch.Tensor):
-    if REMOVE_QUANTIZATION_SCALING:
-        return False # makes all methods believe they aren't working with fp8s, so no scaling is applied
-    
-    fp8_types = {
+def is_fp8_tensor(x: torch.Tensor):
+    return x.dtype in (
         torch.float8_e4m3fnuz,
         torch.float8_e4m3fn,  
         torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-    }
-    return x.dtype in fp8_types
+        torch.float8_e5m2fnuz
+    )
 
 def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
     """
@@ -367,7 +392,7 @@ def create_scale_tensors(q, k, v, SCALE_PER_HEAD=False, layout='bshd'):
     Returns:
     tuple: (q_scale, k_scale, v_scale) tensors
     """
-    is_fp8 = check_is_fp8(q)
+    is_fp8 = is_fp8_tensor(q)
 
     if layout == 'bhsd':
         seqlen_loc = 2
