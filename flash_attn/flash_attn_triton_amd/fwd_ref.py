@@ -1,6 +1,6 @@
 import torch
 import math
-from .utils import DEBUG, create_scale_tensors, is_fp8_tensor
+from .utils import DEBUG, is_fp8_tensor
 
 DEBUG_CORE = True
 
@@ -22,18 +22,13 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("k_scale:", k_scale)
         print("v_scale:", v_scale)
 
-    # store original dtype
-    assert q.dtype == k.dtype == v.dtype
-    og_dtype = q.dtype
-    # cast to float32
-    q = q.to(torch.float32)
-    k = k.to(torch.float32)
-    v = v.to(torch.float32)
+    assert q.dtype == k.dtype == v.dtype == torch.float32
     
     # Compute attention scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if is_fp8:
-        attention_scores *=  q_scale * k_scale
+        qk_scale = q_scale * k_scale
+        attention_scores *= qk_scale
     if DEBUG_CORE:
         print("attention_scores:", attention_scores, attention_scores.shape)
 
@@ -139,15 +134,8 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
 
     # Compute output
     o = torch.matmul(p, v)
-    if is_fp8:
-        o *= v_scale
     if DEBUG_CORE:
         print("o:", o, o.shape)
-
-    # cast back to original dtype
-    o = o.to(og_dtype)
-    # softmax_lse = softmax_lse.to(og_dtype) # NOTE: if you cast down lse it will cause accuracy issues. keep fp32
-    sd_mask = sd_mask.to(og_dtype)
 
     return o, softmax_lse, sd_mask
 
@@ -162,20 +150,41 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
     elif layout != "bhsd":
         raise ValueError(f"Unknown layout {layout}")
 
+    assert q.dtype == k.dtype == v.dtype
+    og_dtype = q.dtype
+
     if is_fp8_tensor(q):
         is_fp8 = True
+
+        # cast to float32
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+
+        # compute max for each batch-head pair
+        q_scale = q.abs().amax(dim=(2, 3)) # shape: (BATCH, HEAD)
+        k_scale = k.abs().amax(dim=(2, 3))
+        v_scale = v.abs().amax(dim=(2, 3))
         
-        # Compute max for each batch-head pair
-        q_scale = q.to(torch.float32).abs().amax(dim=(2, 3))  # Shape: (BATCH, HEAD)
-        k_scale = k.to(torch.float32).abs().amax(dim=(2, 3))  # Shape: (BATCH, HEAD)
-        v_scale = v.to(torch.float32).abs().amax(dim=(2, 3))  # Shape: (BATCH, HEAD)
+
+        if DEBUG:
+            print("q_scale:", q_scale, q_scale.shape)
+            print("k_scale:", k_scale, k_scale.shape)
+            print("v_scale:", v_scale, v_scale.shape)
 
         # scale tensors
-        q = (q.to(torch.float32) / q_scale).to(q.dtype)
-        k = (k.to(torch.float32) / k_scale).to(k.dtype)
-        v = (v.to(torch.float32) / v_scale).to(v.dtype)
+        q = (q / q_scale.unsqueeze(-1).unsqueeze(-1)).to(q.dtype)
+        k = (k / k_scale.unsqueeze(-1).unsqueeze(-1)).to(k.dtype)
+        v = (v / v_scale.unsqueeze(-1).unsqueeze(-1)).to(v.dtype)
     else:
         is_fp8 = False
+
+        # cast to float32
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+
+        # set scales
         q_scale, k_scale, v_scale = 1.0, 1.0, 1.0
 
     # Prepare tensors
@@ -223,6 +232,11 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
     # Restore original layout if necessary
     if layout == "bshd":
         o = o.transpose(1, 2)
+
+    # cast back to original dtype
+    o = o.to(og_dtype)
+    # softmax_lse = softmax_lse.to(og_dtype) # NOTE: if you cast down lse it will cause accuracy issues. keep fp32
+    sd_mask = sd_mask.to(og_dtype)
 
     return o, softmax_lse, sd_mask
 
@@ -332,8 +346,6 @@ def attention_varlen_forward_pytorch_ref_impl(
 
     return o, softmax_lse, sd_mask
 
-
-
 def attention_forward_pytorch_ref_impl(
     q,
     k,
@@ -371,9 +383,9 @@ def attention_forward_pytorch_ref_impl(
      # compute reference
     if layout == "thd":
         o_ref, softmax_lse_ref, sd_mask_ref = attention_varlen_forward_pytorch_ref_impl(
-            q.clone(), 
-            k.clone(), 
-            v.clone(), 
+            q, 
+            k, 
+            v, 
             sm_scale, 
             causal,
             layout,
@@ -387,9 +399,10 @@ def attention_forward_pytorch_ref_impl(
             use_exp2,
         )
     else:
-        o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(q.clone(),
-                                                       k.clone(),
-                                                       v.clone(),
+        o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(
+                                                       q,
+                                                       k,
+                                                       v,
                                                        sm_scale,
                                                        causal,
                                                        layout,

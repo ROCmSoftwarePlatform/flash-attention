@@ -343,9 +343,9 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD",
     [
-        (1, 1, 1, 1, 1, 1),
+        # (1, 1, 1, 1, 1, 1),
         # (1, 1, 1, 2, 4, 16),
-        # (1, 2, 2, 2, 4, 16),
+        (1, 2, 2, 2, 4, 16),
         # (1, 4, 1, 2, 4, 16),
         # (1, 4, 2, 2, 4, 16),
         # (1, 1, 1, 4, 2, 16),
@@ -434,9 +434,9 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
                                                 metadata.use_exp2)
 
     output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
-        q.to(torch.float32).clone() if is_fp8_tensor(q) else q.clone(),
-        k.to(torch.float32).clone() if is_fp8_tensor(k) else k.clone(),
-        v.to(torch.float32).clone() if is_fp8_tensor(v) else v.clone(), 
+        q.clone(),
+        k.clone(),
+        v.clone(),
         metadata.sm_scale, 
         causal,
         layout,
