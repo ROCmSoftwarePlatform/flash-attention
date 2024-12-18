@@ -214,16 +214,20 @@ def _attn_bwd_dkdv(dk, dv,  #
                    M, D,  #
                    # shared by Q/K/V/DO.
                    stride_tok, stride_d,  #
-                   H, N_CTX, BLOCK_M1: tl.constexpr,  #
-                   BLOCK_N1: tl.constexpr,  #
+                   H, N_CTX,
+                   BLOCK_M1: tl.constexpr,  # 16
+                   BLOCK_N1: tl.constexpr,  # 128
                    HEAD_DIM: tl.constexpr,  #
                    # Filled in by the wrapper.
                    start_n, start_m, num_steps,  #
                    MASK: tl.constexpr):
-    offs_m = start_m + tl.arange(0, BLOCK_M1)
-    offs_n = start_n + tl.arange(0, BLOCK_N1)
+    offs_m = start_m + tl.arange(0, BLOCK_M1)  # start_m + (0, 15)
+    offs_n = start_n + tl.arange(0, BLOCK_N1)  # start_m + (0, 127)
     offs_k = tl.arange(0, HEAD_DIM)
+    # Q and DO are (seqlen, head_dim)
+    # qT_ptrs = (1, BLOCK_M1) + (HEAD_DIM, 1), transpose of its shape
     qT_ptrs = Q + offs_m[None, :] * stride_tok + offs_k[:, None] * stride_d
+    # do_ptrs = (1, BLOCK_M1) + (HEAD_DIM, 1), transpose of its shape
     do_ptrs = DO + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
     # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
     tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
@@ -315,11 +319,11 @@ def _attn_bwd(Q, K, V, sm_scale,  #
               # shared by Q/K/V/DO.
               stride_z, stride_h, stride_tok, stride_d,  #
               H, N_CTX,  #
-              BLOCK_M1: tl.constexpr,  #
-              BLOCK_N1: tl.constexpr,  #
-              BLOCK_M2: tl.constexpr,  #
-              BLOCK_N2: tl.constexpr,  #
-              BLK_SLICE_FACTOR: tl.constexpr,  #
+              BLOCK_M1: tl.constexpr,  # 32
+              BLOCK_N1: tl.constexpr,  # 128
+              BLOCK_M2: tl.constexpr,  # 128
+              BLOCK_N2: tl.constexpr,  # 32
+              BLK_SLICE_FACTOR: tl.constexpr,  # 2
               HEAD_DIM: tl.constexpr):
     LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
 
@@ -329,6 +333,8 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     pid = tl.program_id(0)
 
     # offset pointers for batch/head
+    # all these are (batch, head, seqlen, head_dim)
+    # in this kernel it's advanced towards current b,h which means (seqlen, head_dim)
     Q += adj
     K += adj
     V += adj
@@ -336,6 +342,8 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     DQ += adj
     DK += adj
     DV += adj
+    # these two have shape of (batch, head, seqlen)
+    # simply advance this by bhid * N_CTX, because it is only 1D after b&h are in the grid layout
     M += off_chz
     D += off_chz
 
@@ -343,6 +351,7 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     offs_k = tl.arange(0, HEAD_DIM)
 
     start_n = pid * BLOCK_N1
+    # TODO: This seems to start from the diagnol, which take causal into account, i.e. upper triangle no need to traverse, need to confirm
     start_m = start_n
 
     MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR
@@ -352,11 +361,17 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     dk = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
 
     # load K and V: they stay in SRAM throughout the inner loop.
+    # shape (BLOCK_N1, HEAD_DIM)
     k = tl.load(K + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d)
     v = tl.load(V + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d)
 
+    # 128 / 16 = 8
     num_steps = BLOCK_N1 // MASK_BLOCK_M1
 
+    # BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
+    # BLK_SLICE_FACTOR = 2
+    # MASK_BLOCK_M1 = BLOCK_M1 // BLK_SLICE_FACTOR = 16
+    # num_steps = BLOCK_N1 // MASK_BLOCK_M1 = 8
     dk, dv = _attn_bwd_dkdv(dk, dv,  #
                             Q, k, v, sm_scale,  #
                             DO,  #
@@ -368,6 +383,7 @@ def _attn_bwd(Q, K, V, sm_scale,  #
                             MASK=True  #
                             )
 
+    # we go through one time w/ mask so that we have guarantee that no more mask is needed
     start_m += num_steps * MASK_BLOCK_M1
     num_steps = (N_CTX - start_m) // BLOCK_M1
 
