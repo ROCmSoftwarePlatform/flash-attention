@@ -114,8 +114,8 @@ def _bwd_kernel_one_col_block(
     stride_vh,
     stride_vn,
     stride_vk,
-    stride_deltaz, 
-    stride_deltah, 
+    stride_deltaz,
+    stride_deltah,
     stride_deltam,
     stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn,
     N_CTX_Q,
@@ -150,7 +150,7 @@ def _bwd_kernel_one_col_block(
     mask_n = offs_n < N_CTX_K
     mask_d = offs_d < ACTUAL_BLOCK_DMODEL
     kv_mask = mask_n[:, None] & mask_d[None, :]
-    
+
 
     # initialize grad accumulators
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
@@ -168,7 +168,7 @@ def _bwd_kernel_one_col_block(
         q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
         dq_ptrs = dq_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
         do_ptrs = do_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
-        
+
         # update mask as row block changes
         mask_m = offs_m < N_CTX_Q
         q_mask = mask_m[:, None] & mask_d[None, :]
@@ -202,7 +202,7 @@ def _bwd_kernel_one_col_block(
         # mask block in the cases where the data is smaller the block size
         p_mask = mask_m[:, None] & mask_n[None, :]
         p = tl.where(p_mask, p, 0.0)
-        
+
         if DROPOUT:
             # NOTE: must create a new var p_drop to prevent p (which is used later to compute ds) from changing
             philox_offset = batch_philox_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
@@ -219,7 +219,7 @@ def _bwd_kernel_one_col_block(
             if tl_DROPOUT_DUMP:
                 dropout_ptrs = dropout_offset + offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
                 tl.store(dropout_ptrs, dropout_mask, mask=p_mask)
-            
+
             # apply dropout mask
             p_drop = tl.where(dropout_mask, p, 0.0)
             p_drop_scaled = p_drop * dropout_scale
@@ -255,7 +255,7 @@ def _bwd_kernel_one_col_block(
             ds = dscores_scaled * sm_scale
             ds = tl.where(p_mask, ds, 0.0)
             ds = ds.to(tl.float16)
-            
+
         # compute dk
         dk += tl.dot(tl.trans(ds), q)
 
@@ -270,7 +270,7 @@ def _bwd_kernel_one_col_block(
     # write-back dv and dk
     dk_ptrs = dk_offset + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
     dv_ptrs = dv_offset + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
-    
+
     # write-back
     if GROUP_SIZE != 1:
         # use atomic_add to properly accumulate gradients from multiple query heads
@@ -307,8 +307,8 @@ def _bwd_kernel(
     stride_vh,
     stride_vn,
     stride_vk,
-    stride_deltaz, 
-    stride_deltah, 
+    stride_deltaz,
+    stride_deltah,
     stride_deltam,
     stride_dropoutz, stride_dropouth, stride_dropoutm, stride_dropoutn,
     Z,
@@ -316,12 +316,12 @@ def _bwd_kernel(
     HK,
     num_block_m,
     num_block_n,
-    cu_seqlens_q,  
+    cu_seqlens_q,
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    dropout_p, 
-    philox_seed, 
+    dropout_p,
+    philox_seed,
     philox_offset_base,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -376,7 +376,7 @@ def _bwd_kernel(
     else:
         batch_philox_offset = 0
         dropout_offset = 0
-    
+
 
     # output tensor offsets
     dk_offset = DK + off_z * stride_kz + off_hk * stride_kh + k_start * stride_kn
@@ -521,8 +521,8 @@ def attention_prefill_backward_triton_impl(
     cu_seqlens_k,
     max_seqlen_q: int,
     max_seqlen_k: int,
-    dropout_p, 
-    philox_seed, 
+    dropout_p,
+    philox_seed,
     philox_offset,
     use_exp2: bool,
     sequence_parallel = True,
@@ -530,15 +530,15 @@ def attention_prefill_backward_triton_impl(
     if DEBUG:
         print()
         print("attention_prefill_backward_triton_impl")
-        print("do:", do, do.shape)
-        print("q:", q, q.shape)
-        print("k:", k, k.shape)
-        print("v:", v, v.shape)
-        print("o:", o, o.shape)
-        print("softmax_lse:", softmax_lse, softmax_lse.shape)
-        print("dq:", dq, dq.shape if dq is not None else None)
-        print("dk:", dk, dk.shape if dk is not None else None)
-        print("dv:", dv, dv.shape if dv is not None else None)
+        print("do:", do.shape)
+        print("q:", q.shape)
+        print("k:", k.shape)
+        print("v:", v.shape)
+        print("o:", o.shape)
+        print("softmax_lse:", softmax_lse.shape)
+        print("dq:", dq.shape if dq is not None else None)
+        print("dk:", dk.shape if dk is not None else None)
+        print("dv:", dv.shape if dv is not None else None)
         print("sm_scale:", sm_scale)
         print("alibi_slopes:", alibi_slopes)
         print("causal:", causal)
@@ -571,10 +571,10 @@ def attention_prefill_backward_triton_impl(
 
     # FIXME: some configs lead to oom for some reason when using 64 x 64 blocks
     if max_seqlen_q <= 32 or max_seqlen_k <= 32:
-        BLOCK_M = 32 
+        BLOCK_M = 32
         BLOCK_N = 32
     else:
-        BLOCK_M = 64 
+        BLOCK_M = 64
         BLOCK_N = 64
     if DEBUG:
         print("BLOCK_M:", BLOCK_M)
@@ -777,13 +777,13 @@ def attention_prefill_backward_triton_impl(
 
     if DEBUG:
         print("attention_prefill_backward_triton_impl outputs")
-        print("delta:", delta, delta.shape)
-        print("dv:", dv, dv.shape)
-        print("dk:", dk, dk.shape)
-        print("dq:", dq, dq.shape)
+        print("delta:", delta.shape)
+        print("dv:", dv.shape)
+        print("dk:", dk.shape)
+        print("dq:", dq.shape)
         print("copy_back:", copy_back)
         if use_dropout:
-            print("dropout_mask:", dropout_mask, dropout_mask.shape if dropout_mask is not None else None)
+            print("dropout_mask:", dropout_mask.shape if dropout_mask is not None else None)
             print("dropout_fraction bwd:", 1.0 - (dropout_mask.sum()/ dropout_mask.numel()).item())
             write_dropout_mask(dropout_mask, "dropout_mask_bwd")
 

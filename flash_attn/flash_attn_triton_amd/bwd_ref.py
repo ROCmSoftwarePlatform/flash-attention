@@ -22,7 +22,7 @@ def attention_backward_core_ref_impl(
         print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
-    
+
     # cast to float32
     do = do.to(torch.float32)
     q = q.to(torch.float32)
@@ -77,15 +77,15 @@ def attention_backward_core_ref_impl(
         dropout_mask, dropout_scale = rand_vals > dropout_p,  (1.0 / (1 - dropout_p))
         if DEBUG:
             print("dropout_scale:", dropout_scale)
-            print("dropout_mask:", dropout_mask)
-            
+            # print("dropout_mask:", dropout_mask)
+
         p_drop = torch.where(dropout_mask, p, torch.zeros_like(p))
         p_drop_scaled =  p_drop * dropout_scale
         if DEBUG_CORE:
             print("dropout_scale:", dropout_scale)
             print("p_drop:", p_drop, p_drop.shape)
             print("p_drop_scaled:", p_drop_scaled, p_drop_scaled.shape)
-        
+
         # compute dv
         dv = torch.matmul(p_drop_scaled.transpose(-2, -1), do)
         if DEBUG_CORE:
@@ -162,8 +162,8 @@ def attention_varlen_backward_pytorch_ref_impl(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    dropout_p, 
-    philox_seed, 
+    dropout_p,
+    philox_seed,
     philox_offset,
     use_exp2,
 ):
@@ -239,8 +239,8 @@ def attention_varlen_backward_pytorch_ref_impl(
             softmax_lse_i,
             sm_scale,
             causal,
-            dropout_p, 
-            philox_seed, 
+            dropout_p,
+            philox_seed,
             philox_offset,
             use_exp2
         )
@@ -285,8 +285,8 @@ def attention_vanilla_backward_pytorch_ref_impl(
     sm_scale,
     causal,
     layout,
-    dropout_p, 
-    philox_seed, 
+    dropout_p,
+    philox_seed,
     philox_offset,
     use_exp2,
 ):
@@ -303,7 +303,7 @@ def attention_vanilla_backward_pytorch_ref_impl(
         pass
     else:
         raise ValueError(f"Unknown layout {layout}")
-    
+
     # Prepare tensors
     batch_size, nheads_q, seq_len_q, head_dim = q.shape
     batch_size, nheads_k, seq_len_k, head_dim = k.shape
@@ -349,8 +349,8 @@ def attention_vanilla_backward_pytorch_ref_impl(
         softmax_lse,
         sm_scale,
         causal,
-        dropout_p, 
-        philox_seed, 
+        dropout_p,
+        philox_seed,
         philox_offset,
         use_exp2
     )
@@ -404,8 +404,8 @@ def attention_backward_pytorch_ref_impl(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    dropout_p, 
-    philox_seed, 
+    dropout_p,
+    philox_seed,
     philox_offset,
     use_exp2
 ):
@@ -413,12 +413,12 @@ def attention_backward_pytorch_ref_impl(
     if DEBUG:
         print()
         print("attention_backward_pytorch_ref_impl")
-        print("do:", do, do.shape)
-        print("q:", q, q.shape)
-        print("k:", k, k.shape)
-        print("v:", v, v.shape)
-        print("o:", o, o.shape)
-        print("softmax_lse:", softmax_lse)
+        print("do:", do.shape)
+        print("q:", q.shape)
+        print("k:", k.shape)
+        print("v:", v.shape)
+        print("o:", o.shape)
+        # print("softmax_lse:", softmax_lse)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
         print("layout:", layout)
@@ -447,8 +447,8 @@ def attention_backward_pytorch_ref_impl(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
-            dropout_p, 
-            philox_seed, 
+            dropout_p,
+            philox_seed,
             philox_offset,
             use_exp2,
         )
@@ -463,19 +463,19 @@ def attention_backward_pytorch_ref_impl(
             sm_scale,
             causal,
             layout,
-            dropout_p, 
-            philox_seed, 
+            dropout_p,
+            philox_seed,
             philox_offset,
             use_exp2,
         )
-        
+
 
     if DEBUG:
         print()
         print("attention_backward_pytorch_ref_impl outputs")
-        print("delta:", delta, delta.shape)
-        print("dv:", dv, dv.shape)
-        print("dk:", dk, dk.shape)
-        print("dq:", dq, dq.shape)
+        print("delta:", delta.shape)
+        print("dv:", dv.shape)
+        print("dk:", dk.shape)
+        print("dq:", dq.shape)
 
     return dq, dk, dv, delta

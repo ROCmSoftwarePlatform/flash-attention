@@ -22,7 +22,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
     q = q.to(torch.float32)
     k = k.to(torch.float32)
     v = v.to(torch.float32)
-    
+
     # Compute attention scores
     attention_scores = torch.matmul(q, k.transpose(-2, -1))
     if DEBUG_CORE:
@@ -81,7 +81,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
     if DEBUG_CORE:
         print("sum_exp_scores:", sum_exp_scores, sum_exp_scores.shape)
     if causal:
-        # if sum of exp scores is 0.0 it means scores where -inf, we cannot compute softmax and softmax_lse. Setting to 1 deals with -inf case cleanly 
+        # if sum of exp scores is 0.0 it means scores where -inf, we cannot compute softmax and softmax_lse. Setting to 1 deals with -inf case cleanly
         sum_exp_scores = torch.where(
         sum_exp_scores == 0,
         torch.ones_like(sum_exp_scores),
@@ -95,7 +95,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
 
     if DEBUG_CORE:
         print("softmax:", p, p.shape)
-        
+
     # apply dropout if specified
     if dropout_p > 0.0:
         rand_vals = torch.rand(p.shape, generator=torch.Generator(device=p.device).manual_seed(philox_seed), device=p.device, dtype=p.dtype)
@@ -104,7 +104,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
             print("dropout_scale:", dropout_scale)
             print("dropout_mask:", dropout_mask)
         # Apply dropout mask and scale
-        # Set -1 for dropped positions and 1 for kept positions in exp_scores 
+        # Set -1 for dropped positions and 1 for kept positions in exp_scores
         sd_mask = torch.where(dropout_mask, exp_scores, -exp_scores)
         p = torch.where(dropout_mask, p , torch.zeros_like(p)) * dropout_scale
         if DEBUG_CORE:
@@ -112,7 +112,7 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
             print("sd_mask:", sd_mask)
     else:
         sd_mask = exp_scores
-    
+
     # Compute log-sum-exp
     if use_exp2:
         LN2 = math.log(2)
@@ -211,8 +211,8 @@ def attention_varlen_forward_pytorch_ref_impl(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
-    dropout_p, 
-    philox_seed, 
+    dropout_p,
+    philox_seed,
     philox_offset,
     use_exp2
 ):
@@ -326,9 +326,9 @@ def attention_forward_pytorch_ref_impl(
     if DEBUG:
         print()
         print("attention_forward_pytorch_ref_impl")
-        print("q:", q, q.shape)
-        print("k:", k, k.shape)
-        print("v:", v, v.shape)
+        print("q:", q.shape)
+        print("k:", k.shape)
+        print("v:", v.shape)
         print("sm_scale:", sm_scale)
         print("causal:", causal)
         print("layout:", layout)
@@ -344,10 +344,10 @@ def attention_forward_pytorch_ref_impl(
      # compute reference
     if layout == "thd":
         o_ref, softmax_lse_ref, sd_mask_ref = attention_varlen_forward_pytorch_ref_impl(
-            q.clone(), 
-            k.clone(), 
-            v.clone(), 
-            sm_scale, 
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            sm_scale,
             causal,
             layout,
             cu_seqlens_q,
@@ -374,8 +374,8 @@ def attention_forward_pytorch_ref_impl(
     if DEBUG:
         print()
         print("attention_forward_pytorch_ref_impl outputs")
-        print("o:", o_ref, o_ref.shape)
-        print("softmax_lse:", softmax_lse_ref, softmax_lse_ref.shape)
-        print("sd_mask:", sd_mask_ref, sd_mask_ref.shape if sd_mask_ref is not None else None)
+        print("o:", o_ref.shape)
+        print("softmax_lse:", softmax_lse_ref.shape)
+        print("sd_mask:", sd_mask_ref.shape if sd_mask_ref is not None else None)
 
     return o_ref, softmax_lse_ref, sd_mask_ref

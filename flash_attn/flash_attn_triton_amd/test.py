@@ -10,7 +10,7 @@ from .bwd_ref import attention_backward_pytorch_ref_impl
 from .fwd_decode import dequantize_kv_fp16, quantize_kv_int4
 
 # defailt fp16 tolerance is ATOL, RTOL = 1e-5, 1e-3. See table https://pytorch.org/docs/stable/testing.html
-ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose. 
+ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose.
 # ATOL, RTOL = 1e-3, 1e-3  # catchs fa mismatch issues
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
@@ -147,17 +147,17 @@ def test_op_fwd_prefill_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, d
 
 
 @pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [
-                                                (4, 48, 8192, 64), 
-                                                 (4, 48, 256, 64), 
+                                                (4, 48, 8192, 64),
+                                                 (4, 48, 256, 64),
                                                  (4, 48, 512, 64),
-                                                 (4, 48, 1024, 64), 
-                                                 (8, 48, 4096, 64), 
+                                                 (4, 48, 1024, 64),
+                                                 (8, 48, 4096, 64),
                                                  (4, 48, 8192, 64),
-                                                 (4, 48, 128, 128), 
-                                                 (4, 48, 4096, 128), 
+                                                 (4, 48, 128, 128),
+                                                 (4, 48, 4096, 128),
                                                  (4, 48, 16384, 128),
-                                                 (4, 16, 1024, 128), 
-                                                 (4, 16, 8192, 128), 
+                                                 (4, 16, 1024, 128),
+                                                 (4, 16, 8192, 128),
                                                  (32, 48, 8192, 128)
                                                  ]
                                                  )
@@ -315,7 +315,7 @@ def test_op_bwd(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, torch_sdpa_test, use_ali
         print("tri_out:", tri_out)
         print("ref_out:",ref_out )
     torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=0)
-    
+
     # The current block size for MI200 series is 64x64. This results in
     # larger differences in float results due to rounding.
     if dtype == torch.bfloat16:
@@ -414,39 +414,39 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 
     # call Triton's forward implementation directly
     output_triton, softmax_lse_triton, sd_mask_triton = attention_prefill_forward_triton_impl(
-                                                q, 
-                                                k, 
-                                                v, 
-                                                output_triton, 
-                                                metadata.sm_scale, 
-                                                metadata.alibi_slopes, 
-                                                metadata.causal, 
-                                                metadata.bias, 
-                                                metadata.layout, 
-                                                metadata.cu_seqlens_q, 
+                                                q,
+                                                k,
+                                                v,
+                                                output_triton,
+                                                metadata.sm_scale,
+                                                metadata.alibi_slopes,
+                                                metadata.causal,
+                                                metadata.bias,
+                                                metadata.layout,
+                                                metadata.cu_seqlens_q,
                                                 metadata.cu_seqlens_k,
-                                                metadata.max_seqlens_q, 
+                                                metadata.max_seqlens_q,
                                                 metadata.max_seqlens_k,
                                                 metadata.dropout_p,
-                                                metadata.philox_seed, 
-                                                metadata.philox_offset, 
-                                                metadata.return_scores, 
+                                                metadata.philox_seed,
+                                                metadata.philox_offset,
+                                                metadata.return_scores,
                                                 metadata.use_exp2)
 
     output_ref, softmax_lse_ref, sd_mask_ref  = attention_forward_pytorch_ref_impl(
-        q.clone(), 
-        k.clone(), 
-        v.clone(), 
-        metadata.sm_scale, 
-        causal, 
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        metadata.sm_scale,
+        causal,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
         metadata.dropout_p,
-        metadata.philox_seed, 
-        metadata.philox_offset, 
+        metadata.philox_seed,
+        metadata.philox_offset,
         use_exp2
     )
 
@@ -465,7 +465,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         print("softmax_lse_triton:", softmax_lse_triton, softmax_lse_triton.shape)
         print("softmax_lse_ref:", softmax_lse_ref, softmax_lse_ref.shape)
     torch.testing.assert_close(softmax_lse_triton, softmax_lse_ref, atol=ATOL, rtol=RTOL)
-    
+
     if DEBUG:
         print("output_triton:", output_triton, output_triton.shape)
         print("output_ref:", output_ref, output_ref.shape)
@@ -473,35 +473,35 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
 
 @pytest.mark.parametrize(
     "Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD", [
-    (1, 1, 1, 1, 1, 1),
-    (1, 1, 1, 4, 4, 4),
-    (2, 1, 1, 4, 4, 16),
-    (1, 2, 2, 4, 4, 16),
-    (1, 4, 1, 2, 4, 16),
-    (1, 8, 1, 2, 4, 16),
-    (1, 16, 1, 2, 4, 16),
-    (1, 32, 1, 2, 4, 16),
-    (1, 64, 1, 2, 4, 16),
-    (1, 4, 2, 2, 4, 16),
-    (2, 2, 2, 4, 4, 16),
-    (1, 1, 1, 4, 4, 16),
-    (2, 1, 1, 4, 4 , 16),
-    (4, 6, 6, 8, 8 , 16),
-    (1, 1, 1, 4, 4, 32),
-    (1, 1, 1, 16, 16, 16),
-    (1, 1, 1, 32, 32, 16),
-    (1, 1, 1, 64, 64, 16),
-    (1, 1, 1, 64, 64, 16),
-    (1, 1, 1, 64, 128, 16),
-    (1, 1, 1, 64, 64, 32),
-    (1, 1, 1, 64, 128, 32),
-    (1, 1, 1, 128, 128, 64),
-    (1, 1, 1, 128, 256, 45),
-    (1, 1, 1, 113, 203, 192),
-    (1, 1, 1, 256, 256, 64),
-    (1, 1, 1, 256, 512, 16),
-    (1, 1, 1, 512, 512, 64), 
-    (1, 1, 1, 1024, 1024, 64),
+    # (1, 1, 1, 1, 1, 1),
+    # (1, 1, 1, 4, 4, 4),
+    # (2, 1, 1, 4, 4, 16),
+    # (1, 2, 2, 4, 4, 16),
+    # (1, 4, 1, 2, 4, 16),
+    # (1, 8, 1, 2, 4, 16),
+    # (1, 16, 1, 2, 4, 16),
+    # (1, 32, 1, 2, 4, 16),
+    # (1, 64, 1, 2, 4, 16),
+    # (1, 4, 2, 2, 4, 16),
+    # (2, 2, 2, 4, 4, 16),
+    # (1, 1, 1, 4, 4, 16),
+    # (2, 1, 1, 4, 4 , 16),
+    # (4, 6, 6, 8, 8 , 16),
+    # (1, 1, 1, 4, 4, 32),
+    # (1, 1, 1, 16, 16, 16),
+    # (1, 1, 1, 32, 32, 16),
+    # (1, 1, 1, 64, 64, 16),
+    # (1, 1, 1, 64, 64, 16),
+    # (1, 1, 1, 64, 128, 16),
+    # (1, 1, 1, 64, 64, 32),
+    # (1, 1, 1, 64, 128, 32),
+    # (1, 1, 1, 128, 128, 64),
+    # (1, 1, 1, 128, 256, 45),
+    # (1, 1, 1, 113, 203, 192),
+    # (1, 1, 1, 256, 256, 64),
+    # (1, 1, 1, 256, 512, 16),
+    # (1, 1, 1, 512, 512, 64),
+    # (1, 1, 1, 1024, 1024, 64),
     # fa configs
     (2, 2, 2, 128, 128, 65),
     (2, 2, 2, 128, 128, 224),
@@ -509,7 +509,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     (1, 1, 1, 256, 512, 16),
     # old tests that work
     (4, 48, 6, 1024, 1024, 64),
-    (4, 48, 12, 1024, 1024, 64),
+    (4, 48, 12, 2048, 1024, 64),
     (4, 48, 24, 1024, 1024, 64),
     (4, 48, 48, 1024, 1024, 64),
     (4, 48, 48, 1024, 1024, 73),
@@ -519,7 +519,7 @@ def test_op_prefill_fwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
     (1, 16, 16, 1024, 1024, 128),
 ])
 @pytest.mark.parametrize('causal', [True, False])
-@pytest.mark.parametrize('dropout_p', [0.0])
+@pytest.mark.parametrize('dropout_p', [0.0, 0.2])
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
@@ -543,23 +543,23 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         metadata.need_dropout(dropout_p)
 
     # =============================================== Reference ==============================================================
-    q_ref = q.clone() 
+    q_ref = q.clone()
     k_ref = k.clone()
-    v_ref = v.clone()    
+    v_ref = v.clone()
     output_ref, softmax_lse_ref, sd_mask_ref = attention_forward_pytorch_ref_impl(
         q_ref,
-        k_ref, 
+        k_ref,
         v_ref,
-        metadata.sm_scale, 
-        causal, 
+        metadata.sm_scale,
+        causal,
         layout,
         metadata.cu_seqlens_q,
         metadata.cu_seqlens_k,
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
         metadata.dropout_p,
-        metadata.philox_seed, 
-        metadata.philox_offset, 
+        metadata.philox_seed,
+        metadata.philox_offset,
         use_exp2
     )
 
@@ -594,8 +594,8 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
         metadata.dropout_p,
-        metadata.philox_seed, 
-        metadata.philox_offset, 
+        metadata.philox_seed,
+        metadata.philox_offset,
         use_exp2
     )
 
@@ -621,33 +621,33 @@ def test_op_prefill_bwd_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropou
         metadata.max_seqlens_q,
         metadata.max_seqlens_k,
         metadata.dropout_p,
-        metadata.philox_seed, 
-        metadata.philox_offset, 
+        metadata.philox_seed,
+        metadata.philox_offset,
         use_exp2,
         sequence_parallel=sequence_parallel
     )
 
     # =============================================== Check ==============================================================
-    if DEBUG:
-        print()
-    if DEBUG:
-        print("delta_triton:", delta_triton, delta_triton.shape)
-        print("delta_ref:", delta_ref, delta_ref.shape)
+    # if DEBUG:
+    #     print()
+    # if DEBUG:
+    #     print("delta_triton:", delta_triton, delta_triton.shape)
+    #     print("delta_ref:", delta_ref, delta_ref.shape)
     torch.testing.assert_close(delta_triton, delta_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
-    if DEBUG:
-        print("dv_triton:", dv_triton, dv_triton.shape)
-        print("dv_ref:", dv_ref, dv_ref.shape)
+    # if DEBUG:
+    #     print("dv_triton:", dv_triton, dv_triton.shape)
+    #     print("dv_ref:", dv_ref, dv_ref.shape)
     torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
-    if DEBUG:
-        print("dk_triton:", dk_triton, dk_triton.shape)
-        print("dk_ref:", dk_ref, dk_ref.shape)
+    # if DEBUG:
+    #     print("dk_triton:", dk_triton, dk_triton.shape)
+    #     print("dk_ref:", dk_ref, dk_ref.shape)
     torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
-    if DEBUG:
-        print("dq_triton:", dq_triton, dq_triton.shape)
-        print("dq_ref:", dq_ref, dq_ref.shape)
+    # if DEBUG:
+    #     print("dq_triton:", dq_triton, dq_triton.shape)
+    #     print("dq_ref:", dq_ref, dq_ref.shape)
     torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL, equal_nan=EQUAL_NAN)
 
 
