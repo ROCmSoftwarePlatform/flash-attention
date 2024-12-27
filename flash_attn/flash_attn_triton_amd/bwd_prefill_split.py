@@ -14,64 +14,128 @@ tl_DROPOUT_DUMP: tl.constexpr = DROPOUT_DUMP
 # Delta: (batch, nheads_q, max_seqlens_q), same as softmax_lse defined at fwd_prefill.py line 607
 @triton.jit
 def _bwd_preprocess(
-    Out,
-    DO,
+    O, DO,
     Delta,
     stride_ob, stride_oh, stride_om, stride_ok,
     stride_dob, stride_doh, stride_dom, stride_dok,
     stride_deltab, stride_deltah, stride_deltam,
     cu_seqlens_q,
     max_seqlen_q,
+    H,
     BLOCK_M: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
-    N_CTX_Q: tl.constexpr,
-    H: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ACTUAL_HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
     # Compute batch and head indices
     pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
-    off_b = pid_bh // H
-    off_h = pid_bh % H
+    pid_b = pid_bh // H
+    pid_h = pid_bh % H
 
+    # Compute actual sequence length
     if IS_VARLEN:
-        # Compute actual sequence length
-        q_start = tl.load(cu_seqlens_q + off_b)
-        q_end = tl.load(cu_seqlens_q + off_b + 1)
-        N_CTX_Q = q_end - q_start
+        q_start = tl.load(cu_seqlens_q + pid_b)
+        q_end = tl.load(cu_seqlens_q + pid_b + 1)
+        seqlen_q = q_end - q_start
     else:
         q_start = 0
-        N_CTX_Q = max_seqlen_q
+        seqlen_q = max_seqlen_q
 
     # compute offsets
-    off_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    off_d = tl.arange(0, BLOCK_DMODEL)
-    o_offset = Out + off_b * stride_ob + off_h * stride_oh + q_start * stride_om
-    do_offset = DO + off_b * stride_ob + off_h * stride_oh + q_start * stride_om
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_k = tl.arange(0, HEAD_DIM)
+    O += pid_b * stride_ob + pid_h * stride_oh + q_start * stride_om
+    DO += pid_b * stride_ob + pid_h * stride_oh + q_start * stride_om
     # create masks
-    mask_m = off_m < N_CTX_Q
-    mask_d = off_d < ACTUAL_BLOCK_DMODEL
-    mask_md = mask_m[:, None] & mask_d[None, :]
+    mask_m = offs_m[:, None] < seqlen_q
+    mask_md = mask_m[:, None]
+    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
+    if PADDED_HEAD:
+        mask_md &= offs_k[None, :] < ACTUAL_HEAD_DIM
     # compute pointers
-    out_ptrs = o_offset + off_m[:, None] * stride_om + off_d[None, :] * stride_ok
-    do_ptrs = do_offset + off_m[:, None] * stride_dom + off_d[None, :] * stride_dok
+    out_ptrs = O + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
+    do_ptrs = DO + offs_m[:, None] * stride_dom + offs_k[None, :] * stride_dok
     # load
     # TODO: tutorial only has do converted to f32 but not o, check if it is the same
     o = tl.load(out_ptrs, mask=mask_md, other=0.0).to(tl.float32)
     do = tl.load(do_ptrs, mask=mask_md, other=0.0).to(tl.float32)
     # compute and write-back to delta
     delta = tl.sum(o * do, axis=1)
-    delta_offset = Delta + off_b * stride_deltab + off_h * stride_deltah + q_start * stride_deltam
-    delta_ptrs = delta_offset + off_m * stride_deltam
+    delta_offset = Delta + pid_b * stride_deltab + pid_h * stride_deltah + q_start * stride_deltam
+    delta_ptrs = delta_offset + offs_m * stride_deltam
     tl.store(delta_ptrs, delta, mask=mask_m)
 
 
+# The main inner-loop logic for computing dK and dV.
+@triton.jit
+def _attn_bwd_dkdv(dk, dv,  # output
+                   Q, k, v, DO, M, D,  # input tensor
+                   stride_qm, stride_qk,  # shared by Q/DO.
+                   BLOCK_M1: tl.constexpr,  # 16
+                   BLOCK_N1: tl.constexpr,  # 128
+                   HEAD_DIM: tl.constexpr,  #
+                   ACTUAL_HEAD_DIM: tl.constexpr,  #
+                   dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
+                   seqlen_q, seqlen_k,
+                   # Filled in by the wrapper.
+                   start_n, start_m, num_steps,  #
+                   MASK: tl.constexpr):
+    offs_m = start_m + tl.arange(0, BLOCK_M1)  # start_m + (0, 15)
+    offs_n = start_n + tl.arange(0, BLOCK_N1)  # start_m + (0, 127)
+    offs_k = tl.arange(0, HEAD_DIM)
+    # mask to make sure not OOB of seqlen_q
+    mask_m = offs_m < seqlen_q
+    mask_qT = mask_m[None, :]
+    mask_do = mask_m[:, None]
+    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
+    # if HEAD_DIM is padded
+    if PADDED_HEAD:
+        mask_qT &= offs_k[:, None] < ACTUAL_HEAD_DIM
+        mask_do &= offs_k[None, :] < ACTUAL_HEAD_DIM
+    # Q and DO are (seqlen_q, head_dim)
+    # qT_ptrs = (1, BLOCK_M1) + (HEAD_DIM, 1), transpose of q
+    qT_ptrs = Q + offs_m[None, :] * stride_qm + offs_k[:, None] * stride_qk
+    # do_ptrs = (BLOCK_M1, 1) + (1, HEAD_DIM), NOT transposed
+    do_ptrs = DO + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+    # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
+    tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
+    curr_m = start_m
+    step_m = BLOCK_M1
+    for blk_idx in range(num_steps):
+        qT = tl.load(qT_ptrs, mask=mask_qT, other=0.0)
+        # Load m before computing qk to reduce pipeline stall.
+        offs_m = curr_m + tl.arange(0, BLOCK_M1)
+        m = tl.load(M + offs_m, mask=offs_m < seqlen_q, other=0.0)
+        qkT = tl.dot(k, qT)
+        pT = tl.math.exp2(qkT - m[None, :])
+        # Autoregressive masking.
+        if MASK:
+            mask = (offs_m[None, :] >= offs_n[:, None])
+            pT = tl.where(mask, pT, 0.0)
+        do = tl.load(do_ptrs, mask=mask_do, other=0.0)
+        # Compute dV.
+        ppT = pT
+        ppT = ppT.to(tl.float16)
+        dv += tl.dot(ppT, do)
+        # D (= delta) is pre-divided by ds_scale.
+        Di = tl.load(D + offs_m, mask=offs_m < seqlen_q, other=0.0)
+        # Compute dP and dS.
+        dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
+        dsT = pT * (dpT - Di[None, :])
+        dsT = dsT.to(tl.float16)
+        dk += tl.dot(dsT, tl.trans(qT))
+        # Increment pointers.
+        curr_m += step_m
+        qT_ptrs += step_m * stride_qm
+        do_ptrs += step_m * stride_qm
+    return dk, dv
+
+# grid = (max_seqlen_k // BLOCK_N1, 1, batch * nheads_q)
 @triton.jit
 def _bwd_kernel(
     Q, K, V, sm_scale, Out, DO, DQ, DK, DV,
     L, Delta,
-    dropout_mask,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
     stride_vb, stride_vh, stride_vn, stride_vk,
@@ -86,53 +150,152 @@ def _bwd_kernel(
     BLOCK_M2: tl.constexpr,
     BLOCK_N2: tl.constexpr,
     BLK_SLICE_FACTOR: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ACTUAL_HEAD_DIM: tl.constexpr,
     CAUSAL: tl.constexpr,
     DROPOUT: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     # program ids
-    off_bh = tl.program_id(0)
-    off_b = off_bh // HQ
-    off_hq = off_bh % HQ
-    off_hk = off_hq
+    pid = tl.program_id(0)
+    bhqid = tl.program_id(2)
+    bid = bhqid // HQ
+    hqid = bhqid % HQ
 
+    # figure out varlen start and end
     if IS_VARLEN:
         # Compute actual sequence lengths
-        q_start = tl.load(cu_seqlens_q + off_b)
-        q_end = tl.load(cu_seqlens_q + off_b + 1)
-        k_start = tl.load(cu_seqlens_k + off_b)
-        k_end = tl.load(cu_seqlens_k + off_b + 1)
-        N_CTX_Q = q_end - q_start
-        N_CTX_K = k_end - k_start
+        q_start = tl.load(cu_seqlens_q + bid)
+        q_end = tl.load(cu_seqlens_q + bid + 1)
+        k_start = tl.load(cu_seqlens_k + bid)
+        k_end = tl.load(cu_seqlens_k + bid + 1)
+        seqlen_q = q_end - q_start
+        seqlen_k = k_end - k_start
     else:
         q_start = 0
         k_start = 0
-        N_CTX_Q = max_seqlen_q
-        N_CTX_K = max_seqlen_k
+        seqlen_q = max_seqlen_q
+        seqlen_k = max_seqlen_k
+
+    # Figure out causal starting block since we have seqlen_q >=< seqlen_k.
+    # Unlike forward pass where we tile on M dim and iterate on N dim, so that
+    # we can skip some M blocks, in backward pass, we tile on the N dim for kv
+    # and iterate over the M. In this way, we cannot skip N blocks, but only to
+    # determine the starting M blocks to skip some initial blocks masked by
+    # causal.
+    # if CAUSAL: it's always causal in the bwd
+    m_blocks = tl.cdiv(seqlen_q, BLOCK_M1)
+    m_blocks_causal = tl.cdiv((pid + 1) * BLOCK_M1 + seqlen_q - seqlen_k, BLOCK_M1)
+    m_blocks = min(m_blocks, m_blocks_causal)
+    # If seqlen_q > seqlen_k, skip the iterations where all M are masked
+    # out by the causal mask
+    if m_blocks <= 0:
+        return
+
+    # If MQA / GQA, set the K and V head offsets appropriately.
+    GROUP_SIZE = HQ // HK
+    if GROUP_SIZE != 1:
+        off_hk = hqid // GROUP_SIZE
+    else:
+        off_hk = hqid
 
     # input tensor offsets
-    q_offset = Q + off_b * stride_qb + off_hq * stride_qh + q_start * stride_qm
-    k_offset = K + off_b * stride_kb + off_hk * stride_kh + k_start * stride_kn
-    v_offset = V + off_b * stride_vb + off_hk * stride_vh + k_start * stride_vn
-    do_offset = DO + off_b * stride_qb + off_hq * stride_qh + q_start * stride_qm
-    l_offset = L + off_b * stride_deltab + off_hq * stride_deltah + q_start * stride_deltam
-    delta_offset = Delta + off_b * stride_deltab + off_hq * stride_deltah + q_start * stride_deltam
+    Q +=  bid * stride_qb + hqid * stride_qh + q_start * stride_qm
+    K +=  bid * stride_kb + off_hk * stride_kh + k_start * stride_kn
+    V +=  bid * stride_vb + off_hk * stride_vh + k_start * stride_vn
+    DO +=  bid * stride_qb + hqid * stride_qh + q_start * stride_qm
+    L +=  bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
+    Delta +=  bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
+    # output tensor offsets
+    DQ += bid * stride_qb + hqid * stride_qh + q_start * stride_qm
+    DK += bid * stride_kb + off_hk * stride_kh + k_start * stride_kn
+    DV += bid * stride_vb + off_hk * stride_vh + k_start * stride_vn
 
+    # dropout is a boolean mask that will clear out the multiplicant tensor
+    # wherever the dropout's entry is 0. It is generated by the tl.rand(seed,
+    # offset), where seed is int and offset is a int tensor splatting across
+    # all the entries.
+    # variables:
+    # dropout_mask: (b, hq, sq, sk) float32 container of dropout mask, for
+    #   debug purpose so directly loading pytorch tensor intialized outside
+    # dropout_p: float32, dropout probablity
+    # philox_seed: int, seed number for generating the dropout
+    # philox_offset_base: int, base number of offset
+    # dropout_offset: int this is the offset of philox_offset_base with batch
+    #   ID and headq ID. This will be splatted inside sub-functions
+    #   to (BLOCK_M, BLOCK_N)
     if DROPOUT:
-        batch_philox_offset = philox_offset_base + off_b * stride_dropoutb + off_hq * stride_dropouth #+ q_start * stride_dropoutm
-        dropout_offset = dropout_mask + off_b * stride_dropoutb + off_hq * stride_dropouth #+ q_start * stride_dropoutm
+        batch_philox_offset = philox_offset_base + bid * stride_dropoutb + hqid * stride_dropouth
+        dropout_offset = dropout_mask + bid * stride_dropoutb + hqid * stride_dropouth
     else:
         batch_philox_offset = 0
         dropout_offset = 0
 
+    start_n = pid * BLOCK_N1
+    start_m = start_n
+    start_delta = tl.cdiv(seqlen_q - seqlen_k, BLOCK_M1) * BLOCK_M1
+    start_m = min(start_m - start_delta, 0)
 
-    # output tensor offsets
-    dq_offset = DQ + off_b * stride_qb + off_hq * stride_qh + q_start * stride_qm
-    dk_offset = DK + off_b * stride_kb + off_hk * stride_kh + k_start * stride_kn
-    dv_offset = DV + off_b * stride_vb + off_hk * stride_vh + k_start * stride_vn
+    offs_k = tl.arange(0, HEAD_DIM)
+    offs_n = start_n + tl.arange(0, BLOCK_N1)
+
+    # head_dim mask for loading K and V
+    mask_kv = offs_n[:, None] < seqlen_k
+    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
+    if PADDED_HEAD:
+        mask_k = offs_k < ACTUAL_HEAD_DIM
+        mask_kv &= mask_k[None, :]
+    # load K and V: they stay in SRAM throughout the inner loop.
+    k_ptrs = K + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk
+    v_ptrs = V + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk
+    k = tl.load(k_ptrs, mask=mask_kv, other=0.0)
+    v = tl.load(v_ptrs, mask=mask_kv, other=0.0)
+
+    MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR
+    num_steps = BLOCK_N1 // MASK_BLOCK_M1
+
+    dk = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
+    dv = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
+
+    dk, dv = _attn_bwd_dkdv(
+        dk, dv,
+        Q, k, v, DO, L, Delta,
+        stride_qm, stride_qk,
+        MASK_BLOCK_M1, BLOCK_N1,
+        HEAD_DIM,
+        ACTUAL_HEAD_DIM,
+        dropout_p, philox_seed, batch_philox_offset, dropout_offset,
+        start_n, start_m, num_steps,
+        MASK=True,
+    )
+
+    # we go through one time w/ mask so that we have guarantee that no more mask is needed
+    start_m += num_steps * MASK_BLOCK_M1
+    # TODO: is this seqlen_k or _Q
+    num_steps = (seqlen_q - start_m) // BLOCK_M1
+
+    dk, dv = _attn_bwd_dkdv(
+        dk, dv,
+        Q, k, v,
+        DO,
+        L, Delta,
+        stride_qm, stride_qk,
+        BLOCK_M1, BLOCK_N1,
+        HEAD_DIM, ACTUAL_HEAD_DIM,
+        dropout_p, philox_seed, batch_philox_offset,
+        start_n, start_m, num_steps,
+        MASK=False,
+    )
+
+    # TODO: simply copied over, CHANGE THIS!!!
+    # Write back dV and dK.
+    tl.store(dv_ptrs, dv)
+    dk *= sm_scale
+    tl.store(dk_ptrs, dk)
+
+    # TODO: dv section
+
 
 
 # NOTE: smaller blocks have lower accuracy. more accumlation error probably 128 * 128 seems good but leads to oom. 64 * 64 has accumlation errors but no oom.
@@ -165,7 +328,7 @@ def attention_prefill_backward_triton_split_impl(
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
-    softmax_lse = softmax_lse.contiguous()
+    softmax_lse = softmax_lse.contiguous()  # (batch, head_q, seqlen_q)
     do = do.contiguous()
 
     # get strides and shape
@@ -186,8 +349,8 @@ def attention_prefill_backward_triton_split_impl(
     # TODO: is this 32 or 16? why are we padding to power of 2 (instead of being power of 2 directly)
     padded_d_model = 1 << (head_size - 1).bit_length()
     padded_d_model = max(padded_d_model, 16)
-    BLOCK_DMODEL = padded_d_model
-    ACTUAL_BLOCK_DMODEL = head_size
+    HEAD_DIM = padded_d_model
+    ACTUAL_HEAD_DIM = head_size
     # meta-parameters
     # TODO: fix num_stages later
     NUM_WARPS, NUM_STAGES = 4, 1
@@ -205,19 +368,17 @@ def attention_prefill_backward_triton_split_impl(
         stride_deltab, stride_deltah, stride_deltam = delta.stride()
     pre_grid = (triton.cdiv(max_seqlen_q, PRE_BLOCK), batch * nheads_q)
     _bwd_preprocess[pre_grid](
-        o,
-        do,
+        o, do,
         delta,
         stride_ob, stride_oh, stride_om, stride_ok,
         stride_ob, stride_oh, stride_om, stride_ok,
         stride_deltab, stride_deltah, stride_deltam,
         cu_seqlens_q,
         max_seqlen_q,
+        nheads_q,
         BLOCK_M=PRE_BLOCK,
-        BLOCK_DMODEL=BLOCK_DMODEL,
-        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
-        N_CTX_Q=max_seqlen_q,
-        H=nheads_q,
+        HEAD_DIM=HEAD_DIM,
+        ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
         IS_VARLEN=IS_VARLEN
     )
 
@@ -250,8 +411,8 @@ def attention_prefill_backward_triton_split_impl(
         BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,
         BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,
         BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
-        BLOCK_DMODEL=BLOCK_DMODEL,
-        ACTUAL_BLOCK_DMODEL=ACTUAL_BLOCK_DMODEL,
+        HEAD_DIM=HEAD_DIM,
+        ACTUAL_HEAD_DIM=ACTUAL_HEAD_DIM,
         CAUSAL=causal,
         DROPOUT=use_dropout,
         USE_EXP2=use_exp2,

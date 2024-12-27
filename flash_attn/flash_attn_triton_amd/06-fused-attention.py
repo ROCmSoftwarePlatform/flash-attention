@@ -311,6 +311,7 @@ def _attn_bwd_dq(dq, q, K, V,  #
     return dq
 
 
+# grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
 @triton.jit
 def _attn_bwd(Q, K, V, sm_scale,  #
               DO,  #
