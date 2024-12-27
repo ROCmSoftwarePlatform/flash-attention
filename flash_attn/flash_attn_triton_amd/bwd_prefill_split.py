@@ -72,6 +72,7 @@ def _bwd_preprocess(
 def _attn_bwd_dkdv(dk, dv,  # output
                    Q, k, v, DO, M, D,  # input tensor
                    stride_qm, stride_qk,  # shared by Q/DO.
+                   stride_dropoutm, stride_dropoutn,  #
                    BLOCK_M1: tl.constexpr,  # 16
                    BLOCK_N1: tl.constexpr,  # 128
                    HEAD_DIM: tl.constexpr,  #
@@ -80,12 +81,14 @@ def _attn_bwd_dkdv(dk, dv,  # output
                    seqlen_q, seqlen_k,
                    # Filled in by the wrapper.
                    start_n, start_m, num_steps,  #
-                   MASK: tl.constexpr):
+                   MASK: tl.constexpr,
+                   DROPOUT: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M1)  # start_m + (0, 15)
     offs_n = start_n + tl.arange(0, BLOCK_N1)  # start_m + (0, 127)
     offs_k = tl.arange(0, HEAD_DIM)
     # mask to make sure not OOB of seqlen_q
     mask_m = offs_m < seqlen_q
+    mask_n = offs_n < seqlen_k
     mask_qT = mask_m[None, :]
     mask_do = mask_m[:, None]
     PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
@@ -104,6 +107,18 @@ def _attn_bwd_dkdv(dk, dv,  # output
     step_m = BLOCK_M1
     for blk_idx in range(num_steps):
         qT = tl.load(qT_ptrs, mask=mask_qT, other=0.0)
+        # generate dropout mask
+        if DROPOUT:
+            # NOTE: dropout is transposed because it is used to mask pT
+            batch_philox_offset += offs_m[None, :] * stride_dropoutm + offs_n[:, None] * stride_dropoutn
+            if tl_DROPOUT_USE_PYTORCH:
+                dropout_offset += offs_m[None, :] * stride_dropoutm + offs_n[:, None] * stride_dropoutn
+                dropout_mask = tl.load(dropout_offset, mask=mask_m[:, None] & mask_n[None, :])
+            else:
+                rand_vals = tl.rand(philox_seed, batch_philox_offset)
+                dropout_mask = rand_vals > dropout_p
+            dropout_scale = 1/ (1 - dropout_p)
+
         # Load m before computing qk to reduce pipeline stall.
         offs_m = curr_m + tl.arange(0, BLOCK_M1)
         m = tl.load(M + offs_m, mask=offs_m < seqlen_q, other=0.0)
@@ -115,13 +130,18 @@ def _attn_bwd_dkdv(dk, dv,  # output
             pT = tl.where(mask, pT, 0.0)
         do = tl.load(do_ptrs, mask=mask_do, other=0.0)
         # Compute dV.
-        ppT = pT
+        if DROPOUT:
+            ppT = tl.where(dropout_mask, pT, 0.0) * dropout_scale
+        else:
+            ppT = pT
         ppT = ppT.to(tl.float16)
         dv += tl.dot(ppT, do)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m, mask=offs_m < seqlen_q, other=0.0)
         # Compute dP and dS.
         dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
+        if DROPOUT:
+            dpT = tl.where(dropout_mask, dpT, 0.0) * dropout_scale
         dsT = pT * (dpT - Di[None, :])
         dsT = dsT.to(tl.float16)
         dk += tl.dot(dsT, tl.trans(qT))
@@ -129,13 +149,94 @@ def _attn_bwd_dkdv(dk, dv,  # output
         curr_m += step_m
         qT_ptrs += step_m * stride_qm
         do_ptrs += step_m * stride_qm
+        dropout_offset += step_m * stride_qm
+        batch_philox_offset += step_m * stride_qm
     return dk, dv
+
+
+# the main inner-loop logic for computing dQ
+@triton.jit
+def _attn_bwd_dq(dq, q, K, V,  #
+                 do, m, Delta,
+                 # shared by Q/K/V/DO.
+                 stride_qm, stride_qk, stride_kn, stride_dropoutm, stride_dropoutn,  #
+                 seqlen_q, seqlen_k,  #
+                 BLOCK_M2: tl.constexpr,  #
+                 BLOCK_N2: tl.constexpr,  #
+                 HEAD_DIM: tl.constexpr,
+                 ACTUAL_HEAD_DIM: tl.constexpr,  #
+                 dropout_p, philox_seed, batch_philox_offset, dropout_offset,  #
+                 # Filled in by the wrapper.
+                 start_m, start_n, num_steps,  #
+                 MASK: tl.constexpr,
+                 DROPOUT: tl.constexpr):
+    offs_m = start_m + tl.arange(0, BLOCK_M2)
+    offs_n = start_n + tl.arange(0, BLOCK_N2)
+    offs_k = tl.arange(0, HEAD_DIM)
+
+    # mask to make sure not OOB of seqlen_q
+    mask_m = offs_m < seqlen_q
+    mask_n = offs_n < seqlen_k
+    mask_kT = mask_n[None, :]
+    PADDED_HEAD: tl.constexpr = (ACTUAL_HEAD_DIM != HEAD_DIM)
+    # if HEAD_DIM is padded
+    if PADDED_HEAD:
+        mask_kT &= offs_k[:, None] < ACTUAL_HEAD_DIM
+
+    kT_ptrs = K + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_qk
+    vT_ptrs = V + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_qk
+    # D (= delta) is pre-divided by ds_scale.
+    Di = tl.load(Delta + offs_m, mask=mask_m, other=0.0)
+    # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
+    tl.static_assert(BLOCK_M2 % BLOCK_N2 == 0)
+    curr_n = start_n
+    step_n = BLOCK_N2
+    for blk_idx in range(num_steps):
+        kT = tl.load(kT_ptrs, mask=mask_kT, others=0.0)
+        vT = tl.load(vT_ptrs, mask=mask_kT, others=0.0)
+
+        if DROPOUT:
+            # NOTE: dropout is NOT transposed unlike _attn_bwd_dkdv
+            batch_philox_offset += offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
+            if tl_DROPOUT_USE_PYTORCH:
+                dropout_offset += offs_m[:, None] * stride_dropoutm + offs_n[None, :] * stride_dropoutn
+                dropout_mask = tl.load(dropout_offset, mask=mask_m[None, :] & mask_n[:, None])
+            else:
+                rand_vals = tl.rand(philox_seed, batch_philox_offset)
+                dropout_mask = rand_vals > dropout_p
+            dropout_scale = 1/ (1 - dropout_p)
+
+        qk = tl.dot(q, kT)
+        p = tl.math.exp2(qk - m)
+        # Autoregressive masking.
+        if MASK:
+            offs_n = curr_n + tl.arange(0, BLOCK_N2)
+            mask = (offs_m[:, None] >= offs_n[None, :])
+            p = tl.where(mask, p, 0.0)
+        # Compute dP and dS.
+        dp = tl.dot(do, vT).to(tl.float32)
+        if DROPOUT:
+            p = tl.where(dropout_mask, p, 0.0) * dropout_scale
+            dp = tl.where(dropout_mask, dp, 0.0) * dropout_scale
+        ds = p * (dp - Di[:, None])
+        ds = ds.to(tl.float16)
+        # Compute dQ.
+        # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
+        dq += tl.dot(ds, tl.trans(kT))
+        # Increment pointers.
+        curr_n += step_n
+        kT_ptrs += step_n * stride_kn
+        vT_ptrs += step_n * stride_kn
+        dropout_offset += step_n * stride_kn
+        batch_philox_offset += step_n * stride_kn
+    return dq
+
 
 # grid = (max_seqlen_k // BLOCK_N1, 1, batch * nheads_q)
 @triton.jit
 def _bwd_kernel(
     Q, K, V, sm_scale, Out, DO, DQ, DK, DV,
-    L, Delta,
+    M, Delta,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
     stride_vb, stride_vh, stride_vn, stride_vk,
@@ -157,6 +258,7 @@ def _bwd_kernel(
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    LN2: tl.constexpr = 0.6931471824645996  # = ln(2)
     # program ids
     pid = tl.program_id(0)
     bhqid = tl.program_id(2)
@@ -184,14 +286,6 @@ def _bwd_kernel(
     # and iterate over the M. In this way, we cannot skip N blocks, but only to
     # determine the starting M blocks to skip some initial blocks masked by
     # causal.
-    # if CAUSAL: it's always causal in the bwd
-    m_blocks = tl.cdiv(seqlen_q, BLOCK_M1)
-    m_blocks_causal = tl.cdiv((pid + 1) * BLOCK_M1 + seqlen_q - seqlen_k, BLOCK_M1)
-    m_blocks = min(m_blocks, m_blocks_causal)
-    # If seqlen_q > seqlen_k, skip the iterations where all M are masked
-    # out by the causal mask
-    if m_blocks <= 0:
-        return
 
     # If MQA / GQA, set the K and V head offsets appropriately.
     GROUP_SIZE = HQ // HK
@@ -205,7 +299,7 @@ def _bwd_kernel(
     K +=  bid * stride_kb + off_hk * stride_kh + k_start * stride_kn
     V +=  bid * stride_vb + off_hk * stride_vh + k_start * stride_vn
     DO +=  bid * stride_qb + hqid * stride_qh + q_start * stride_qm
-    L +=  bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
+    M +=  bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
     Delta +=  bid * stride_deltab + hqid * stride_deltah + q_start * stride_deltam
     # output tensor offsets
     DQ += bid * stride_qb + hqid * stride_qh + q_start * stride_qm
@@ -234,7 +328,8 @@ def _bwd_kernel(
 
     start_n = pid * BLOCK_N1
     start_m = start_n
-    start_delta = tl.cdiv(seqlen_q - seqlen_k, BLOCK_M1) * BLOCK_M1
+    seqlen_delta = seqlen_q - seqlen_k
+    start_delta = tl.cdiv(seqlen_delta, BLOCK_M1) * BLOCK_M1
     start_m = min(start_m - start_delta, 0)
 
     offs_k = tl.arange(0, HEAD_DIM)
@@ -260,11 +355,10 @@ def _bwd_kernel(
 
     dk, dv = _attn_bwd_dkdv(
         dk, dv,
-        Q, k, v, DO, L, Delta,
+        Q, k, v, DO, M, Delta,
         stride_qm, stride_qk,
         MASK_BLOCK_M1, BLOCK_N1,
-        HEAD_DIM,
-        ACTUAL_HEAD_DIM,
+        HEAD_DIM, ACTUAL_HEAD_DIM,
         dropout_p, philox_seed, batch_philox_offset, dropout_offset,
         start_n, start_m, num_steps,
         MASK=True,
@@ -277,24 +371,77 @@ def _bwd_kernel(
 
     dk, dv = _attn_bwd_dkdv(
         dk, dv,
-        Q, k, v,
-        DO,
-        L, Delta,
+        Q, k, v, DO, M, Delta,
         stride_qm, stride_qk,
         BLOCK_M1, BLOCK_N1,
         HEAD_DIM, ACTUAL_HEAD_DIM,
-        dropout_p, philox_seed, batch_philox_offset,
+        dropout_p, philox_seed, batch_philox_offset, dropout_offset,
         start_n, start_m, num_steps,
         MASK=False,
     )
 
-    # TODO: simply copied over, CHANGE THIS!!!
     # Write back dV and dK.
-    tl.store(dv_ptrs, dv)
+    tl.store(DV, dv, mask=mask_kv)
     dk *= sm_scale
-    tl.store(dk_ptrs, dk)
+    tl.store(DK, dk, mask=mask_kv)
 
-    # TODO: dv section
+    # THIS BLOCK DOES DQ:
+    # DQ tiles on M dim and iterate on N dim, so we there could be some tiles we
+    # can simply skip and we need to adjust starting position.
+    # TODO: now pid is only a function of max_seqlen_k, so it's incorrect for the
+    start_m = pid * BLOCK_M2
+    # seqlen_q > seqlen_k, no need to process these tile for dq
+    if start_m + BLOCK_M2 < seqlen_delta:
+        return
+    end_n = start_m + BLOCK_M2
+    # when seqlen_q < seqlen_k, the end_n is padded
+    end_n += tl.cdiv(seqlen_delta, BLOCK_N2) * BLOCK_N2
+
+    MASK_BLOCK_N2: tl.constexpr = BLOCK_N2 // BLK_SLICE_FACTOR
+    offs_m = start_m + tl.arange(0, BLOCK_M2)
+    mask_q = offs_m[:, None] < seqlen_q
+    if PADDED_HEAD:
+        mask_k = offs_k < ACTUAL_HEAD_DIM
+        mask_q &= mask_k[None, :]
+
+    q_ptrs = Q + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+    do_ptrs = DO + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+    q = tl.load(q_ptrs, mask=mask_q, other=0.0)
+    dq = tl.zeros([BLOCK_M2, HEAD_DIM], dtype=tl.float32)
+    do = tl.load(do_ptrs, mask=mask_q, other=0.0)
+
+    m = tl.load(M + offs_m, mask=offs_m < seqlen_q, other=0.0)
+    m = m[:, None]
+
+    # Compute dQ for masked (diagonal) blocks.
+    # NOTE: This code scans each row of QK^T backward (from right to left,
+    # but inside each call to _attn_bwd_dq, from left to right), but that's
+    # not due to anything important.  I just wanted to reuse the loop
+    # structure for dK & dV above as much as possible.
+    num_steps = BLOCK_M2 // MASK_BLOCK_N2
+    dq = _attn_bwd_dq(dq, q, K, V,  #
+                      do, m, Delta,  #
+                      stride_qm, stride_qk, stride_kn, #
+                      H, N_CTX,  #
+                      BLOCK_M2, MASK_BLOCK_N2, HEAD_DIM,  #
+                      start_m, end_n - num_steps * MASK_BLOCK_N2, num_steps,  #
+                      MASK=True  #
+                      )
+    end_n -= num_steps * MASK_BLOCK_N2
+    # stage 2
+    num_steps = end_n // BLOCK_N2
+    dq = _attn_bwd_dq(dq, q, K, V,  #
+                      do, m, Delta,  #
+                      stride_qm, stride_qk, stride_kn, #
+                      H, N_CTX,  #
+                      BLOCK_M2, BLOCK_N2, HEAD_DIM,  #
+                      start_m, end_n - num_steps * BLOCK_N2, num_steps,  #
+                      MASK=False  #
+                      )
+    # Write back dQ.
+    dq_ptrs = DQ + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
+    dq *= LN2
+    tl.store(dq_ptrs, dq, mask=mask_q)
 
 
 
