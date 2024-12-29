@@ -287,6 +287,8 @@ mha_fwd_kvcache(at::Tensor &q,                                      // batch_siz
                 bool is_rotary_interleaved, // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
                 int num_splits)
 {
+    TORCH_CHECK(false, "vllm layout does not support mha_fwd_kvcache for now");
+
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16,
                 "FlashAttention only support fp16 and bf16 data type");
@@ -471,7 +473,8 @@ mha_fwd_kvcache(at::Tensor &q,                                      // batch_siz
         TORCH_CHECK(cache_batch_idx.scalar_type() == torch::kInt32, "cache_batch_idx must have dtype int32");
     }
 
-    num_splits = flash::override_num_splits_if_necessary(batch_size, num_heads, seqlen_q, head_size_8x, 0, num_splits);
+    num_splits = flash::override_num_splits_if_necessary(batch_size, num_heads, seqlen_q, head_size_8x, head_size_8x, 
+        /*p_drop=*/0, /*is_prefill=*/false, num_splits);
     TORCH_CHECK(num_splits > 0, "num_splits should greater than 0");
     TORCH_CHECK(num_splits <= 128, "num_splits greater than 128 is not supported");
 
