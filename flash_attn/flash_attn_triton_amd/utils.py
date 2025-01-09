@@ -153,17 +153,19 @@ def input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, layout, device="cud
 
     if DEBUG_INPUT:
         if layout == "bhsd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            q = torch.arange(N_CTX_Q, dtype=torch.float32, device=device).view(1, 1, N_CTX_Q, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, 1, N_CTX_K, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
         elif layout == "bshd":
-            q = torch.arange(N_CTX_Q, dtype=dtype, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
-            k = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
-            v = torch.arange(N_CTX_K, dtype=dtype, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            q = torch.arange(N_CTX_Q, dtype=torch.float32, device=device).view(1, N_CTX_Q, 1, 1).expand(*q_tensor_shape).contiguous().requires_grad_()
+            k = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
+            v = torch.arange(N_CTX_K, dtype=torch.float32, device=device).view(1, N_CTX_K, 1, 1).expand(*k_tensor_shape).contiguous().requires_grad_()
     else:
-        q = torch.randn(q_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn(k_tensor_shape, dtype=dtype, device=device, requires_grad=True)
+        q = torch.randn(q_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
+        k = torch.randn(k_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
+        v = torch.randn(k_tensor_shape, dtype=torch.float32, device=device, requires_grad=True)
+
+    q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
     
     if DEBUG_INPUT:
         sm_scale = 1
@@ -201,19 +203,21 @@ def varlen_input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, dtype, device="cuda
 
     if DEBUG_INPUT:
         # Initialize q, k, v with deterministic values
-        q = torch.arange(total_q, dtype=dtype, device=device).view(total_q, 1, 1)
+        q = torch.arange(total_q, dtype=torch.float32, device=device).view(total_q, 1, 1)
         q = q.expand(total_q, HQ, D_HEAD).contiguous().requires_grad_()
-        k = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
+        k = torch.arange(total_k, dtype=torch.float32, device=device).view(total_k, 1, 1)
         k = k.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
-        v = torch.arange(total_k, dtype=dtype, device=device).view(total_k, 1, 1)
+        v = torch.arange(total_k, dtype=torch.float32, device=device).view(total_k, 1, 1)
         v = v.expand(total_k, HK, D_HEAD).contiguous().requires_grad_()
         sm_scale = 1
     else:
         # Initialize q, k, v with random values
-        q = torch.randn((total_q, HQ, D_HEAD), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((total_k, HK, D_HEAD), dtype=dtype, device=device).requires_grad_()
+        q = torch.randn((total_q, HQ, D_HEAD), dtype=torch.float32, device=device).requires_grad_()
+        k = torch.randn((total_k, HK, D_HEAD), dtype=torch.float32, device=device).requires_grad_()
+        v = torch.randn((total_k, HK, D_HEAD), dtype=torch.float32, device=device).requires_grad_()
         sm_scale = D_HEAD ** -0.5
+
+    q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
 
     input_metadata = MetaData(sm_scale=sm_scale)
     input_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)

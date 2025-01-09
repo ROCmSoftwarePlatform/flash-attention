@@ -4,7 +4,8 @@ from .utils import DEBUG
 
 DEBUG_CORE = False
 
-def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2):
+def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
+                                    q_inv_scale=None, k_inv_scale=None, v_inv_scale=None, p_inv_scale=None, p_scale=None):
     if DEBUG_CORE:
         print()
         print("attention_forward_core_ref_impl")
@@ -17,6 +18,11 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("philox_seed:", philox_seed)
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
+        print("q_inv_scale:", q_inv_scale, q_inv_scale.shape if q_inv_scale else None)
+        print("k_inv_scale:", k_inv_scale, k_inv_scale.shape if k_inv_scale else None)
+        print("v_inv_scale:", v_inv_scale, v_inv_scale.shape if v_inv_scale else None)
+        print("p_inv_scale:", p_inv_scale, p_inv_scale.shape if p_inv_scale else None)
+        print("p_scale:", p_scale, p_scale.shape if p_scale else None)
 
     # cast to float32
     q = q.to(torch.float32)
@@ -32,6 +38,12 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
     attention_scaled_scores = sm_scale * attention_scores
     if DEBUG_CORE:
         print("attention_scaled_scores:", attention_scaled_scores, attention_scaled_scores.shape)
+
+    # FP8 descaling
+    if q_inv_scale is not None and k_inv_scale is not None:
+        attention_scaled_scores *= q_inv_scale * k_inv_scale
+        if DEBUG_CORE:
+            print("attention_scaled_scores after fp8 descaling:", attention_scaled_scores, attention_scaled_scores.shape)
 
     # Apply causal mask if necessary
     if causal:
@@ -129,9 +141,19 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
         print("softmax_lse:", softmax_lse, softmax_lse.shape)
 
     # Compute output
+    # FP8 scaling
+    if p_scale is not None:
+        p *= p_scale
+        if DEBUG_CORE:
+            print("p after fp8 scaling:", p, p.shape)
     o = torch.matmul(p, v)
     if DEBUG_CORE:
         print("o:", o, o.shape)
+    # FP8 descaling
+    if v_inv_scale is not None and p_inv_scale is not None:
+        o *= p_inv_scale * v_inv_scale
+        if DEBUG_CORE:
+            print("o after fp8 descaling:", o, o.shape)
 
     # cast back to original dtype
     o = o.to(torch.float16)
@@ -140,9 +162,10 @@ def attention_forward_core_ref_impl(q, k, v, sm_scale, causal, dropout_p, philox
 
     return o, softmax_lse, sd_mask
 
-def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2):
-    """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
+def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout, dropout_p, philox_seed, philox_offset, use_exp2,
+                                               fp8_metadata=None):
+    """Compute reference output and softmax_lse using PyTorch's built-in function"""
     # Ensure the layout is 'bhsd'
     if layout == "bshd":
         q = q.transpose(1, 2).contiguous()
@@ -150,6 +173,9 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
         v = v.transpose(1, 2).contiguous()
     elif layout != "bhsd":
         raise ValueError(f"Unknown layout {layout}")
+
+    # FP8 scaling
+    is_fp8 = fp8_metadata is not None
 
     # Prepare tensors
     batch_size, nheads_q, seq_len_q, head_dim = q.shape
@@ -169,14 +195,57 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
         q = q.reshape(batch_size * nheads_k * group_size, seq_len_q, head_dim)
         k = k.reshape(batch_size * nheads_k * group_size, seq_len_k, head_dim)
         v = v.reshape(batch_size * nheads_k * group_size, seq_len_k, head_dim)
+        # FP8 scaling
+        q_inv_scale = (
+            fp8_metadata.q_inv_scale.reshape(batch_size, nheads_k, group_size).reshape(
+                batch_size * nheads_k * group_size, 1, 1
+            )
+            if is_fp8
+            else None
+        )
+        k_inv_scale = (
+            fp8_metadata.k_inv_scale.unsqueeze(2)
+            .expand(batch_size, nheads_k, group_size)
+            .reshape(batch_size * nheads_k * group_size, 1, 1)
+            if is_fp8
+            else None
+        )
+        v_inv_scale = (
+            fp8_metadata.v_inv_scale.unsqueeze(2)
+            .expand(batch_size, nheads_k, group_size)
+            .reshape(batch_size * nheads_k * group_size, 1, 1)
+            if is_fp8
+            else None
+        )
+        p_inv_scale = (
+            fp8_metadata.p_inv_scale.reshape(batch_size, nheads_k, group_size).reshape(
+                batch_size * nheads_k * group_size, 1, 1
+            )
+            if is_fp8
+            else None
+        )
+        p_scale = (
+            fp8_metadata.p_scale.reshape(batch_size, nheads_k, group_size).reshape(
+                batch_size * nheads_k * group_size, 1, 1
+            )
+            if is_fp8
+            else None
+        )
     else:
         q = q.reshape(batch_size * nheads_q, seq_len_q, head_dim)
         k = k.reshape(batch_size * nheads_k, seq_len_k, head_dim)
         v = v.reshape(batch_size * nheads_k, seq_len_k, head_dim)
+        # FP8 scaling
+        q_inv_scale = fp8_metadata.q_inv_scale.reshape(-1, 1, 1) if is_fp8 else None
+        k_inv_scale = fp8_metadata.k_inv_scale.reshape(-1, 1, 1) if is_fp8 else None
+        v_inv_scale = fp8_metadata.v_inv_scale.reshape(-1, 1, 1) if is_fp8 else None
+        p_inv_scale = fp8_metadata.p_inv_scale.reshape(-1, 1, 1) if is_fp8 else None
+        p_scale = fp8_metadata.p_scale.reshape(-1, 1, 1) if is_fp8 else None
 
     # Call the core attention function
     o, softmax_lse, sd_mask = attention_forward_core_ref_impl(
-        q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2
+        q, k, v, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
+        q_inv_scale=q_inv_scale, k_inv_scale=k_inv_scale, v_inv_scale=v_inv_scale, p_inv_scale=p_inv_scale, p_scale=p_scale,
     )
 
     if group_size != 1:
@@ -214,11 +283,15 @@ def attention_varlen_forward_pytorch_ref_impl(
     dropout_p, 
     philox_seed, 
     philox_offset,
-    use_exp2
+    use_exp2,
+    fp8_metadata=None,
 ):
     # Ensure the layout is 'thd'
     if layout != 'thd':
         raise ValueError(f"Unsupported layout {layout}. Expected 'thd'.")
+
+    # FP8 scaling
+    is_fp8 = fp8_metadata is not None
 
     batch_size = cu_seqlens_q.shape[0] - 1
     nheads_q, nheads_k = q.shape[1], k.shape[1]
@@ -271,14 +344,56 @@ def attention_varlen_forward_pytorch_ref_impl(
             q_i = q_i.reshape(nheads_k * group_size, seqlen_q, head_dim)
             k_i = k_i.reshape(nheads_k * group_size, seqlen_k, head_dim)
             v_i = v_i.reshape(nheads_k * group_size, seqlen_k, head_dim)
+            # FP8 scaling
+            q_inv_scale = (
+                fp8_metadata.q_inv_scale[i].reshape(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            k_inv_scale = (
+                fp8_metadata.k_inv_scale[i].unsqueeze(1)
+                .expand(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            v_inv_scale = (
+                fp8_metadata.v_inv_scale[i].unsqueeze(1)
+                .expand(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            p_inv_scale = (
+                fp8_metadata.p_inv_scale[i].reshape(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
+            p_scale = (
+                fp8_metadata.p_scale[i].reshape(nheads_k, group_size)
+                .reshape(nheads_k * group_size, 1, 1)
+                if is_fp8
+                else None
+            )
         else:
             # Standard case
             q_i = q_i.reshape(nheads_q, seqlen_q, head_dim)
             k_i = k_i.reshape(nheads_k, seqlen_k, head_dim)
             v_i = v_i.reshape(nheads_k, seqlen_k, head_dim)
+            # FP8 scaling
+            q_inv_scale = fp8_metadata.q_inv_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            k_inv_scale = fp8_metadata.k_inv_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            v_inv_scale = fp8_metadata.v_inv_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            p_inv_scale = fp8_metadata.p_inv_scale[i].reshape(-1, 1, 1) if is_fp8 else None
+            p_scale = fp8_metadata.p_scale[i].reshape(-1, 1, 1) if is_fp8 else None
 
         # Call the core attention function for this sequence
-        o_i, softmax_lse_i, sd_mask_i = attention_forward_core_ref_impl(q_i, k_i, v_i, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2)
+        o_i, softmax_lse_i, sd_mask_i = attention_forward_core_ref_impl(
+            q_i, k_i, v_i, sm_scale, causal, dropout_p, philox_seed, philox_offset, use_exp2,
+            q_inv_scale=q_inv_scale, k_inv_scale=k_inv_scale, v_inv_scale=v_inv_scale, p_inv_scale=p_inv_scale, p_scale=p_scale,
+        )
 
         # Reshape outputs back to original dimensions
         if group_size != 1:
@@ -321,8 +436,9 @@ def attention_forward_pytorch_ref_impl(
     dropout_p,
     philox_seed,
     philox_offset,
-    use_exp2
-    ):
+    use_exp2,
+    fp8_metadata=None
+):
     if DEBUG:
         print()
         print("attention_forward_pytorch_ref_impl")
@@ -341,6 +457,10 @@ def attention_forward_pytorch_ref_impl(
         print("philox_offset:", philox_offset)
         print("use_exp2:", use_exp2)
 
+    # if is fp8 upcast to fp32 for torch ops to be supported
+    if fp8_metadata is not None:
+        q, k, v = q.to(torch.float32), k.to(torch.float32), v.to(torch.float32)
+
      # compute reference
     if layout == "thd":
         o_ref, softmax_lse_ref, sd_mask_ref = attention_varlen_forward_pytorch_ref_impl(
@@ -358,6 +478,7 @@ def attention_forward_pytorch_ref_impl(
             philox_seed,
             philox_offset,
             use_exp2,
+            fp8_metadata=fp8_metadata,
         )
     else:
         o_ref, softmax_lse_ref, sd_mask_ref = attention_vanilla_forward_pytorch_ref_impl(q.clone(),
@@ -369,7 +490,8 @@ def attention_forward_pytorch_ref_impl(
                                                        dropout_p,
                                                        philox_seed,
                                                        philox_offset,
-                                                       use_exp2)
+                                                       use_exp2,
+                                                       fp8_metadata=fp8_metadata)
 
     if DEBUG:
         print()
