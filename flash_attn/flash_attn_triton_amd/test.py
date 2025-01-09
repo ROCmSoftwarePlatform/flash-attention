@@ -774,9 +774,12 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     (1, 16, 16, 1024, 1024, 64),
     (1, 16, 16, 1024, 1024, 128),
     # testcase new
-    (1, 1, 1, 512, 512, 32),
-    (4, 1, 1, 512, 512, 32),
-    (4, 8, 2, 512, 512, 32),
+    (1, 1, 1, 128, 128, 32),  # base case: only one block
+    (1, 1, 1, 512, 512, 32),  # multiple block on M/N dim
+    (1, 1, 1, 512, 512, 128),  # multiple block on M/N dim and K dim
+    (4, 1, 1, 512, 512, 128),  # batch > 1
+    (4, 2, 1, 512, 512, 128),  # GQA
+    (4, 8, 2, 512, 512, 128),  # GQA
     (4, 8, 2, 512, 512, 68),
     (4, 8, 2, 1024, 512, 68),
 
@@ -786,7 +789,7 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
 @pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
-@pytest.mark.parametrize('DEBUG_INPUT', [False]) # debug output causes nans on larger tensors
+@pytest.mark.parametrize('DEBUG_INPUT', [False, True]) # debug output causes nans on larger tensors
 def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, dropout_p, use_exp2, layout, sequence_parallel, DEBUG_INPUT):
     dtype = torch.float16
     torch.manual_seed(20) # seed from test_op_bwd
@@ -890,14 +893,13 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
     )
 
     # =============================================== Check ==============================================================
-    # if DEBUG:
-    #     print()
-    # if DEBUG:
-    #     print("delta_triton:", delta_triton, delta_triton.shape)
-    #     print("delta_ref:", delta_ref, delta_ref.shape)
+    if DEBUG:
+        print()
+    if DEBUG:
+        print("delta_triton:", delta_triton, delta_triton.shape)
+        print("delta_ref:", delta_ref, delta_ref.shape)
     torch.testing.assert_close(delta_triton, delta_ref, atol=ATOL, rtol=RTOL,
                                equal_nan=EQUAL_NAN,
-                            #    msg="delta not close",
                                )
 
     # if DEBUG:
@@ -905,21 +907,18 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
     #     print("dv_ref:", dv_ref, dv_ref.shape)
     torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL,
                                equal_nan=EQUAL_NAN,
-                            #    msg="dv not close",
                                )
 
-    # if DEBUG:
-    #     print("dk_triton:", dk_triton, dk_triton.shape)
-    #     print("dk_ref:", dk_ref, dk_ref.shape)
+    if DEBUG:
+        print("dk_triton:", dk_triton, dk_triton.shape)
+        print("dk_ref:", dk_ref, dk_ref.shape)
     torch.testing.assert_close(dk_triton, dk_ref, atol=ATOL, rtol=RTOL,
                                equal_nan=EQUAL_NAN,
-                            #    msg="dk not close",
                                )
 
-    # if DEBUG:
-    #     print("dq_triton:", dq_triton, dq_triton.shape)
-    #     print("dq_ref:", dq_ref, dq_ref.shape)
+    if DEBUG:
+        print("dq_triton:", dq_triton, dq_triton.shape)
+        print("dq_ref:", dq_ref, dq_ref.shape)
     torch.testing.assert_close(dq_triton, dq_ref, atol=ATOL, rtol=RTOL,
                                equal_nan=EQUAL_NAN,
-                            #    msg="dq not close",
                                )
