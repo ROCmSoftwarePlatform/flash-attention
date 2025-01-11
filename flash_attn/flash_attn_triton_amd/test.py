@@ -16,6 +16,9 @@ ATOL, RTOL = 1e-2, 1e-2 # old standard. maybe to lose.
 # ATOL, RTOL = 1e-4, 1e-3 # to strict. there will be small diffs
 # ATOL, RTOL = 1e-5, 1e-3 # # default fp16. there will be small diffs
 EQUAL_NAN = True
+torch.set_printoptions(linewidth=200)
+import numpy as np
+np.set_printoptions(linewidth=200)
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD', [
     (4, 48, 24, 1024, 1024, 64),
@@ -774,19 +777,26 @@ def test_op_fwd_decode_int4_kv(B, Mq, Mkv, Hq, Hkv, K, dtype=torch.float16):
     (1, 16, 16, 1024, 1024, 64),
     (1, 16, 16, 1024, 1024, 128),
     # testcase new
+    (1, 1, 1, 2, 2, 2),  # base case: only one block
+    (1, 1, 1, 32, 32, 2),  # base case: only one block
     (1, 1, 1, 128, 128, 32),  # base case: only one block
     (1, 1, 1, 512, 512, 32),  # multiple block on M/N dim
     (1, 1, 1, 512, 512, 128),  # multiple block on M/N dim and K dim
     (4, 1, 1, 512, 512, 128),  # batch > 1
-    (4, 2, 1, 512, 512, 128),  # GQA
     (4, 8, 2, 512, 512, 128),  # GQA
-    (4, 8, 2, 512, 512, 68),
-    (4, 8, 2, 1024, 512, 68),
+    (4, 8, 2, 512, 512, 68),   # non-power-of-2 head_dim
+    (1, 1, 1, 192, 128, 32),  # seqlen_q > seqlen_k
+    (1, 1, 1, 128, 192, 64),  # seqlen_q < seqlen_k
+    (4, 8, 2, 512, 1024, 68),  # seqlen_q < seqlen_k
+
+# varlen
+# dropout
+# direct comparison among tutorial, Michael's implementation bwd and this one
 
 ])
 @pytest.mark.parametrize('causal', [True])
 @pytest.mark.parametrize('dropout_p', [0.0, 0.2])
-@pytest.mark.parametrize('use_exp2', [False]) # FIXME: using exp2 causes issue when used with causal
+@pytest.mark.parametrize('use_exp2', [True, False]) # FIXME: using exp2 causes issue when used with causal
 @pytest.mark.parametrize('layout', ["bhsd", "bshd", "thd"])
 @pytest.mark.parametrize('sequence_parallel', [True, False])
 @pytest.mark.parametrize('DEBUG_INPUT', [False, True]) # debug output causes nans on larger tensors
@@ -902,12 +912,13 @@ def test_op_prefill_bwd_split_impl(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, 
                                equal_nan=EQUAL_NAN,
                                )
 
-    # if DEBUG:
-    #     print("dv_triton:", dv_triton, dv_triton.shape)
-    #     print("dv_ref:", dv_ref, dv_ref.shape)
+    if DEBUG:
+        print("dv_triton:", dv_triton, dv_triton.shape)
+        print("dv_ref:", dv_ref, dv_ref.shape)
     torch.testing.assert_close(dv_triton, dv_ref, atol=ATOL, rtol=RTOL,
                                equal_nan=EQUAL_NAN,
                                )
+    print(torch.where(dv_triton == dv_ref))
 
     if DEBUG:
         print("dk_triton:", dk_triton, dk_triton.shape)

@@ -127,22 +127,23 @@ def _bwd_dkdv_inner(
 
         # Load m before computing qk to reduce pipeline stall.
         offs_m = curr_m + tl.arange(0, BLOCK_M)
+        # update the mask because offs_m advanced
+        mask_m = offs_m < seqlen_q
         m = tl.load(M + offs_m, mask=offs_m < seqlen_q)
         qkT = tl.dot(k, qT)
         # TODO: remove the scaling of m later when we removed re-scaling in fwd
         pT = tl.math.exp2(qkT * qk_scale - m[None, :] * RCP_LN2)
         # Autoregressive masking.
         if MASK:
-            mask = (offs_m[None, :] >= offs_n[:, None])
+            mask_nm = mask_n[:, None] & (offs_m[None, :] < seqlen_q)
+            mask = (offs_m[None, :] >= offs_n[:, None]) & mask_nm
             pT = tl.where(mask, pT, 0.0)
         do = tl.load(do_ptrs, mask=mask_do, other=0.0)
         # Compute dV.
         if ENABLE_DROPOUT:
-            ppT = tl.where(dropout_mask, pT, 0.0) * dropout_scale
-        else:
-            ppT = pT
-        ppT = ppT.to(tl.float16)
-        dv += tl.dot(ppT, do)
+            pT = tl.where(dropout_mask, pT, 0.0) * dropout_scale
+        pT = pT.to(tl.float16)
+        dv += tl.dot(pT, do)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m, mask=offs_m < seqlen_q)
         # Compute dP and dS.
@@ -159,6 +160,11 @@ def _bwd_dkdv_inner(
         if ENABLE_DROPOUT:
             curr_dropout_offset += step_m * stride_qm
             curr_philox_offset += step_m * stride_qm
+        mask_qT = mask_m[None, :]
+        mask_do = mask_m[:, None]
+        if PADDED_HEAD:
+            mask_qT &= offs_k[:, None] < ACTUAL_HEAD_DIM
+            mask_do &= offs_k[None, :] < ACTUAL_HEAD_DIM
     return dk, dv
 
 
@@ -211,7 +217,7 @@ def _bwd_kernel_dkdv(
     # determine the starting M blocks to skip some initial blocks masked by
     # causal.
     seqlen_delta = seqlen_q - seqlen_k
-    start_delta = seqlen_delta // BLOCK_M * BLOCK_M
+    start_delta = (seqlen_delta // BLOCK_M) * BLOCK_M
     start_n = pid * BLOCK_N
     # seqlen_q > seqlen_k: skip additional blocks at the beginning for every
     #   N-tile, i.e. add offset to start_m
@@ -373,7 +379,8 @@ def _bwd_dq_inner(
         # Autoregressive masking.
         if MASK:
             offs_n = curr_n + tl.arange(0, BLOCK_N2)
-            mask = (offs_m[:, None] >= offs_n[None, :])
+            mask_mn = mask_m[:, None] & (offs_n[None, :] < seqlen_k)
+            mask = (offs_m[:, None] >= offs_n[None, :]) & mask_mn
             p = tl.where(mask, p, 0.0)
         # Compute dP and dS.
         dp = tl.dot(do, vT).to(tl.float32)
